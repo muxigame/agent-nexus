@@ -1,0 +1,13 @@
+# Optional local guard: `uvx pre-commit install`. Mirrors the CI hygiene job.
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks
+  - repo: local
+    hooks:
+      - id: scrub-check
+        name: scrub_check
+        entry: uv run --no-project python scripts/scrub_check.py
+        language: system
+        pass_filenames: false

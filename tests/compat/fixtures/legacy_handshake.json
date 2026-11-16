@@ -1,0 +1,72 @@
+{
+  "hello": {
+    "agent_id": "pc-main",
+    "catalog": {
+      "keys": [
+        "mcps",
+        "workspaces"
+      ],
+      "mcps": {
+        "extra": {
+          "keys": [
+            "description",
+            "tools"
+          ],
+          "tools": {
+            "internal_action": {
+              "properties": [
+                "number"
+              ],
+              "required": [
+                "number"
+              ]
+            }
+          }
+        },
+        "workspace": {
+          "keys": [
+            "description",
+            "tools"
+          ],
+          "tools": {
+            "execute": {
+              "properties": [
+                "value",
+                "workdir"
+              ],
+              "required": [
+                "value"
+              ]
+            },
+            "failure": {
+              "properties": [],
+              "required": []
+            },
+            "picture": {
+              "properties": [],
+              "required": []
+            }
+          }
+        }
+      },
+      "workspaces": {
+        "project": {
+          "mcp": "workspace",
+          "path": "<workdir>"
+        }
+      }
+    },
+    "keys": [
+      "agent_id",
+      "catalog",
+      "protocol"
+    ],
+    "protocol": 1
+  },
+  "ready": {
+    "method": "ready",
+    "params": {
+      "agent_id": "pc-main"
+    }
+  }
+}

@@ -1,0 +1,186 @@
+# Public release pipeline (docs/design.md §11.2). A tag v<version> builds the signed
+# Windows installer, the updater feed, the gateway zip and the public Ubuntu package,
+# checks that none of them carries a private payload, publishes them to Aliyun OSS
+# (publish-oss: the desktop updater's feed <OSS_PUBLIC_BASE>/latest.json moves only
+# after every file is verified) and keeps a DRAFT GitHub release as an archive.
+# The private (enrollment-embedded) edition is never built here (§11.4, decision D3).
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.12"
+  TAURI_CLI_VERSION: "2.11.5"
+  # Public folder the desktop updater reads (tauri.conf.json polls <OSS_PUBLIC_BASE>/latest.json).
+  OSS_PUBLIC_BASE: ${{ vars.OSS_PUBLIC_BASE || 'https://muxigame-prod-static-cn.oss-cn-hangzhou.aliyuncs.com/agent-nexus' }}
+
+jobs:
+  version-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: tag must equal source version
+        run: uv run --no-project python scripts/version.py check --tag "${GITHUB_REF_NAME}"
+
+  windows:
+    needs: version-gate
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+          cache-all-crates: true
+      - name: Tauri CLI
+        run: cargo install tauri-cli --version "${TAURI_CLI_VERSION}" --locked
+      - run: uv sync --frozen
+      - name: Runtime archive (bundled Python and packages)
+        run: uv run python scripts/build_release.py runtime --out artifacts
+      - name: Desktop exe and signed NSIS installer
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -eu
+          if [ -z "${TAURI_SIGNING_PRIVATE_KEY}" ]; then
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY is not set; a release needs a signed updater artifact"
+            exit 1
+          fi
+          uv run python scripts/build_desktop.py --out artifacts --runtime artifacts/agent-nexus-runtime.zip
+      - name: Verify desktop artifacts
+        run: uv run python scripts/verify_client_artifacts.py --out artifacts --desktop-only --require-signature
+      - name: Updater feed (latest.json)
+        run: |
+          set -eu
+          version="${GITHUB_REF_NAME#v}"
+          uv run --no-project python scripts/make_latest_json.py \
+            --setup "artifacts/agent-nexus_${version}_x64-setup.exe" \
+            --tag "${GITHUB_REF_NAME}" --base-url "${OSS_PUBLIC_BASE}/releases/${version}" \
+            --notes "Agent Nexus ${GITHUB_REF_NAME}" --out artifacts/latest.json
+      - name: Collect
+        run: |
+          set -eu
+          version="${GITHUB_REF_NAME#v}"
+          mkdir -p dist
+          cp "artifacts/agent-nexus_${version}_x64-setup.exe" "artifacts/agent-nexus_${version}_x64-setup.exe.sig" \
+             artifacts/latest.json dist/
+          uv run --no-project python scripts/test_no_private_payload.py dist artifacts/agent-nexus.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/
+          if-no-files-found: error
+
+  linux:
+    needs: version-gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+      - run: uv sync --frozen
+      - name: Gateway zip (agent-nexus-gateway-<ver>.zip with SHA256.json and deploy/gateway)
+        run: uv run python scripts/build_release.py gateway --out dist
+      - name: Public Ubuntu package
+        run: |
+          set -eu
+          uv run python scripts/build_ubuntu.py --uv "$(command -v uv)" --out build/ubuntu
+          cp build/ubuntu/agent-nexus_*_amd64.deb dist/
+      - name: No private payload
+        run: uv run --no-project python scripts/test_no_private_payload.py dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: dist/
+          if-no-files-found: error
+
+  # Upload to OSS, check every file through its public URL, then move
+  # <prefix>/latest.json (never for a prerelease tag). Credentials are short-lived
+  # STS from GitHub OIDC: no access key is stored in this repository. Repository
+  # variables: ALIYUN_ROLE_ARN, ALIYUN_OIDC_PROVIDER_ARN (and optionally
+  # OSS_BUCKET, OSS_ENDPOINT, OSS_PREFIX, OSS_PUBLIC_BASE).
+  publish-oss:
+    needs: [windows, linux]
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+      - name: No private payload (all assets)
+        run: python3 scripts/test_no_private_payload.py release
+      - name: SHA256SUMS
+        working-directory: release
+        run: sha256sum -- $(ls | grep -v '^latest.json$') > SHA256SUMS && cat SHA256SUMS
+      - name: Aliyun credentials (OIDC)
+        id: aliyun
+        uses: aliyun/configure-aliyun-credentials-action@v1
+        with:
+          role-to-assume: ${{ vars.ALIYUN_ROLE_ARN }}
+          oidc-provider-arn: ${{ vars.ALIYUN_OIDC_PROVIDER_ARN }}
+          role-session-name: agent-nexus-release
+      - name: Upload, verify, move latest.json
+        env:
+          ALIBABA_CLOUD_ACCESS_KEY_ID: ${{ steps.aliyun.outputs.aliyun-access-key-id }}
+          ALIBABA_CLOUD_ACCESS_KEY_SECRET: ${{ steps.aliyun.outputs.aliyun-access-key-secret }}
+          ALIBABA_CLOUD_SECURITY_TOKEN: ${{ steps.aliyun.outputs.aliyun-security-token }}
+          OSS_BUCKET: ${{ vars.OSS_BUCKET }}
+          OSS_ENDPOINT: ${{ vars.OSS_ENDPOINT }}
+          OSS_PREFIX: ${{ vars.OSS_PREFIX }}
+        run: uv run --no-project --with oss2 python scripts/publish_oss.py --dist release --version "${GITHUB_REF_NAME#v}"
+
+  draft-release:
+    needs: [windows, linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+      - name: No private payload (all assets)
+        run: python3 scripts/test_no_private_payload.py release
+      - name: SHA256SUMS
+        working-directory: release
+        run: sha256sum -- * > SHA256SUMS && cat SHA256SUMS
+      - name: Create or update the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          tag="${GITHUB_REF_NAME}"
+          prerelease=""
+          case "$tag" in *-*) prerelease="--prerelease" ;; esac
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" release/* --clobber
+          else
+            gh release create "$tag" release/* --draft $prerelease --verify-tag \
+              --title "Agent Nexus ${tag}" \
+              --notes "Draft created by release.yml. Check the assets, then publish; the desktop updater only sees published releases."
+          fi

@@ -1,0 +1,98 @@
+# ---- Business plugins live in their own private repositories ----
+/builtins/chrome-devtools-mcp/
+/builtins/jubian-go-mcp/
+/builtins/ones-mcp/
+/builtins/payment-mcp/
+/builtins/unity-mcp/
+/builtins/wechat-mcp/
+/plugins/.staging/
+/plugins/plugins.lock.json
+/plugin-data/
+
+# ---- Scripts extracted to ops / plugin repositories (local staging only) ----
+/.extracted/
+
+# ---- Credentials and private configuration (kept only in the credentials vault) ----
+secrets/
+.private/
+credentials-vault/
+backups/
+nested-git-backup/
+build-enrollment.json
+*enrollment*.json
+endpoint-allow
+*.env
+.env
+.env.*
+!*.env.example
+*.pem
+*.key
+*.pfx
+*.p12
+*.token
+*apikey*
+*api-key*
+*api_key*
+id_rsa*
+id_ed25519*
+mcp-manager.json
+mcp-manager.json.*
+agent-nexus.json
+agent-nexus.json.*
+.mcp-manager/
+.anx/
+oauth-store*.json*
+oauth-password*
+*keys*.json
+!package*.json
+
+# ---- Python ----
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# ---- Node ----
+node_modules/
+
+# ---- Rust / Tauri ----
+desktop/src-tauri/target/
+desktop/src-tauri/target-*/
+
+
+# ---- Build output ----
+/artifacts/
+/dist/
+/build/
+*.whl
+*.exe
+*.zip
+*.tar.gz
+*.tar.xz
+*.deb
+*.msi
+*.sig
+
+# ---- Runtime data and logs ----
+logs/
+runtime/
+.runtime-test/
+*.log
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-wal
+*.db-shm
+*.jsonl
+
+# ---- Editors / OS ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

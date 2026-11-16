@@ -1,0 +1,15 @@
+{
+  "name": "agent-nexus 收件箱",
+  "short_name": "收件箱",
+  "description": "agent-nexus: mail and questions from your agents",
+  "id": "/inbox/",
+  "start_url": "/inbox/",
+  "scope": "/inbox/",
+  "display": "standalone",
+  "background_color": "#f4f6fa",
+  "theme_color": "#1f4f99",
+  "lang": "zh-CN",
+  "icons": [
+    {"src": "/inbox/icon.png", "sizes": "any", "type": "image/png", "purpose": "any"}
+  ]
+}

@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>插件 · Agent Nexus</title>
+<link rel="stylesheet" href="../../agent_nexus/static/ui/tokens.css">
+<link rel="stylesheet" href="../../agent_nexus/static/ui/ui.css">
+<script type="module" src="mock.js"></script>
+</head>
+<body data-shell="local" data-active="/plugins" data-title="插件">
+<template id="content">
+  <div class="page-head">
+    <div class="titles">
+      <h1>插件</h1>
+      <p>在这台电脑上运行的 MCP 插件。启用后自动启动，并通过网关提供给你的所有 Agent。</p>
+    </div>
+    <div class="actions">
+      <button class="btn" type="button" data-toast="已重新扫描，发现 6 个插件"><i data-icon="refresh-cw"></i>重新扫描</button>
+      <button class="btn btn-primary" type="button" data-open="install"><i data-icon="plus"></i>安装插件</button>
+    </div>
+  </div>
+
+  <div class="banner accent">
+    <i data-icon="power"></i>
+    <div class="banner-body">
+      <div class="banner-title">3 个插件尚未启用</div>
+      <div class="muted">安装包附带的业务插件默认关闭，打开右侧开关即可启动。需要账号的插件会提示你先完成配置。</div>
+    </div>
+    <div class="banner-actions"><button class="btn btn-primary btn-sm" type="button" data-toast="已启用 3 个插件">全部启用</button></div>
+  </div>
+
+  <div class="tabs" role="tablist">
+    <button class="tab" role="tab" aria-selected="true">全部 <span class="count">6</span></button>
+    <button class="tab" role="tab" aria-selected="false">运行中 <span class="count">2</span></button>
+    <button class="tab" role="tab" aria-selected="false">需要处理 <span class="count">2</span></button>
+  </div>
+
+  <div class="list">
+    <div class="list-item wrap-sm">
+      <span class="avatar lg accent"><i data-icon="monitor" data-size="18"></i></span>
+      <div class="stack grow" style="gap:2px">
+        <div class="row wrap"><span class="title">device</span><span class="tag mono">0.2.0</span><span class="tag hide-sm">内置</span></div>
+        <span class="sub truncate">本机能力：命令行、文件、截图、键鼠控制、通知</span>
+      </div>
+      <div class="meta">
+        <span class="pill ok">运行中</span>
+        <button class="btn btn-ghost btn-sm btn-icon hide-sm" type="button" aria-label="日志"><i data-icon="file-text"></i></button>
+        <button class="btn btn-ghost btn-sm btn-icon hide-sm" type="button" aria-label="配置"><i data-icon="sliders-horizontal"></i></button>
+        <label class="switch" aria-label="启用 device"><input type="checkbox" role="switch" checked><span></span></label>
+      </div>
+    </div>
+    <div class="list-item wrap-sm">
+      <span class="avatar lg accent">企</span>
+      <div class="stack grow" style="gap:2px">
+        <div class="row wrap"><span class="title">wecom</span><span class="tag mono">0.3.1</span><span class="tag hide-sm">git</span></div>
+        <span class="sub truncate">企业微信：读写消息、周报、通讯录（零配置）</span>
+      </div>
+      <div class="meta">
+        <span class="pill ok">运行中</span>
+        <button class="btn btn-ghost btn-sm btn-icon hide-sm" type="button" aria-label="日志"><i data-icon="file-text"></i></button>
+        <button class="btn btn-ghost btn-sm btn-icon hide-sm" type="button" aria-label="配置"><i data-icon="sliders-horizontal"></i></button>
+        <label class="switch" aria-label="启用 wecom"><input type="checkbox" role="switch" checked><span></span></label>
+      </div>
+    </div>
+    <div class="list-item wrap-sm">
+      <span class="avatar lg">O</span>
+      <div class="stack grow" style="gap:2px">
+        <div class="row wrap"><span class="title">ones</span><span class="tag mono">0.2.4</span><span class="tag hide-sm">git</span></div>
+        <span class="sub truncate">ONES 项目管理：工时、任务、需求</span>
+      </div>
+      <div class="meta">
+        <span class="pill warn">需要配置</span>
+        <button class="btn btn-sm" type="button" data-toast="打开 ones 配置">配置</button>
+        <label class="switch" aria-label="启用 ones"><input type="checkbox" role="switch" checked><span></span></label>
+      </div>
+    </div>
+    <div class="list-item wrap-sm">
+      <span class="avatar lg"><i data-icon="globe" data-size="18"></i></span>
+      <div class="stack grow" style="gap:2px">
+        <div class="row wrap"><span class="title">chrome-devtools</span><span class="tag mono">0.9.0</span><span class="tag hide-sm">内置</span></div>
+        <span class="sub truncate">通过 DevTools 协议控制 Chrome</span>
+      </div>
+      <div class="meta">
+        <span class="pill">已禁用</span>
+        <label class="switch" aria-label="启用 chrome-devtools"><input type="checkbox" role="switch"><span></span></label>
+      </div>
+    </div>
+    <div class="list-item wrap-sm">
+      <span class="avatar lg">U</span>
+      <div class="stack grow" style="gap:2px">
+        <div class="row wrap"><span class="title">unity</span><span class="tag mono">1.4.2</span><span class="tag hide-sm">本地文件夹</span></div>
+        <span class="sub truncate">Unity 编辑器桥接：场景、资源、脚本</span>
+      </div>
+      <div class="meta">
+        <span class="pill">已禁用</span>
+        <label class="switch" aria-label="启用 unity"><input type="checkbox" role="switch"><span></span></label>
+      </div>
+    </div>
+    <div class="list-item wrap-sm">
+      <span class="avatar lg">支</span>
+      <div class="stack grow" style="gap:2px">
+        <div class="row wrap"><span class="title">payment</span><span class="tag mono">0.1.2</span><span class="tag hide-sm">git</span></div>
+        <span class="sub truncate">支付对账与订单查询</span>
+      </div>
+      <div class="meta">
+        <span class="pill">已禁用</span>
+        <label class="switch" aria-label="启用 payment"><input type="checkbox" role="switch"><span></span></label>
+      </div>
+    </div>
+  </div>
+</template>
+
+<template id="install" data-kind="modal" data-title="安装插件" data-desc="从文件夹、Git 仓库或压缩包安装 MCP 插件（需要 anx.plugin.json 或旧版 mcp.json）。"
+  data-actions='[{"label":"取消"},{"label":"安装","variant":"primary","icon":"download","toast":"unity 已安装并启用"}]'>
+  <div class="form" data-seg-group>
+    <div class="segmented block" role="group" aria-label="来源">
+      <button type="button" data-value="path" aria-pressed="true"><i data-icon="folder-open" data-size="14"></i>文件夹</button>
+      <button type="button" data-value="git" aria-pressed="false"><i data-icon="git-branch" data-size="14"></i>Git</button>
+      <button type="button" data-value="zip" aria-pressed="false"><i data-icon="file-archive" data-size="14"></i>压缩包</button>
+    </div>
+    <div data-pane="path" class="form">
+      <div class="field">
+        <label for="p-path">插件文件夹</label>
+        <div class="input-group"><input class="input mono" id="p-path" value="D:/work/unity-mcp" spellcheck="false"><button class="btn" type="button">浏览…</button></div>
+        <span class="hint">复制到插件目录；勾选“链接”则直接使用原文件夹（适合开发）。</span>
+      </div>
+      <label class="check"><input type="checkbox" name="link"> 链接而不是复制</label>
+    </div>
+    <div data-pane="git" class="form" hidden>
+      <div class="field"><label for="p-git">仓库地址</label><input class="input mono" id="p-git" placeholder="https://github.com/owner/anx-plugin-x.git"></div>
+      <div class="field"><label for="p-ref">分支 / 标签 <span class="optional">可选</span></label><input class="input mono" id="p-ref" placeholder="main"></div>
+    </div>
+    <div data-pane="zip" class="form" hidden>
+      <div class="field"><label for="p-zip">压缩包（.zip）</label><input class="input" id="p-zip" type="file" accept=".zip"></div>
+    </div>
+    <div class="banner ok">
+      <i data-icon="circle-check"></i>
+      <div class="banner-body"><div class="banner-title">找到插件 unity 1.4.2</div><div class="muted">MCP over HTTP · 端口 8418 · 需要 Python 3.11（将用 uv 创建环境）</div></div>
+    </div>
+    <label class="switch"><input type="checkbox" role="switch" checked><span></span>安装后立即启用</label>
+  </div>
+</template>
+</body>
+</html>

@@ -1,0 +1,28 @@
+{
+  "description": "Baseline mcpm package frozen for the compatibility matrix (design section 3.3). Do not edit.",
+  "source_commit": "f343399229f9a5166192059c09346413f681f80f",
+  "source_path": "mcpm",
+  "generated_with": "git archive <source_commit> mcpm, directory renamed to legacy_mcpm",
+  "scrubbed": {
+    "enrollment.py": "the private hub hostname was replaced with legacy-hub.invalid; no other byte differs"
+  },
+  "files": {
+    "__init__.py": "a21a11f35abdf8acd7b52faae3f61aea8a82d8a6702ecf7148501a1ba110f252",
+    "agent.py": "67a5bdac37b1bbda9be3c4569dd26823efb3bb11b1bfa61a10a4ab70374e156c",
+    "cli.py": "a3938e95bc8d393a354f0c98717ce5b580f6f684e6ab8886d349f83be092b0f0",
+    "cloud.py": "5258212b26905765103ebb8dc4c54e1d22e9eb0a501c97c8e707bf2c01146ab9",
+    "desktop.py": "8c343b5ddba6304467cb2cc35a5c84cccccf28eee41ff2373961b1741d8f298d",
+    "enrollment.py": "0b735e86c6d426c5f4d452c7bfae12f1a125c9ca352acb638f4bb5021389af2f",
+    "federation.py": "8b12796fa4f0d39ffa36682aced03f692d411defec527679de1b9f49adeb4205",
+    "gateway.py": "c5c83a461e53de475124226f651ba84c27a3b01dd09381003739cafdb4bb6944",
+    "lifecycle.py": "58591ef12e12fa55a26ecded861632ada1922e322673c4a32acbb4c74b5288ab",
+    "logs.py": "f4a3ddbb2a916127ae9585c90424d10153ca87375bdeb45123e2029e40918739",
+    "observers.py": "1b2c1c3174937896450a3623ec7ec615e2385e7a939d8c2f087180d9f07262aa",
+    "registry.py": "918c77e94e21bf076d2c5d7a517d2cb9db3cf86021f93ab4423d3d66f0fa16ae",
+    "static/icon.png": "274c0b4f2583ccd8352d0cfb66c919b164fcee2291e706b45fdb4262b404e721",
+    "static/index.html": "eb7e57d65242c2b0019f50cb6199e1dfe9f5de2fa5fece60cd74de1f3e9a94d0",
+    "supervisor.py": "dd0edac841b93f729329cfba85280b8a7f3cbf4d19f797e9a20280caf4e08fdd",
+    "tray.py": "c7d7ca2f22d75c288e601192a36056a994a5c49b80e911c5794b75727269bd4b",
+    "web.py": "942419f45bc2c480135b14cbddfadb672b657413ff02598a85b675efd0c480cc"
+  }
+}

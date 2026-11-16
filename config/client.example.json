@@ -1,0 +1,23 @@
+{
+  "manager": {"host": "127.0.0.1", "port": 8399},
+  "builtins": true,
+  "scan": ["external"],
+  "cloud": {
+    "enabled": true,
+    "agent_id": "office-pc-main",
+    "url": "wss://mcp.example.com",
+    "token_env": "ANX_AGENT_TOKEN",
+    "workspaces": {
+      "projects": {"path": ".", "mcp": "device"}
+    },
+    "mcps": {}
+  },
+  "services": {
+    "device": {"autostart": true},
+    "ones": {"autostart": false, "enabled": false},
+    "payment": {"autostart": false, "enabled": false},
+    "wechat": {"autostart": false, "enabled": false},
+    "chrome-devtools": {"autostart": false, "enabled": false},
+    "unity": {"autostart": false, "enabled": false}
+  }
+}

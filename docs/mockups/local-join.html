@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>连接云端 · Agent Nexus</title>
+<link rel="stylesheet" href="../../agent_nexus/static/ui/tokens.css">
+<link rel="stylesheet" href="../../agent_nexus/static/ui/ui.css">
+<script type="module" src="mock.js"></script>
+</head>
+<body data-shell="local" data-active="/cloud" data-title="连接云端" data-status='{"state":"offline","label":"仅本机 · 未加入网关"}'>
+<template id="content">
+  <div class="page-head">
+    <div class="titles">
+      <h1>加入你的 Agent Nexus</h1>
+      <p>把这台电脑接入网关后，ChatGPT、Claude 和其他设备上的 Agent 就能使用这里的插件，并互相收发邮件。</p>
+    </div>
+  </div>
+
+  <div class="grid side">
+    <section class="card">
+      <div class="card-body stack xl" style="padding-top:24px">
+        <form class="form" onsubmit="return false">
+          <div class="field">
+            <label for="invite">邀请码或邀请链接</label>
+            <textarea class="textarea mono" id="invite" rows="3" spellcheck="false" placeholder="anx1.… 或 agentnexus://enroll?invite=…">anx1.eyJodWIiOiJodHRwczovL2h1Yi5leGFtcGxlLmNvbSIsImlkIjoiaW52XzRmSzlxMiIsInNlY3JldCI6InotWUlZQ2NzeTl6SjZMVUJfcXBvQ3FGdnJaNVc5cGJ3OVF4WDdfcGprYTAifQ</textarea>
+            <span class="hint">邀请码自带网关地址，一次有效。</span>
+          </div>
+          <div class="banner">
+            <i data-icon="globe"></i>
+            <div class="banner-body"><div class="banner-title">将加入 hub.example.com</div><div class="muted">本机显示为 <span class="mono">DESKTOP-7Q2K</span>，加入后可以在控制台设置备注名。</div></div>
+          </div>
+          <div class="field">
+            <label for="agent-id">设备 ID <span class="optional">可选</span></label>
+            <input class="input mono" id="agent-id" placeholder="desktop-7q2k（自动生成）">
+          </div>
+          <div class="row wrap" style="gap:8px">
+            <button class="btn btn-primary btn-lg" type="button" data-toast="已加入 hub.example.com，设备 ID：desktop-7q2k"><i data-icon="link"></i>加入网关</button>
+            <button class="btn btn-ghost btn-lg" type="button">暂时仅本机使用</button>
+          </div>
+        </form>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-head"><h2>邀请码从哪里来？</h2></div>
+      <div class="card-body">
+        <div class="steps">
+          <div class="step"><div class="step-body"><span class="step-title">打开云端控制台</span><span class="step-desc">在浏览器访问你的网关地址并登录。</span></div></div>
+          <div class="step"><div class="step-body"><span class="step-title">设备 → 邀请新设备</span><span class="step-desc">生成一次性的邀请码，默认 24 小时有效。</span></div></div>
+          <div class="step"><div class="step-body"><span class="step-title">粘贴到左边</span><span class="step-desc">或直接点击 <span class="mono">agentnexus://</span> 链接，会自动填入。</span></div></div>
+        </div>
+      </div>
+    </section>
+  </div>
+</template>
+</body>
+</html>

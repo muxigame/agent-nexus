@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0b7285">
+<meta name="color-scheme" content="light dark">
+<title>收件箱 · Agent Nexus</title>
+<link rel="manifest" href="/inbox/manifest.webmanifest">
+<link rel="icon" href="/inbox/icon.png">
+<link rel="apple-touch-icon" href="/inbox/icon.png">
+<link rel="stylesheet" href="/ui/tokens.css">
+<link rel="stylesheet" href="/ui/ui.css">
+<style>
+  .pwa-top { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    height: 56px; padding: 0 24px; background: color-mix(in srgb, var(--bg) 92%, transparent); border-bottom: 1px solid var(--border);
+    backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); }
+  .pwa-main { max-width: 1440px; margin: 0 auto; padding: 24px; }
+  .pwa-main .inbox { min-height: calc(100vh - 140px); }
+  @media (max-width: 768px) { .pwa-top { padding: 0 16px; } .pwa-main { padding: 12px 12px 24px; } }
+</style>
+</head>
+<body>
+<!-- The gateway's mobile inbox (decision D11, design §8.12), installable as a PWA. Same session as the console. -->
+<header class="pwa-top" id="top"></header>
+<main class="pwa-main"><div id="inbox"></div></main>
+<script type="module">
+import { el, mount, brand, icon, fetchJSON, restoreTheme } from "/ui/ui.js";
+import { mountInbox } from "/ui/inbox.js";
+restoreTheme();
+window.addEventListener("anx:unauthorized", () => { location.href = "/inbox/login"; });
+const match = location.hash.match(/^#\/inbox\/(.+)$/);
+const inbox = mountInbox(document.getElementById("inbox"), {
+  base: "/api/inbox", threadId: match ? decodeURIComponent(match[1]) : null,
+  onUnread(unread) { document.title = unread ? `(${unread}) 收件箱 · Agent Nexus` : "收件箱 · Agent Nexus"; },
+  onOpen(id) { history.replaceState(null, "", id ? `#/inbox/${encodeURIComponent(id)}` : "#"); },
+});
+mount(document.getElementById("top"), brand({ sub: "收件箱", href: "/inbox/" }),
+  el("div", { class: "row" }, inbox.composeButton,
+    el("a", { class: "btn btn-ghost btn-icon hide-sm", href: "/", "aria-label": "打开控制台", title: "打开控制台" }, icon("layout-dashboard", { size: 18 })),
+    el("button", { class: "btn btn-ghost btn-icon", id: "logout", type: "button", "aria-label": "退出", title: "退出", onclick: async () => {
+      try { await fetchJSON("/inbox/logout", { method: "POST", quiet: true }); } catch { /* signed out anyway */ }
+      location.href = "/inbox/login";
+    } }, icon("log-out", { size: 18 }))));
+inbox.refresh();
+setInterval(() => { if (!document.hidden) inbox.refresh(); }, 10000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) inbox.refresh(); });
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("/inbox/sw.js", { scope: "/inbox/" }).catch(() => {});
+</script>
+</body>
+</html>

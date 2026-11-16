@@ -1,0 +1,55 @@
+[project]
+name = "agent-nexus"
+# Version comes from agent_nexus/__init__.py (single source; scripts/version.py).
+dynamic = ["version"]
+description = "Agent Nexus: device manager, outbound connector and gateway for MCP servers"
+license = "Apache-2.0"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "starlette>=0.37.0",
+    "uvicorn>=0.30.0",
+    "psutil>=5.9.0",
+    "pystray>=0.19.5",
+    "pillow>=10.0.0",
+    "mcpkit",
+    "websockets>=14,<17",
+]
+
+[project.scripts]
+anx = "agent_nexus.cli:main"
+anx-agent = "agent_nexus.agent:main"
+anx-gateway = "agent_nexus.cloud:main"
+# Deprecated names, kept until 1.0: same functions plus a deprecation line.
+mcpm = "agent_nexus.cli:deprecated_main"
+mcpm-client = "agent_nexus.agent:deprecated_main"
+mcpm-server = "agent_nexus.cloud:deprecated_main"
+
+[tool.uv.sources]
+mcpkit = { path = "builtins/mcpkit", editable = true }
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "agent_nexus/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["agent_nexus", "mcpm"]
+
+[tool.hatch.build.targets.wheel.hooks.custom]
+path = "build_hooks.py"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+asyncio_mode = "auto"
+testpaths = ["tests"]

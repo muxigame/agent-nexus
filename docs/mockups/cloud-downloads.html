@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>下载 · Agent Nexus</title>
+<link rel="stylesheet" href="../../agent_nexus/static/ui/tokens.css">
+<link rel="stylesheet" href="../../agent_nexus/static/ui/ui.css">
+<script type="module" src="mock.js"></script>
+</head>
+<body data-shell="cloud" data-active="/downloads" data-title="下载">
+<template id="content">
+  <div class="page-head">
+    <div class="titles">
+      <h1>下载客户端</h1>
+      <p>在每台要接入的电脑上安装 Agent Nexus。客户端负责运行本机插件，并把它们安全地接到这个网关。</p>
+    </div>
+  </div>
+
+  <section class="card accent">
+    <div class="card-body stack lg" style="padding-top:24px">
+      <div class="row top" style="gap:16px">
+        <span class="avatar lg accent"><i data-icon="monitor" data-size="20"></i></span>
+        <div class="stack grow" style="gap:4px">
+          <div class="row wrap"><h2 style="font-size:18px">Agent Nexus for Windows</h2><span class="pill accent plain">最新 0.2.0</span></div>
+          <span class="muted small">Windows 10 / 11 x64 · 42.6 MB · 2026-11-08 发布 · 自动更新</span>
+        </div>
+        <a class="btn btn-primary btn-lg hide-sm" href="#" data-toast="开始下载 agent-nexus_0.2.0_x64-setup.exe"><i data-icon="download"></i>下载安装包</a>
+      </div>
+      <a class="btn btn-primary btn-lg btn-block only-sm" href="#" data-toast="开始下载"><i data-icon="download"></i>下载安装包</a>
+      <div class="field">
+        <span class="field-label">SHA-256</span>
+        <div class="token"><code>b6dc4fbd606ee5ae69f8f0c6af4f4ce82fe7e370e2f2826d37a284f24ab430f7</code><button class="btn btn-sm" type="button" data-copy="b6dc4fbd606ee5ae69f8f0c6af4f4ce82fe7e370e2f2826d37a284f24ab430f7"><i data-icon="copy" data-size="14"></i>复制</button></div>
+      </div>
+    </div>
+  </section>
+
+  <div class="grid side">
+    <section class="card">
+      <div class="card-head"><h2>安装之后</h2></div>
+      <div class="card-body">
+        <div class="steps">
+          <div class="step"><div class="step-body"><span class="step-title">运行安装包</span><span class="step-desc">安装包未做代码签名，SmartScreen 提示时选择“更多信息 → 仍要运行”。安装后托盘出现 Agent Nexus 图标。</span></div></div>
+          <div class="step"><div class="step-body"><span class="step-title">加入网关</span><span class="step-desc">在 <a href="cloud-devices.html?open=invite">设备 → 邀请新设备</a> 生成邀请码，粘贴到客户端的“连接云端”页。</span></div></div>
+          <div class="step"><div class="step-body"><span class="step-title">启用插件</span><span class="step-desc">客户端“插件”页列出内置插件。业务插件默认关闭，打开开关即可启动；需要配置的会提示你填写。</span></div></div>
+        </div>
+      </div>
+    </section>
+    <section class="card">
+      <div class="card-head"><h2>其他平台</h2></div>
+      <div class="list inset">
+        <div class="list-item">
+          <span class="avatar"><i data-icon="terminal"></i></span>
+          <div class="stack grow" style="gap:0"><span class="title">Linux（.deb）</span><span class="sub">Ubuntu 22.04+ · 38.1 MB</span></div>
+          <div class="meta"><a class="btn btn-sm" href="#" aria-label="下载 Linux 安装包"><i data-icon="download" data-size="14"></i></a></div>
+        </div>
+        <div class="list-item">
+          <span class="avatar"><i data-icon="server"></i></span>
+          <div class="stack grow" style="gap:0"><span class="title">网关（自托管）</span><span class="sub">anx-gateway 0.2.0 · zip · 12.4 MB</span></div>
+          <div class="meta"><a class="btn btn-sm" href="#" aria-label="下载网关"><i data-icon="download" data-size="14"></i></a></div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <section>
+    <div class="section-head"><h2>历史版本</h2></div>
+    <div class="table-wrap">
+      <table class="table stack-sm">
+        <thead><tr><th>版本</th><th>文件</th><th class="num">大小</th><th>SHA-256</th><th>发布时间</th><th></th></tr></thead>
+        <tbody>
+          <tr>
+            <td class="cell-first"><span class="mono strong">0.2.0</span> <span class="pill accent plain">最新</span></td>
+            <td data-label="文件"><span class="mono">agent-nexus_0.2.0_x64-setup.exe</span></td>
+            <td data-label="大小" class="num">42.6 MB</td>
+            <td data-label="SHA-256"><span class="mono faint">b6dc4fbd606e…</span></td>
+            <td data-label="发布时间" class="muted">2026-11-08</td>
+            <td class="actions"><a class="btn btn-sm" href="#"><i data-icon="download" data-size="14"></i>下载</a></td>
+          </tr>
+          <tr>
+            <td class="cell-first"><span class="mono strong">0.1.9</span></td>
+            <td data-label="文件"><span class="mono">agent-nexus_0.1.9_x64-setup.exe</span></td>
+            <td data-label="大小" class="num">41.9 MB</td>
+            <td data-label="SHA-256"><span class="mono faint">add6a739751e…</span></td>
+            <td data-label="发布时间" class="muted">2026-10-21</td>
+            <td class="actions"><a class="btn btn-sm" href="#"><i data-icon="download" data-size="14"></i>下载</a></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+</template>
+</body>
+</html>

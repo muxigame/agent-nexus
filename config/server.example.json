@@ -1,0 +1,11 @@
+{
+  "host": "127.0.0.1",
+  "port": 8440,
+  "public_url": "https://mcp.example.com",
+  "token_env": "ANX_SERVER_TOKEN",
+  "agents": {
+    "office-pc-main": "ANX_OFFICE_TOKEN",
+    "home-pc-main": "ANX_HOME_TOKEN"
+  },
+  "rpc_timeout_s": 180
+}

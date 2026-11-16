@@ -1,0 +1,35 @@
+# agent-nexus gateway, extra instance (for example the parallel trial run).
+# Instance "%i" uses its own tree, so it never shares files with the production unit:
+#   release  /opt/agent-nexus-%i/current
+#   config   /etc/agent-nexus-%i/gateway.json  (+ gateway.env)
+#   state    /var/lib/agent-nexus-%i
+# The trial instance (design §12.4): set "host": "127.0.0.1", "port": 8441 in
+# /etc/agent-nexus-trial/gateway.json, then
+#   systemctl enable --now agent-nexus-gateway@trial.service
+[Unit]
+Description=Agent Nexus gateway (instance %i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=agent-nexus
+Group=agent-nexus
+WorkingDirectory=/opt/agent-nexus-%i/current
+EnvironmentFile=/etc/agent-nexus-%i/gateway.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/agent-nexus-%i/current/.venv/bin/python -m agent_nexus.cloud --config /etc/agent-nexus-%i/gateway.json
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=20
+StateDirectory=agent-nexus-%i
+StateDirectoryMode=0750
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/agent-nexus-%i
+
+[Install]
+WantedBy=multi-user.target

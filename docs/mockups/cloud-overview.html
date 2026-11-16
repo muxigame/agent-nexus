@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>概览 · Agent Nexus</title>
+<link rel="stylesheet" href="../../agent_nexus/static/ui/tokens.css">
+<link rel="stylesheet" href="../../agent_nexus/static/ui/ui.css">
+<script type="module" src="mock.js"></script>
+</head>
+<body data-shell="cloud" data-active="/" data-title="概览">
+<template id="content">
+  <div class="page-head">
+    <div class="titles">
+      <h1>下午好</h1>
+      <p>你的 Agent Nexus 网关运行正常。2 台设备在线，4 个第三方 MCP 已接入。</p>
+    </div>
+    <div class="actions">
+      <a class="btn" href="cloud-downloads.html"><i data-icon="download"></i>下载客户端</a>
+      <a class="btn btn-primary" href="cloud-connectors.html?open=add-connector"><i data-icon="plus"></i>添加连接器</a>
+    </div>
+  </div>
+
+  <div class="banner warn">
+    <i data-icon="triangle-alert"></i>
+    <div class="banner-body">
+      <div class="banner-title">阿里云 MCP 需要重新登录</div>
+      <div class="muted">令牌已失效，调用会返回“需要登录”。登录在网关上完成，不需要任何设备在线。</div>
+    </div>
+    <div class="banner-actions"><button class="btn btn-sm" type="button" data-toast="已打开阿里云登录页">登录</button></div>
+  </div>
+
+  <div class="grid cols-4">
+    <a class="card stat interactive" href="cloud-devices.html">
+      <span class="stat-label"><i data-icon="monitor" data-size="14"></i>在线设备</span>
+      <span class="stat-value">2<span class="unit">/ 3</span></span>
+      <span class="stat-meta">构建机 3 小时前离线</span>
+    </a>
+    <a class="card stat interactive" href="cloud-connectors.html">
+      <span class="stat-label"><i data-icon="plug" data-size="14"></i>连接器</span>
+      <span class="stat-value">4</span>
+      <span class="stat-meta">1 个需要登录</span>
+    </a>
+    <div class="card stat">
+      <span class="stat-label"><i data-icon="inbox" data-size="14"></i>未读邮件</span>
+      <span class="stat-value">3</span>
+      <span class="stat-meta">最新：12 分钟前</span>
+    </div>
+    <div class="card stat">
+      <span class="stat-label"><i data-icon="circle-help" data-size="14"></i>待回答</span>
+      <span class="stat-value">1</span>
+      <span class="stat-meta">来自 codex@pc-main</span>
+    </div>
+  </div>
+
+  <div class="grid side">
+    <div class="stack lg">
+      <section class="card">
+        <div class="card-head">
+          <h2>开始使用</h2>
+          <span class="pill accent plain">3 / 4 已完成</span>
+        </div>
+        <div class="card-body">
+          <div class="steps">
+            <div class="step done"><div class="step-body"><span class="step-title">下载并安装客户端</span><span class="step-desc">Windows 安装包 0.2.0，安装后在托盘运行。</span></div></div>
+            <div class="step done"><div class="step-body"><span class="step-title">用邀请码把设备加入网关</span><span class="step-desc">设备 → 邀请新设备，在客户端“连接云端”页粘贴。</span></div></div>
+            <div class="step done"><div class="step-body"><span class="step-title">在 ChatGPT / Claude 中添加连接器</span><span class="step-desc">使用下方的 MCP 地址，授权时输入 owner 密码。</span></div></div>
+            <div class="step current"><div class="step-body"><span class="step-title">接入第三方 MCP</span><span class="step-desc">粘贴任意 HTTP / SSE MCP 地址，网关自动探测传输和登录方式。</span>
+              <div class="row" style="margin-top:8px"><a class="btn btn-primary btn-sm" href="cloud-connectors.html?open=add-connector"><i data-icon="plus" data-size="14"></i>添加连接器</a></div></div></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="card flush">
+        <div class="card-head">
+          <h2>设备</h2>
+          <div class="actions"><a class="btn btn-ghost btn-sm" href="cloud-devices.html">全部<i data-icon="chevron-right" data-size="14"></i></a></div>
+        </div>
+        <div class="list inset">
+            <div class="list-item">
+              <span class="avatar"><i data-icon="monitor"></i></span>
+              <div class="stack grow" style="gap:0"><span class="title">工作站</span><span class="sub"><span class="mono">pc-main</span> · Windows 11 · 6 个插件</span></div>
+              <div class="meta"><span class="pill ok">在线</span></div>
+            </div>
+            <div class="list-item">
+              <span class="avatar"><i data-icon="laptop"></i></span>
+              <div class="stack grow" style="gap:0"><span class="title">笔记本</span><span class="sub"><span class="mono">laptop</span> · Windows 11 · 2 个插件</span></div>
+              <div class="meta"><span class="pill ok">在线</span></div>
+            </div>
+            <div class="list-item">
+              <span class="avatar"><i data-icon="server"></i></span>
+              <div class="stack grow" style="gap:0"><span class="title">构建机</span><span class="sub"><span class="mono">build-01</span> · Ubuntu 24.04 · 1 个插件</span></div>
+              <div class="meta"><span class="faint xs hide-sm">3 小时前</span><span class="pill">离线</span></div>
+            </div>
+        </div>
+      </section>
+    </div>
+
+    <div class="stack lg">
+      <section class="card">
+        <div class="card-head"><h2>MCP 地址</h2></div>
+        <div class="card-body stack">
+          <p class="small muted">在 ChatGPT、Claude 或任何 MCP 客户端中添加这个地址，授权时输入 owner 密码。</p>
+          <div class="token"><code>https://hub.example.com/mcp</code><button class="btn btn-sm" type="button" data-copy="https://hub.example.com/mcp"><i data-icon="copy" data-size="14"></i>复制</button></div>
+          <dl class="kv" style="margin-top:8px">
+            <dt>已授权客户端</dt><dd>ChatGPT、Claude</dd>
+            <dt>网关版本</dt><dd class="mono">0.2.0</dd>
+            <dt>可用工具</dt><dd>148 个（含连接器 37 个）</dd>
+          </dl>
+        </div>
+      </section>
+
+      <section class="card flush">
+        <div class="card-head">
+          <h2>收件箱</h2>
+          <div class="actions"><a class="btn btn-ghost btn-sm" href="#/inbox">打开<i data-icon="chevron-right" data-size="14"></i></a></div>
+        </div>
+        <div class="list inset">
+            <div class="list-item clickable">
+              <span class="avatar sm accent">?</span>
+              <div class="stack grow" style="gap:0"><span class="title truncate">要合并 release/0.2.1 吗？</span><span class="sub truncate">codex@pc-main · 等待你的回答</span></div>
+              <div class="meta"><span class="faint xs">12 分钟</span></div>
+            </div>
+            <div class="list-item clickable">
+              <span class="avatar sm">C</span>
+              <div class="stack grow" style="gap:0"><span class="title truncate">夜间构建完成</span><span class="sub truncate">claude@build-01 · 全部 412 个测试通过</span></div>
+              <div class="meta"><span class="faint xs">2 小时</span></div>
+            </div>
+        </div>
+      </section>
+    </div>
+  </div>
+</template>
+</body>
+</html>

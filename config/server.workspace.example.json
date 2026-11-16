@@ -1,0 +1,29 @@
+{
+  "host": "127.0.0.1",
+  "port": 8440,
+  "path": "/mcp",
+  "public_url": "https://mcp.example.com",
+  "stateless": true,
+  "log_requests": false,
+  "agents": {"office-pc-main": "ANX_OFFICE_TOKEN"},
+  "rpc_timeout_s": 180,
+  "auth": {
+    "mode": "oauth",
+    "password_secret": "workspace/oauth-password",
+    "bearer_secrets": ["workspace/bearer-token"],
+    "store": "/var/lib/agent-nexus/oauth.sqlite3",
+    "scopes": ["tools"],
+    "required_scopes": ["tools"],
+    "redirect_uris": [
+      "https://chatgpt\\.com/connector_platform_oauth_redirect",
+      "https://chatgpt\\.com/connector/oauth/[A-Za-z0-9_-]{1,200}",
+      "https://chat\\.openai\\.com/connector_platform_oauth_redirect",
+      "https://chat\\.openai\\.com/connector/oauth/[A-Za-z0-9_-]{1,200}",
+      "https://claude\\.ai/api/mcp/auth_callback"
+    ],
+    "access_token_ttl_s": 2592000,
+    "subject": "operator",
+    "title": "Workspace MCP",
+    "consent": "此连接可以在这台电脑上执行命令、读写文件。只有你刚刚从客户端发起连接时才授权。"
+  }
+}

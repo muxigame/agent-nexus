@@ -1,0 +1,62 @@
+[project]
+name = "anx-device"
+version = "0.1.0"
+description = "agent-nexus device plugin: shell, file editing and desktop control tools exposed over MCP"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "comtypes>=1.4.16; sys_platform == 'win32'",
+    # The shared foundation pins FastMCP, the SDK and the server stack.
+    "mcpkit",
+    "pillow>=12.3.0",
+    "winrt-runtime>=3.2.1; sys_platform == 'win32'",
+    "winrt-windows-foundation>=3.2.1; sys_platform == 'win32'",
+    "winrt-windows-foundation-collections>=3.2.1; sys_platform == 'win32'",
+    "winrt-windows-globalization>=3.2.1; sys_platform == 'win32'",
+    "winrt-windows-graphics-imaging>=3.2.1; sys_platform == 'win32'",
+    "winrt-windows-media-ocr>=3.2.1; sys_platform == 'win32'",
+    "winrt-windows-storage-streams>=3.2.1; sys_platform == 'win32'",
+]
+
+[project.optional-dependencies]
+# OmniParser: icon detection plus a caption model, for the windows whose
+# accessibility tree is empty and whose controls are pictures rather than text.
+# Installed but never imported until the vision tool is asked to load it --
+# importing torch costs seconds and the weights cost video memory, and this
+# machine's 8GB is shared with Unity and a browser.
+vision = [
+    "torch>=2.4",
+    "torchvision",
+    "ultralytics>=8.3",
+    # Pinned below 5 on purpose. OmniParser's caption weights are in Florence-2's
+    # original layout, and on transformers 5 neither path loads them: the native
+    # implementation wants a converted config ("KeyError: florence2_language")
+    # and the model's own remote code hits a removed attribute
+    # ("Florence2LanguageConfig has no attribute forced_bos_token_id").
+    "transformers>=4.45,<5",
+    "einops",
+    "timm",
+    "huggingface-hub",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
+
+[tool.uv.sources]
+mcpkit = { path = "../mcpkit", editable = true }
+torch = { index = "pytorch-cu124" }
+torchvision = { index = "pytorch-cu124" }
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+pythonpath = ["."]
+

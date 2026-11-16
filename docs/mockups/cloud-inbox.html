@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>收件箱 · Agent Nexus</title>
+<link rel="stylesheet" href="../../agent_nexus/static/ui/tokens.css">
+<link rel="stylesheet" href="../../agent_nexus/static/ui/ui.css">
+<script type="module" src="mock.js"></script>
+</head>
+<body data-shell="cloud" data-active="/inbox" data-title="收件箱" data-wide="1">
+<template id="content">
+  <div class="page-head">
+    <div class="titles">
+      <h1>收件箱</h1>
+      <p>Agent 发给你（<span class="mono">me</span>）的邮件和提问。回复会唤醒对方的会话。</p>
+    </div>
+    <div class="actions">
+      <select class="select" aria-label="查看邮箱" style="width:auto"><option>me（我）</option><option>codex@pc-main</option><option>claude@laptop</option></select>
+      <button class="btn btn-primary" type="button"><i data-icon="send"></i>写邮件</button>
+    </div>
+  </div>
+
+  <div class="inbox show-thread">
+    <div class="inbox-list">
+      <div class="inbox-toolbar">
+        <div class="input-icon grow"><i data-icon="search" data-size="14"></i><input class="input" placeholder="搜索主题或发件人" aria-label="搜索"></div>
+      </div>
+      <div class="thread-item active unread">
+        <div class="who"><span class="dot info"></span>codex@pc-main<span class="when">12 分钟</span></div>
+        <div class="subject">要合并 release/0.2.1 吗？</div>
+        <div class="snippet">待回答 · 测试全部通过，变更 14 个文件…</div>
+      </div>
+      <div class="thread-item unread">
+        <div class="who"><span class="dot info"></span>claude@build-01<span class="when">2 小时</span></div>
+        <div class="subject">夜间构建完成</div>
+        <div class="snippet">全部 412 个测试通过，安装包已上传。</div>
+      </div>
+      <div class="thread-item unread">
+        <div class="who"><span class="dot info"></span>system<span class="when">3 小时</span></div>
+        <div class="subject">阿里云 MCP 需要重新登录</div>
+        <div class="snippet">刷新令牌已失效，请在连接器页登录。</div>
+      </div>
+      <div class="thread-item">
+        <div class="who">claude@laptop<span class="when">昨天</span></div>
+        <div class="subject">周报草稿</div>
+        <div class="snippet">已按上周格式整理好三段内容，请过目。</div>
+      </div>
+    </div>
+    <div class="thread-view">
+      <div class="message" style="padding-bottom:12px">
+        <div class="row"><button class="btn btn-ghost btn-sm only-sm" type="button"><i data-icon="arrow-left" data-size="14"></i>返回</button><h2 class="grow truncate">要合并 release/0.2.1 吗？</h2><span class="pill warn">待回答</span></div>
+        <div class="faint xs">参与者：codex@pc-main、me</div>
+      </div>
+      <div class="message">
+        <div class="message-head"><span class="avatar sm">C</span><span class="strong">codex@pc-main</span><span class="faint xs">→ me · 12 分钟前</span></div>
+        <div class="message-body">release/0.2.1 的测试全部通过（root 412、mcpkit 96、device 133）。变更 14 个文件，主要是连接器 OAuth 刷新和收件箱分页。</div>
+        <div class="ask-card">
+          <div class="strong">现在合并到 main 并打 tag 吗？</div>
+          <div class="stack">
+            <label class="choice"><input type="radio" name="ans" checked><span class="stack" style="gap:0"><span class="choice-title">合并并打 tag v0.2.1 <span class="pill accent plain">推荐</span></span></span></label>
+            <label class="choice"><input type="radio" name="ans"><span class="choice-title">只合并，不打 tag</span></label>
+            <label class="choice"><input type="radio" name="ans"><span class="choice-title">先别合并</span></label>
+            <input class="input" placeholder="其他（自由填写）" aria-label="其他">
+          </div>
+          <div class="row"><button class="btn btn-primary" type="button" data-toast="已回答，codex@pc-main 已被唤醒">提交回答</button></div>
+        </div>
+      </div>
+      <div class="composer">
+        <textarea class="textarea" placeholder="以 me 身份回复…" aria-label="回复"></textarea>
+        <button class="btn btn-primary btn-icon" type="button" aria-label="发送"><i data-icon="send"></i></button>
+      </div>
+    </div>
+  </div>
+</template>
+</body>
+</html>

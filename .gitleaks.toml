@@ -1,0 +1,11 @@
+# gitleaks configuration: default rules plus repository-specific allowances.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Synthetic fixtures and lock files"
+paths = [
+  '''(^|/)uv\.lock$''',
+  '''(^|/)Cargo\.lock$''',
+  '''^tests/test_hygiene\.py$''',
+]

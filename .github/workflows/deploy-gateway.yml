@@ -1,0 +1,125 @@
+# Deploy a released gateway zip to the hub host (docs/design.md §11.2, deploy/gateway/README.md).
+# Manual only, behind the `production` environment (configure required reviewers there).
+#
+# Environment secrets:
+#   DEPLOY_HOST, DEPLOY_USER (the dedicated anx-deploy user), DEPLOY_SSH_KEY (private key),
+#   DEPLOY_KNOWN_HOSTS (the host's known_hosts line(s)); optional GATEWAY_PROBE_TOKEN.
+# Environment variable (vars): GATEWAY_PUBLIC_URL, e.g. https://<hub-domain> (production probe).
+#
+# On the host, anx-upgrade verifies the zip, runs uv sync and --check-config, backs up,
+# switches the symlink, restarts and polls /healthz, and rolls back on any failure.
+# verify_cloud_host.py is deliberately not a gate (it expects a fixed set of devices online).
+name: deploy-gateway
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag whose gateway zip to deploy (e.g. v0.2.0)"
+        required: true
+      target:
+        description: "production (127.0.0.1:8440, agent-nexus-gateway.service) or trial (127.0.0.1:8441, agent-nexus-gateway@trial.service)"
+        type: choice
+        options: [trial, production]
+        default: trial
+
+permissions:
+  contents: write  # reading the assets of a draft release needs write access
+
+concurrency:
+  group: deploy-gateway
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Validate inputs
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -eu
+          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::tag must look like v1.2.3 or v1.2.3-rc.1"; exit 1
+          fi
+      - name: Download the gateway zip and checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -eu
+          version="${TAG#v}"
+          zip="agent-nexus-gateway-${version}.zip"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "$zip" --pattern SHA256SUMS --dir release
+          (cd release && grep -E "^[0-9a-f]{64} [ *]${zip}\$" SHA256SUMS | sha256sum --check -)
+          sha=$(sha256sum "release/$zip" | cut -d' ' -f1)
+          echo "ZIP=$zip" >> "$GITHUB_ENV"
+          echo "SHA=$sha" >> "$GITHUB_ENV"
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+      - name: SSH setup
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -eu
+          install -d -m 0700 ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 0600 ~/.ssh/deploy_key
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 0644 ~/.ssh/known_hosts
+      - name: Upload to /opt/agent-nexus/incoming
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          set -eu
+          scp -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes "release/$ZIP" \
+            "${DEPLOY_USER}@${DEPLOY_HOST}:/opt/agent-nexus/incoming/$ZIP"
+      - name: Upgrade (verify, check-config, switch, restart, healthz; automatic rollback)
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          TARGET: ${{ inputs.target }}
+        run: |
+          set -eu
+          args="--package /opt/agent-nexus/incoming/$ZIP --sha256 $SHA"
+          if [ "$TARGET" = "trial" ]; then
+            args="$args --base /opt/agent-nexus-trial --config-dir /etc/agent-nexus-trial"
+            args="$args --state-dir /var/lib/agent-nexus-trial --service agent-nexus-gateway@trial.service --port 8441"
+          fi
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes "${DEPLOY_USER}@${DEPLOY_HOST}" \
+            "sudo /opt/agent-nexus/bin/anx-upgrade $args"
+      - name: Probe from the runner
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          TARGET: ${{ inputs.target }}
+          PUBLIC_URL: ${{ vars.GATEWAY_PUBLIC_URL }}
+          PROBE_TOKEN: ${{ secrets.GATEWAY_PROBE_TOKEN }}
+        run: |
+          set -eu
+          if [ "$TARGET" = "production" ] && [ -n "${PUBLIC_URL}" ]; then
+            health=$(curl -fsS "${PUBLIC_URL%/}/healthz")
+            metadata_status=$(curl -s -o /dev/null -w '%{http_code}' "${PUBLIC_URL%/}/.well-known/oauth-authorization-server")
+            echo "OAuth metadata: HTTP $metadata_status"
+            if [ -n "${PROBE_TOKEN}" ]; then
+              curl -fsS -o /dev/null -H "Authorization: Bearer ${PROBE_TOKEN}" "${PUBLIC_URL%/}/healthz?detail=1"
+            fi
+          else
+            port=8440; [ "$TARGET" = "trial" ] && port=8441
+            health=$(ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes "${DEPLOY_USER}@${DEPLOY_HOST}" \
+              "curl -fsS http://127.0.0.1:${port}/healthz")
+          fi
+          echo "$health"
+          printf '%s' "$health" > health.json
+          python3 - <<'PY'
+          import json, os, sys
+          body = json.load(open("health.json"))
+          expected = os.environ["VERSION"]
+          if body.get("status") != "ok" or body.get("service") != "agent-nexus-gateway":
+              sys.exit("unexpected healthz: " + json.dumps(body))
+          if body.get("version") != expected:
+              sys.exit("healthz version %r != %r" % (body.get("version"), expected))
+          print("gateway", body["version"], "db_schema", body.get("db_schema"), "features", ",".join(body.get("features", [])))
+          PY

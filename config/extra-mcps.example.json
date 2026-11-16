@@ -1,0 +1,8 @@
+{
+  "cloud": {
+    "mcps": {
+      "local-http": {"url": "http://127.0.0.1:8500/mcp", "token_env": "EXTRA_MCP_TOKEN"},
+      "local-stdio": {"command": ["node", "server.js"], "cwd": "external/my-mcp", "env": {}}
+    }
+  }
+}

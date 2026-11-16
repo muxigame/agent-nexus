@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Agent Nexus
+Name[en]=Agent Nexus
+Comment=管理本机 MCP 插件并接入 agent-nexus 网关
+Exec=agent-nexus
+Icon=agent-nexus
+Terminal=false
+Categories=Development;Utility;
+StartupNotify=true

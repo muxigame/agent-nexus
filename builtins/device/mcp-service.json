@@ -1,0 +1,28 @@
+{
+  "name": "device",
+  "aliases": ["workspace"],
+  "description": "Work on this computer: run commands, read, write and modify files, view images, and monitor long-running tasks. Control desktop applications through screen capture, UI inspection, mouse actions and keyboard input. Suitable for coding, builds, tests and local automation.",
+  "command": [
+    "uv",
+    "run",
+    "python",
+    "-m",
+    "src.server",
+    "--transport",
+    "http",
+    "--port",
+    "{port}",
+    "--host",
+    "{host}"
+  ],
+  "port": 8400,
+  "health": {
+    "path": "/healthz",
+    "interval": 120
+  },
+  "logs": [
+    "logs/audit.jsonl"
+  ],
+  "autostart": true,
+  "autorestart": true
+}

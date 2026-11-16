@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>连接器 · Agent Nexus</title>
+<link rel="stylesheet" href="../../agent_nexus/static/ui/tokens.css">
+<link rel="stylesheet" href="../../agent_nexus/static/ui/ui.css">
+<script type="module" src="mock.js"></script>
+</head>
+<body data-shell="cloud" data-active="/connectors" data-title="连接器">
+<template id="content">
+  <div class="page-head">
+    <div class="titles">
+      <h1>连接器</h1>
+      <p>接入第三方 MCP 服务。远程 HTTP / SSE 服务默认运行在网关上，7×24 可用，不依赖任何设备在线。</p>
+    </div>
+    <div class="actions">
+      <button class="btn btn-primary" type="button" data-open="add-connector"><i data-icon="plus"></i>添加连接器</button>
+    </div>
+  </div>
+
+  <div class="table-wrap">
+    <table class="table stack-sm">
+      <thead>
+        <tr><th>连接器</th><th>状态</th><th>传输</th><th>鉴权</th><th>运行位置</th><th class="num">工具</th><th></th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="cell-first"><div class="cell-main"><span class="avatar accent">阿</span>
+            <div class="stack" style="gap:0;min-width:0"><span class="title">阿里云 MCP</span><span class="sub mono truncate">https://mcp.aliyun.example.com/mcp</span></div></div></td>
+          <td data-label="状态"><span class="pill warn">需要登录</span></td>
+          <td data-label="传输"><span class="tag">HTTP</span></td>
+          <td data-label="鉴权">OAuth</td>
+          <td data-label="运行位置"><span class="row nowrap" style="gap:6px"><i data-icon="cloud" data-size="14"></i>网关</span></td>
+          <td data-label="工具" class="num">—</td>
+          <td class="actions"><div class="btn-group">
+            <button class="btn btn-primary btn-sm" type="button" data-toast="正在打开阿里云登录页"><i data-icon="log-in" data-size="14"></i>登录</button>
+            <button class="btn btn-ghost btn-sm btn-icon" type="button" aria-label="更多"><i data-icon="ellipsis"></i></button></div></td>
+        </tr>
+        <tr>
+          <td class="cell-first"><div class="cell-main"><span class="avatar accent">C</span>
+            <div class="stack" style="gap:0;min-width:0"><span class="title">Cloudflare</span><span class="sub mono truncate">https://mcp.cloudflare.example.com/sse</span></div></div></td>
+          <td data-label="状态"><span class="pill ok">正常</span></td>
+          <td data-label="传输"><span class="tag">SSE</span></td>
+          <td data-label="鉴权">OAuth</td>
+          <td data-label="运行位置"><span class="row nowrap" style="gap:6px"><i data-icon="cloud" data-size="14"></i>网关</span></td>
+          <td data-label="工具" class="num">23</td>
+          <td class="actions"><div class="btn-group">
+            <button class="btn btn-sm" type="button" data-toast="连接正常，23 个工具"><i data-icon="activity" data-size="14"></i>测试</button>
+            <button class="btn btn-ghost btn-sm btn-icon" type="button" aria-label="更多"><i data-icon="ellipsis"></i></button></div></td>
+        </tr>
+        <tr>
+          <td class="cell-first"><div class="cell-main"><span class="avatar accent">云</span>
+            <div class="stack" style="gap:0;min-width:0"><span class="title">云效</span><span class="sub mono truncate">https://devops.example.com/mcp</span></div></div></td>
+          <td data-label="状态"><span class="pill ok">正常</span></td>
+          <td data-label="传输"><span class="tag">自动 → HTTP</span></td>
+          <td data-label="鉴权">Header</td>
+          <td data-label="运行位置"><span class="row nowrap" style="gap:6px"><i data-icon="cloud" data-size="14"></i>网关</span></td>
+          <td data-label="工具" class="num">14</td>
+          <td class="actions"><div class="btn-group">
+            <button class="btn btn-sm" type="button" data-toast="连接正常，14 个工具"><i data-icon="activity" data-size="14"></i>测试</button>
+            <button class="btn btn-ghost btn-sm btn-icon" type="button" aria-label="更多"><i data-icon="ellipsis"></i></button></div></td>
+        </tr>
+        <tr>
+          <td class="cell-first"><div class="cell-main"><span class="avatar"><i data-icon="terminal"></i></span>
+            <div class="stack" style="gap:0;min-width:0"><span class="title">文件系统</span><span class="sub mono truncate">npx -y @modelcontextprotocol/server-filesystem C:/data</span></div></div></td>
+          <td data-label="状态"><span class="pill">设备离线</span></td>
+          <td data-label="传输"><span class="tag">stdio</span></td>
+          <td data-label="鉴权">无</td>
+          <td data-label="运行位置"><span class="row nowrap" style="gap:6px"><i data-icon="server" data-size="14"></i>构建机</span></td>
+          <td data-label="工具" class="num">11</td>
+          <td class="actions"><div class="btn-group">
+            <button class="btn btn-sm" type="button" disabled><i data-icon="activity" data-size="14"></i>测试</button>
+            <button class="btn btn-ghost btn-sm btn-icon" type="button" aria-label="更多"><i data-icon="ellipsis"></i></button></div></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="banner">
+    <i data-icon="info"></i>
+    <div class="banner-body">
+      <div class="banner-title">Agent 怎么用这些连接器？</div>
+      <div class="muted">连接器的工具默认通过 <code>toolsearch</code> / <code>tooluse</code> 出现，名称为 <code>hub/&lt;连接器名&gt;</code>。ChatGPT 与 Claude 不需要重新连接。</div>
+    </div>
+  </div>
+</template>
+
+<template id="add-connector" data-kind="drawer" data-title="添加连接器" data-desc="粘贴 MCP 地址，网关会探测传输方式以及是否需要登录。"
+  data-actions='[{"label":"取消"},{"label":"保存并连接","variant":"primary","toast":"连接器已添加"}]'>
+  <div class="form">
+    <div class="field">
+      <label for="c-url">MCP 地址或命令</label>
+      <div class="input-group">
+        <input class="input mono" id="c-url" value="https://mcp.cloudflare.example.com/sse" autocomplete="off" spellcheck="false">
+        <button class="btn" type="button" data-toast="探测完成：SSE，需要 OAuth"><i data-icon="search" data-size="14"></i>探测</button>
+      </div>
+      <span class="hint">HTTP / SSE 地址，或 stdio 命令（例如 <code>npx -y @scope/server</code>，只能在设备上运行）。</span>
+    </div>
+
+    <div class="banner ok">
+      <i data-icon="circle-check"></i>
+      <div class="banner-body"><div class="banner-title">探测成功</div><div class="muted">服务使用 SSE 传输，需要 OAuth 登录（已为你选好）。</div></div>
+    </div>
+
+    <div class="form-row">
+      <div class="field"><label for="c-name">名称</label><input class="input mono" id="c-name" value="cloudflare"><span class="hint">工具显示为 hub/cloudflare</span></div>
+      <div class="field"><label for="c-title">显示名 <span class="optional">可选</span></label><input class="input" id="c-title" value="Cloudflare"></div>
+    </div>
+
+    <div class="field">
+      <span class="field-label">运行位置</span>
+      <div class="choices">
+        <label class="choice"><input type="radio" name="run_on" value="gateway" checked><i data-icon="cloud"></i><span class="stack" style="gap:0"><span class="choice-title">网关（推荐）</span><span class="choice-sub">7×24 可用，不依赖设备</span></span></label>
+        <label class="choice"><input type="radio" name="run_on" value="device"><i data-icon="monitor"></i><span class="stack" style="gap:0"><span class="choice-title">固定到设备</span><span class="choice-sub">stdio、内网或限制 IP 的服务</span></span></label>
+      </div>
+    </div>
+
+    <div class="field">
+      <span class="field-label">传输</span>
+      <div class="segmented block" role="group" aria-label="传输">
+        <button type="button" aria-pressed="false">自动</button>
+        <button type="button" aria-pressed="false">HTTP</button>
+        <button type="button" aria-pressed="true">SSE</button>
+      </div>
+    </div>
+
+    <div class="field" data-seg-group>
+      <span class="field-label">鉴权</span>
+      <div class="segmented block" role="group" aria-label="鉴权">
+        <button type="button" data-value="none" aria-pressed="false">无</button>
+        <button type="button" data-value="bearer" aria-pressed="false">Bearer</button>
+        <button type="button" data-value="headers" aria-pressed="false">Header</button>
+        <button type="button" data-value="oauth" aria-pressed="true">OAuth</button>
+      </div>
+      <div data-pane="oauth" class="stack" style="margin-top:8px">
+        <span class="hint">保存后点击“登录”，在网关域名上完成授权，令牌保存在网关，不会下发到设备。</span>
+        <div class="field"><label for="c-client">Client ID <span class="optional">可选，留空则动态注册</span></label><input class="input mono" id="c-client" placeholder="动态注册（推荐）"></div>
+      </div>
+      <div data-pane="bearer" hidden class="field" style="margin-top:8px"><label for="c-token">Token</label><input class="input mono" id="c-token" type="password" placeholder="只写不读，保存后不再显示"></div>
+      <div data-pane="headers" hidden class="stack" style="margin-top:8px">
+        <div class="form-row"><input class="input mono" value="Authorization" aria-label="Header 名"><input class="input mono" type="password" value="Bearer xxxxxxxx" aria-label="Header 值"></div>
+        <button class="btn btn-ghost btn-sm" type="button" style="align-self:flex-start"><i data-icon="plus" data-size="14"></i>添加 Header</button>
+      </div>
+      <div data-pane="none" hidden></div>
+    </div>
+
+    <details>
+      <summary class="small muted" style="cursor:pointer">高级选项</summary>
+      <div class="form" style="margin-top:12px">
+        <div class="form-row">
+          <div class="field"><label for="c-expose">工具暴露方式</label>
+            <select class="select" id="c-expose"><option>仅搜索（toolsearch）</option><option>直接列出（tools/list）</option></select></div>
+          <div class="field"><label for="c-timeout">超时（秒）</label><input class="input" id="c-timeout" type="number" value="120"></div>
+        </div>
+      </div>
+    </details>
+  </div>
+  <div data-slot="left"><button class="btn btn-ghost" type="button" data-toast="连接成功，发现 23 个工具"><i data-icon="activity" data-size="16"></i>测试连接</button></div>
+</template>
+</body>
+</html>

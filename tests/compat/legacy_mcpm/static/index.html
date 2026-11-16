@@ -1,0 +1,677 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MCP 管理器</title>
+<link rel="icon" type="image/png" href="/favicon.png">
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: #f6f7f9; --panel: #fff; --text: #1d2330; --muted: #6b7280; --line: #e3e6eb; --accent: #2563eb;
+  --ok: #15803d; --ok-bg: #dcfce7; --info: #1d4ed8; --info-bg: #dbeafe; --warn: #b45309; --warn-bg: #fef3c7;
+  --bad: #b91c1c; --bad-bg: #fee2e2; --ext: #6d28d9; --ext-bg: #ede9fe; --idle: #4b5563; --idle-bg: #e5e7eb;
+  --log-bg: #0f1419; --log-text: #d7dde5;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e1116; --panel: #161b22; --text: #e6edf3; --muted: #8b949e; --line: #2a313c; --accent: #58a6ff;
+    --ok: #3fb950; --ok-bg: #12261a; --info: #79c0ff; --info-bg: #0f2240; --warn: #d29922; --warn-bg: #2b2111;
+    --bad: #f85149; --bad-bg: #2d1214; --ext: #bc8cff; --ext-bg: #241a38; --idle: #9ca3af; --idle-bg: #21262d;
+    --log-bg: #0a0d12;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; font: 14px/1.5 system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; background: var(--bg); color: var(--text); }
+[hidden] { display: none !important; }
+.mono, .log, .path, .mono-dd dd { font-family: ui-monospace, "Cascadia Mono", Consolas, Menlo, monospace; }
+
+.top { display: flex; align-items: center; gap: 16px; padding: 10px 20px; background: var(--panel); border-bottom: 1px solid var(--line); }
+.brand { font-weight: 600; font-size: 16px; display: flex; align-items: center; gap: 8px; white-space: nowrap; }
+.meta { color: var(--muted); font-size: 12px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.offline { padding: 8px 20px; background: var(--bad-bg); color: var(--bad); font-size: 13px; }
+
+.svc-icon { width: 20px; height: 20px; border-radius: 5px; flex: none; object-fit: contain; }
+.svc-icon.sm { width: 16px; height: 16px; border-radius: 4px; }
+.svc-icon.lg { width: 32px; height: 32px; border-radius: 8px; }
+.avatar { display: inline-grid; place-items: center; color: #fff; font-weight: 600; font-size: 11px; line-height: 1; background: hsl(var(--h, 210) 50% 45%); }
+.svc-icon.sm.avatar { font-size: 9px; }
+.svc-icon.lg.avatar { font-size: 16px; }
+
+.tabs { display: flex; align-items: flex-end; gap: 2px; padding: 8px 20px 0; background: var(--panel); border-bottom: 1px solid var(--line); overflow-x: auto; }
+.tab { display: flex; align-items: center; gap: 6px; padding: 7px 12px; border: 1px solid transparent; border-bottom: 0; border-radius: 8px 8px 0 0; cursor: pointer; color: var(--muted); white-space: nowrap; user-select: none; }
+.tab:hover { color: var(--text); background: var(--bg); }
+.tab.active { color: var(--text); background: var(--bg); border-color: var(--line); margin-bottom: -1px; font-weight: 500; }
+.tab .x { border: 0; background: none; color: var(--muted); cursor: pointer; font-size: 15px; line-height: 1; padding: 0 3px; border-radius: 4px; }
+.tab .x:hover { background: var(--line); color: var(--text); }
+.plus { border: 0; background: none; font-size: 18px; line-height: 1; padding: 6px 12px; color: var(--muted); cursor: pointer; border-radius: 8px 8px 0 0; }
+.plus:hover { color: var(--text); background: var(--bg); }
+
+main { padding: 20px; max-width: 1440px; margin: 0 auto; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+.table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+table.grid { width: 100%; border-collapse: collapse; }
+.grid th, .grid td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.grid th { font-size: 12px; color: var(--muted); font-weight: 500; background: var(--bg); white-space: nowrap; }
+.grid tr:last-child td { border-bottom: 0; }
+.grid td.mono { white-space: nowrap; }
+.name { display: flex; align-items: center; gap: 8px; }
+.name a { font-weight: 600; color: var(--text); text-decoration: none; }
+.name a:hover { color: var(--accent); }
+.desc, .msg { color: var(--muted); font-size: 12px; }
+.msg { margin-top: 4px; max-width: 340px; word-break: break-word; }
+.empty { color: var(--muted); padding: 32px; text-align: center; }
+
+.badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; font-weight: 500; white-space: nowrap; color: var(--idle); background: var(--idle-bg); }
+.dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex: none; background: var(--idle); }
+.ok { --tone: var(--ok); --tone-bg: var(--ok-bg); } .info { --tone: var(--info); --tone-bg: var(--info-bg); }
+.warn { --tone: var(--warn); --tone-bg: var(--warn-bg); } .bad { --tone: var(--bad); --tone-bg: var(--bad-bg); }
+.ext { --tone: var(--ext); --tone-bg: var(--ext-bg); } .idle { --tone: var(--idle); --tone-bg: var(--idle-bg); }
+.badge.ok, .badge.info, .badge.warn, .badge.bad, .badge.ext, .badge.idle { color: var(--tone); background: var(--tone-bg); }
+.dot.ok, .dot.info, .dot.warn, .dot.bad, .dot.ext, .dot.idle { background: var(--tone); }
+
+.btn { font: inherit; font-size: 13px; padding: 5px 12px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--text); cursor: pointer; white-space: nowrap; }
+.btn:hover:not(:disabled) { border-color: var(--accent); }
+.btn:disabled { opacity: .5; cursor: default; }
+.btn.small { padding: 3px 9px; font-size: 12px; }
+.btn.danger { color: var(--bad); } .btn.caution { color: var(--warn); }
+.actions { display: flex; flex-wrap: wrap; gap: 6px; }
+input, select { font: inherit; font-size: 13px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); }
+.port-edit { display: flex; align-items: center; gap: 6px; }
+input.port { width: 86px; }
+.chip { font-size: 11px; padding: 1px 6px; border-radius: 4px; color: var(--warn); background: var(--warn-bg); white-space: nowrap; }
+.toggles { display: flex; flex-direction: column; gap: 2px; }
+.toggle { display: flex; align-items: center; gap: 4px; font-size: 12px; color: var(--muted); white-space: nowrap; cursor: pointer; }
+
+.svc-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.svc-head h2 { margin: 0; font-size: 20px; display: flex; align-items: center; gap: 10px; }
+.svc-head .actions { margin-left: auto; }
+.notice { margin: 12px 0 0; padding: 8px 12px; border-radius: 6px; font-size: 13px; color: var(--tone, var(--text)); background: var(--tone-bg, var(--idle-bg)); word-break: break-word; }
+.facts { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 14px 0 0; align-items: center; }
+.facts dt { color: var(--muted); font-size: 13px; }
+.facts dd { margin: 0; word-break: break-all; }
+.mono-dd dd { font-size: 12px; }
+.more { margin-top: 12px; }
+.more summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+
+.logcard { padding: 0; overflow: hidden; }
+.logbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+.filter { width: 180px; }
+.count { margin-left: auto; color: var(--muted); font-size: 12px; }
+.path { display: block; padding: 4px 12px; font-size: 11px; color: var(--muted); border-bottom: 1px solid var(--line); word-break: break-all; }
+.path[data-state="reconnecting"]::after { content: " · 重新连接中…"; color: var(--warn); }
+.log { margin: 0; height: calc(100vh - 430px); min-height: 320px; overflow: auto; padding: 10px 12px; background: var(--log-bg); color: var(--log-text); font-size: 12px; line-height: 1.45; white-space: pre-wrap; word-break: break-all; }
+.log .err { color: #ff7b72; } .log .wrn { color: #e3b341; } .log .mark { color: #79c0ff; font-weight: 600; }
+
+.menu { position: fixed; z-index: 10; min-width: 240px; max-width: 320px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,.18); padding: 4px; }
+.menu-item { display: grid; grid-template-columns: auto 1fr; align-items: center; column-gap: 8px; width: 100%; text-align: left; border: 0; background: none; color: var(--text); padding: 6px 10px; border-radius: 6px; cursor: pointer; font: inherit; }
+.menu-item small { grid-column: 2; color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.menu-item:hover { background: var(--bg); }
+.menu-empty { padding: 8px 10px; color: var(--muted); font-size: 13px; }
+.toasts { position: fixed; right: 16px; bottom: 16px; display: flex; flex-direction: column; gap: 8px; z-index: 20; }
+.toast { padding: 8px 14px; border-radius: 8px; background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--tone); box-shadow: 0 4px 16px rgba(0,0,0,.15); max-width: 440px; font-size: 13px; white-space: pre-wrap; word-break: break-word; }
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="brand"><img class="svc-icon" src="/favicon.png" alt="">MCP 管理器 <span id="conn" class="dot idle" title="连接中"></span></div>
+  <div id="meta" class="meta"></div>
+  <button id="rescan" class="btn small" title="重新扫描 mcp-service.json 和 mcp-manager.json">重新扫描</button>
+</header>
+<div id="offline" class="offline" hidden></div>
+<nav id="tabs" class="tabs" role="tablist"></nav>
+<main id="main"></main>
+<div id="menu" class="menu" hidden></div>
+<div id="toasts" class="toasts"></div>
+
+<script>
+"use strict";
+const STATUS = {
+  running: ["运行中", "ok"], starting: ["启动中", "info"], unhealthy: ["不健康", "warn"],
+  crashed: ["已崩溃", "bad"], conflict: ["端口冲突", "bad"], external: ["外部进程", "ext"],
+  stopped: ["已停止", "idle"], disabled: ["已禁用", "idle"], unsupported: ["不支持此平台", "idle"], invalid: ["配置错误", "bad"],
+};
+const SOURCE = { manifest: "自注册 mcp-service.json", config: "mcp-manager.json", "manifest+config": "自注册 + mcp-manager.json 覆盖" };
+const MAX_LINES = 5000;
+const MAX_LOG_CHARS = 2 * 1024 * 1024; // UTF-16 code units, including displayed newlines
+const MAX_LINE_CHARS = 32 * 1024;
+const LINE_TRUNCATED = " … [本行过长，界面已截断；原始日志保留]";
+const REFRESH_MS = 2000;
+const enc = encodeURIComponent;
+const $ = (sel) => document.querySelector(sel);
+
+function load(key, fallback) { try { const v = JSON.parse(localStorage.getItem(key)); return v ?? fallback; } catch { return fallback; } }
+function store(key, value) { try { localStorage.setItem(key, JSON.stringify(value)); } catch {} }
+function forget(key) { try { localStorage.removeItem(key); } catch {} }
+
+const state = { services: [], manager: null, open: load("mcpm.tabs", []), active: load("mcpm.active", "overview"), detailsOpen: load("mcpm.details", false) === true };
+let view = null; // the mounted service tab: { name, header, pre, es, lines, source, follow, filter, ... }
+let pageActive = false;
+let refreshTimer = null;
+let refreshRequest = null;
+let generation = 0;
+
+function el(tag, attrs = {}, ...children) {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (v == null || v === false) continue;
+    if (k.startsWith("on")) node.addEventListener(k.slice(2), v);
+    else if (k === "class") node.className = v;
+    else node.setAttribute(k, v === true ? "" : v);
+  }
+  for (const c of children.flat(Infinity)) if (c != null && c !== false) node.append(c instanceof Node ? c : String(c));
+  return node;
+}
+
+async function api(method, path, body, options = {}) {
+  const headers = { "X-MCPM": "1" };
+  if (body !== undefined) headers["Content-Type"] = "application/json";
+  const res = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), signal: options.signal });
+  let data = {};
+  try { data = await res.json(); } catch {}
+  if (!res.ok) throw new Error(data.error || `${res.status} ${res.statusText}`);
+  return data;
+}
+
+function toast(text, tone = "ok") {
+  const node = el("div", { class: `toast ${tone === "error" ? "bad" : "ok"}` }, text);
+  $("#toasts").append(node);
+  setTimeout(() => node.remove(), tone === "error" ? 8000 : 4000);
+}
+
+const byName = (name) => state.services.find((s) => s.name === name);
+const tone = (status) => (STATUS[status] || [status, "idle"])[1];
+const statusText = (status) => (STATUS[status] || [status])[0];
+// Observe-only services (e.g. a browser) are watched, never started or stopped.
+const observed = (svc) => svc.kind === "observe";
+const svcStatus = (svc) => observed(svc) && svc.status === "stopped" ? "未运行" : statusText(svc.status);
+const badge = (svc) => el("span", { class: `badge ${tone(svc.status)}` }, svcStatus(svc));
+function pidText(svc) {
+  if (observed(svc)) return svc.observed_pid ? `观察 ${svc.observed_pid}` : "-";
+  return svc.pid ? String(svc.pid) : svc.listener_pid ? `外部 ${svc.listener_pid}` : "-";
+}
+function healthText(svc) {
+  if (observed(svc)) return svc.status === "disabled" || svc.status === "invalid" ? "-" : `被动检测 · ${svc.health_interval}s`;
+  if (!svc.health_path) return svc.status === "running" ? "端口正常" : "-";
+  const h = svc.health || {};
+  if (!h.at) return "…";
+  return h.code != null ? `${h.code} · ${h.ms}ms` : "无响应";
+}
+function uptime(s) {
+  if (s == null) return "-";
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+  return h ? `${h}时${String(m).padStart(2, "0")}分` : `${m}分${String(s % 60).padStart(2, "0")}秒`;
+}
+
+// The service's own icon, or a coloured initial when it has none (or it fails to load).
+function svcIcon(svc, size = "") {
+  const cls = `svc-icon ${size}`.trim();
+  if (svc && svc.icon_url) {
+    return el("img", { class: cls, src: svc.icon_url, alt: "", onerror: (e) => e.currentTarget.replaceWith(avatar(svc, cls)) });
+  }
+  return avatar(svc, cls);
+}
+function avatar(svc, cls) {
+  const name = (svc && svc.name) || "?";
+  let hue = 0;
+  for (const ch of name) hue = (hue * 31 + ch.codePointAt(0)) % 360;
+  return el("span", { class: `${cls} avatar`, style: `--h:${hue}`, "aria-hidden": "true" }, name[0].toUpperCase());
+}
+
+// -- data ----------------------------------------------------------------------
+function updatesAllowed() {
+  return !document.hidden && window.__mcpmNativeVisible !== false;
+}
+
+async function refresh() {
+  if (!pageActive || !updatesAllowed() || refreshRequest) return;
+  clearTimeout(refreshTimer);
+  refreshTimer = null;
+  const request = { controller: new AbortController(), generation };
+  refreshRequest = request;
+  const current = () => refreshRequest === request && request.generation === generation && pageActive && updatesAllowed();
+  try {
+    const data = await api("GET", "/api/services", undefined, { signal: request.controller.signal });
+    if (!current()) return;
+    state.services = data.services;
+    state.manager = data.manager;
+    $("#offline").hidden = true;
+    $("#conn").className = "dot ok";
+    $("#conn").title = "已连接";
+  } catch (err) {
+    if (!current() || err.name === "AbortError") return;
+    $("#offline").hidden = false;
+    $("#offline").textContent = `无法连接管理器：${err.message}。确认 mcpm serve 还在运行。`;
+    $("#conn").className = "dot bad";
+    $("#conn").title = "未连接";
+  } finally {
+    // An old, aborted response must not render or clear a newer request.
+    if (current()) {
+      refreshRequest = null;
+      render();
+      refreshTimer = setTimeout(refresh, REFRESH_MS);
+    }
+  }
+}
+
+function stopUpdates() {
+  pageActive = false;
+  generation += 1;
+  clearTimeout(refreshTimer);
+  refreshTimer = null;
+  const old = refreshRequest;
+  refreshRequest = null;
+  old?.controller.abort();
+  disconnectLog(view);
+}
+
+function resumeUpdates() {
+  if (!updatesAllowed()) { stopUpdates(); return; }
+  if (pageActive && (refreshRequest || refreshTimer !== null)) return;
+  pageActive = true;
+  refresh();
+  if (view && byName(view.name) && !view.es) connect(view);
+}
+
+document.addEventListener("visibilitychange", resumeUpdates);
+window.addEventListener("mcpmvisibilitychange", resumeUpdates);
+window.addEventListener("pagehide", stopUpdates);
+window.addEventListener("pageshow", resumeUpdates);
+
+async function runAction(svc, action, takeover, button) {
+  let question = null;
+  if (takeover) {
+    question = `${svc.name} 的端口 ${svc.port} 正被一个不是管理器启动的进程占用（${pidText(svc)}）。\n\n`
+      + (action === "restart" ? "确定结束它，并由管理器重新启动？" : "确定结束它？");
+  } else if (action === "stop") {
+    question = `确定停止 ${svc.name}？正在使用它的客户端会断开。`;
+  } else if (action === "restart") {
+    question = `确定重启 ${svc.name}？正在使用它的客户端会短暂断开。`;
+  }
+  if (question && !confirm(question)) return;
+  button.disabled = true;
+  button.textContent = "…";
+  try {
+    const data = await api("POST", `/api/services/${enc(svc.name)}/${action}${takeover ? "?takeover=1" : ""}`);
+    toast(data.message);
+  } catch (err) {
+    toast(err.message, "error");
+  }
+  refresh();
+}
+
+async function saveConfig(name, patch, okText) {
+  try {
+    const data = await api("PUT", `/api/services/${enc(name)}/config`, patch);
+    toast(okText + (data.restart_needed ? "，重启该服务后生效" : ""));
+    return true;
+  } catch (err) {
+    toast(err.message, "error");
+    return false;
+  } finally {
+    refresh();
+  }
+}
+
+// -- widgets -------------------------------------------------------------------
+function actionButtons(svc) {
+  if (observed(svc)) {
+    return el("div", { class: "actions" }, el("span", { class: "desc", title: "管理器只检测和显示它，不会启动、停止或接管" }, "仅观察"));
+  }
+  const managed = svc.pid != null;
+  const buttons = [];
+  const button = (action, label, cls = "", takeover = false) =>
+    el("button", { class: `btn small ${cls}`, onclick: (e) => runAction(svc, action, takeover, e.currentTarget) }, label);
+  if (["stopped", "crashed"].includes(svc.status) && svc.enabled && svc.supported && !svc.error) buttons.push(button("start", "启动"));
+  if (managed) buttons.push(button("restart", "重启"), button("stop", "停止", "danger"));
+  if (!managed && svc.status === "external") buttons.push(button("restart", "接管重启", "caution", true), button("stop", "结束外部进程", "danger", true));
+  return el("div", { class: "actions" }, buttons);
+}
+
+function portEditor(svc) {
+  if (observed(svc)) return el("span", { class: "mono", title: "检测到的端口，只读" }, svc.port ?? "-");
+  const original = svc.port == null ? "" : String(svc.port);
+  const draftKey = `mcpm.port-draft.${svc.name}`;
+  const draft = load(draftKey, null);
+  const initial = typeof draft === "string" ? draft : original;
+  const input = el("input", { type: "number", min: 1, max: 65535, value: initial, class: "port", "data-editing": "port", "aria-label": `${svc.name} 端口` });
+  const save = el("button", { class: "btn small", disabled: initial === original }, "保存");
+  const submit = async () => {
+    const submitted = input.value;
+    const port = Number(input.value);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) return toast("端口必须是 1-65535 的整数", "error");
+    if (await saveConfig(svc.name, { port }, `${svc.name} 端口已改为 ${port}`)) {
+      if (input.value === submitted) { forget(draftKey); input.blur(); }
+    }
+  };
+  input.addEventListener("input", () => {
+    save.disabled = input.value === original;
+    if (save.disabled) forget(draftKey); else store(draftKey, input.value);
+  });
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !save.disabled) submit();
+    if (e.key === "Escape") { forget(draftKey); input.value = original; save.disabled = true; input.blur(); }
+  });
+  save.addEventListener("mousedown", (e) => e.preventDefault()); // keep focus so a refresh cannot swap the row mid-click
+  save.addEventListener("click", submit);
+  return el("div", { class: "port-edit" }, input, save, svc.pending_restart && el("span", { class: "chip", title: "配置已修改，重启该服务后生效" }, "需重启"));
+}
+
+function toggles(svc) {
+  if (observed(svc)) return el("span", { class: "desc" }, "-");
+  const box = (field, label) => {
+    const input = el("input", { type: "checkbox", checked: svc[field] });
+    input.addEventListener("change", () => saveConfig(svc.name, { [field]: input.checked }, `${svc.name}：${label}${input.checked ? "已开启" : "已关闭"}`));
+    return el("label", { class: "toggle" }, input, label);
+  };
+  return el("div", { class: "toggles" }, box("autostart", "随管理器启动"), box("autorestart", "崩溃自动重启"));
+}
+
+const editing = (container) => container.contains(document.activeElement) && document.activeElement.dataset.editing;
+
+// -- tabs ----------------------------------------------------------------------
+function activate(id) {
+  state.active = id;
+  store("mcpm.active", id);
+  render();
+}
+function openTab(name) {
+  if (!state.open.includes(name)) state.open.push(name);
+  store("mcpm.tabs", state.open);
+  activate(name);
+}
+function closeTab(name) {
+  const i = state.open.indexOf(name);
+  if (i < 0) return;
+  state.open.splice(i, 1);
+  store("mcpm.tabs", state.open);
+  if (state.active === name) activate(state.open[i - 1] || state.open[i] || "overview");
+  else render();
+}
+
+// The tray links to http://127.0.0.1:8399/#tab=<name>.
+function takeHashTab() {
+  const match = location.hash.match(/^#tab=(.+)$/);
+  if (!match) return;
+  history.replaceState(null, "", location.pathname + location.search);
+  openTab(decodeURIComponent(match[1]));
+}
+window.addEventListener("hashchange", takeHashTab);
+
+function renderTabs() {
+  const tab = (id, label, closable) => {
+    const svc = closable ? byName(id) : null;
+    const node = el("div", { class: `tab${state.active === id ? " active" : ""}`, role: "tab", tabindex: 0,
+      onclick: () => activate(id), onkeydown: (e) => { if (e.key === "Enter") activate(id); } },
+      closable && svcIcon(svc || { name: id }, "sm"),
+      el("span", {}, label),
+      closable && el("span", { class: `dot ${svc ? tone(svc.status) : "idle"}`, title: svc ? svcStatus(svc) : "" }),
+      closable && el("button", { class: "x", title: "关闭标签页", onclick: (e) => { e.stopPropagation(); closeTab(id); } }, "×"));
+    if (closable) node.addEventListener("auxclick", (e) => { if (e.button === 1) closeTab(id); });
+    return node;
+  };
+  $("#tabs").replaceChildren(
+    tab("overview", "总览", false),
+    ...state.open.map((name) => tab(name, name, true)),
+    el("button", { class: "plus", title: "打开服务标签页", onclick: openMenu }, "+"));
+}
+
+function openMenu(e) {
+  e.stopPropagation();
+  const menu = $("#menu");
+  const closed = state.services.filter((s) => !state.open.includes(s.name));
+  menu.replaceChildren(...(closed.length
+    ? closed.map((s) => el("button", { class: "menu-item", onclick: () => { menu.hidden = true; openTab(s.name); } },
+        svcIcon(s, "sm"), s.name, el("small", {}, `${svcStatus(s)} · ${s.description || s.dir}`)))
+    : [el("div", { class: "menu-empty" }, state.services.length ? "所有服务都已打开" : "还没有发现服务")]));
+  const r = e.currentTarget.getBoundingClientRect();
+  menu.style.left = `${Math.max(8, Math.min(r.left, innerWidth - 330))}px`;
+  menu.style.top = `${r.bottom + 4}px`;
+  menu.hidden = false;
+}
+document.addEventListener("click", () => { $("#menu").hidden = true; });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") $("#menu").hidden = true; });
+
+// -- overview ------------------------------------------------------------------
+function renderOverview() {
+  const main = $("#main");
+  if (main.dataset.view !== "overview") {
+    unmountService();
+    main.dataset.view = "overview";
+    main.replaceChildren();
+  }
+  if (editing(main)) return;
+  if (!state.services.length) {
+    main.replaceChildren(el("p", { class: "empty" }, "没有发现服务：在子目录里放 mcp-service.json，或在 mcp-manager.json 的 services 里登记。"));
+    return;
+  }
+  const head = ["服务", "状态", "端口", "PID", "健康", "运行时长", "策略", "操作"];
+  const rows = state.services.map((svc) => el("tr", {},
+    el("td", {}, el("div", { class: "name" }, svcIcon(svc), el("a", { href: "#", onclick: (e) => { e.preventDefault(); openTab(svc.name); } }, svc.name)),
+      el("div", { class: "desc" }, svc.description)),
+    el("td", {}, badge(svc), svc.message && el("div", { class: "msg" }, svc.message)),
+    el("td", {}, portEditor(svc)),
+    el("td", { class: "mono" }, pidText(svc)),
+    el("td", { class: "mono" }, healthText(svc)),
+    el("td", { class: "mono" }, uptime(svc.uptime_s)),
+    el("td", {}, toggles(svc)),
+    el("td", {}, actionButtons(svc))));
+  const cloud = state.manager?.cloud || { state: "disabled" };
+  const cloudLabels = {disabled: "未启用云端连接", connecting: "正在连接云端", connected: "已连接云端", disconnected: "云端已断开，正在重连", error: "云端配置需要检查"};
+  main.replaceChildren(el("div", {class: "notice"},
+    cloudLabels[cloud.state] || cloud.state,
+    cloud.agent_id ? ` · 实例 ${cloud.agent_id}` : "",
+    cloud.state === "connected" ? ` · ${cloud.workspaces} 个 workspace · ${cloud.mcps} 个内部 MCP` : ""), el("div", { class: "table-wrap" },
+    el("table", { class: "grid" }, el("thead", {}, el("tr", {}, head.map((h) => el("th", {}, h)))), el("tbody", {}, rows))));
+}
+
+// -- service tab ---------------------------------------------------------------
+function renderService(name) {
+  const main = $("#main");
+  if (!view || view.name !== name || main.dataset.view !== "service") mountService(name);
+  const svc = byName(name);
+  if (!svc) {
+    view.header.replaceChildren(el("p", { class: "empty" }, state.manager ? `服务 ${name} 不存在了（被移除或改名）。` : "正在加载…"));
+    return;
+  }
+  if (!editing(view.header)) view.header.replaceChildren(serviceHeader(svc));
+  syncSources(svc);
+}
+
+function serviceHeader(svc) {
+  const pairs = (items) => items.flatMap(([k, v]) => [el("dt", {}, k), el("dd", {}, v)]);
+  const notices = [];
+  if (svc.message) notices.push(el("div", { class: `notice ${tone(svc.status)}` }, svc.message));
+  if (svc.error && svc.error !== svc.message) notices.push(el("div", { class: "notice bad" }, svc.error));
+  if (svc.pending_restart) notices.push(el("div", { class: "notice warn" }, "配置已修改，重启该服务后生效。"));
+  const iconNote = svc.icon_url ? "已使用服务目录中的图标" : (svc.icon_error || "无：在服务目录放 favicon.png（≤10KB）即可");
+  if (observed(svc)) {
+    return el("div", {},
+      el("div", { class: "svc-head" }, el("h2", {}, svcIcon(svc, "lg"), svc.name), el("span", { class: "desc" }, svc.description), actionButtons(svc)),
+      notices,
+      el("dl", { class: "facts" }, pairs([
+        ["状态", badge(svc)], ["端口", portEditor(svc)], ["PID", el("span", { class: "mono" }, pidText(svc))],
+        ["运行时长", uptime(svc.uptime_s)],
+        ...svc.facts.map(([k, v]) => [k, el("span", { class: "mono" }, v)]),
+      ])),
+      el("details", { class: "more", open: state.detailsOpen, ontoggle: (e) => { state.detailsOpen = e.currentTarget.open; store("mcpm.details", state.detailsOpen); } },
+        el("summary", {}, "检测配置"),
+        el("dl", { class: "facts mono-dd" }, pairs([
+          ["目录", svc.dir], ["检测器", svc.observe.detector || "-"], ["选项", JSON.stringify(svc.observe)],
+          ["检测方式", `每 ${svc.health_interval} 秒读取进程表和配置文件，不连接被观察的程序`],
+          ["图标", iconNote], ["来源", SOURCE[svc.source] || svc.source], ["平台", svc.platforms.join(", ") || "不限"],
+        ]))));
+  }
+  return el("div", {},
+    el("div", { class: "svc-head" }, el("h2", {}, svcIcon(svc, "lg"), svc.name), el("span", { class: "desc" }, svc.description), actionButtons(svc)),
+    notices,
+    el("dl", { class: "facts" }, pairs([
+      ["状态", badge(svc)], ["端口", portEditor(svc)], ["PID", el("span", { class: "mono" }, pidText(svc))],
+      ["健康", el("span", { class: "mono" }, healthText(svc))], ["运行时长", uptime(svc.uptime_s)],
+      ["策略", toggles(svc)], ["崩溃（5 分钟内）", String(svc.crashes)], ["上次退出码", svc.exit_code ?? "-"],
+    ])),
+    el("details", { class: "more", open: state.detailsOpen, ontoggle: (e) => { state.detailsOpen = e.currentTarget.open; store("mcpm.details", state.detailsOpen); } },
+      el("summary", {}, "启动配置"),
+      el("dl", { class: "facts mono-dd" }, pairs([
+        ["目录", svc.dir], ["工作目录", svc.cwd], ["命令", svc.command.join(" ")],
+        ["环境变量", svc.env_keys.join(", ") || "-"],
+        ["健康检查", svc.health_path ? `GET ${svc.health_path} · 每 ${svc.health_interval} 秒` : "只检查端口"],
+        ["图标", iconNote],
+        ["来源", SOURCE[svc.source] || svc.source], ["平台", svc.platforms.join(", ") || "不限"],
+      ]))));
+}
+
+function mountService(name) {
+  unmountService();
+  const main = $("#main");
+  main.dataset.view = "service";
+  const filterText = load(`mcpm.filter.${name}`, "");
+  const v = view = { name, lines: [], characters: 0, source: load(`mcpm.source.${name}`, "stdout"),
+    follow: load(`mcpm.follow.${name}`, true) !== false, filter: String(filterText).toLowerCase(),
+    es: null, atBottom: true, sourcesKey: "", initialSnapshot: true };
+  v.header = el("section", { class: "card" });
+  v.select = el("select", { "aria-label": "日志来源", onchange: () => { v.source = v.select.value; store(`mcpm.source.${name}`, v.source); connect(v); } });
+  v.pause = el("button", { class: "btn small", onclick: () => {
+    v.follow = !v.follow;
+    store(`mcpm.follow.${name}`, v.follow);
+    v.pause.textContent = v.follow ? "暂停" : "继续";
+    if (v.follow) redraw(v); else updateCount(v);
+  } }, v.follow ? "暂停" : "继续");
+  v.filterInput = el("input", { type: "search", class: "filter", value: String(filterText), placeholder: "过滤日志…", oninput: () => {
+    v.filter = v.filterInput.value.toLowerCase();
+    store(`mcpm.filter.${name}`, v.filterInput.value);
+    redraw(v);
+  } });
+  v.count = el("span", { class: "count" });
+  v.path = el("span", { class: "path" });
+  v.pre = el("pre", { class: "log", tabindex: 0 });
+  v.pre.addEventListener("scroll", () => { v.atBottom = v.pre.scrollTop + v.pre.clientHeight >= v.pre.scrollHeight - 8; });
+  const bar = el("div", { class: "logbar" }, el("strong", {}, "日志"), v.select, v.pause,
+    el("button", { class: "btn small", onclick: () => { v.lines = []; v.characters = 0; redraw(v); } }, "清屏"),
+    el("button", { class: "btn small", onclick: () => { v.atBottom = true; stick(v); } }, "到底部"),
+    v.filterInput, v.count);
+  main.replaceChildren(v.header, el("section", { class: "card logcard" }, bar, v.path, v.pre));
+}
+
+function unmountService() {
+  disconnectLog(view);
+  view = null;
+}
+
+function disconnectLog(v) {
+  if (!v?.es) return;
+  const es = v.es;
+  v.es = null;
+  es.onopen = es.onerror = es.onmessage = null;
+  es.close();
+}
+
+function syncSources(svc) {
+  const v = view;
+  const key = JSON.stringify(svc.logs.map((l) => [l.id, l.label]));
+  if (v.sourcesKey !== key) {
+    v.sourcesKey = key;
+    v.select.replaceChildren(...svc.logs.map((l) => el("option", { value: l.id }, l.label)));
+    if (!svc.logs.some((l) => l.id === v.source)) v.source = "stdout";
+    v.select.value = v.source;
+  }
+  if (!v.es) connect(v);
+}
+
+function connect(v) {
+  disconnectLog(v);
+  if (!pageActive || !updatesAllowed() || view !== v) return;
+  const es = v.es = new EventSource(`/api/services/${enc(v.name)}/logs/stream?source=${enc(v.source)}&lines=1000`);
+  const current = () => view === v && v.es === es && pageActive && updatesAllowed();
+  es.onopen = () => { if (current()) delete v.path.dataset.state; };
+  es.onerror = () => { if (current()) v.path.dataset.state = "reconnecting"; };
+  es.onmessage = (ev) => {
+    if (!current()) { es.close(); return; }
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch { return; }
+    if (!msg || typeof msg !== "object") return;
+    if (msg.path) v.path.textContent = msg.path;
+    const parts = typeof msg.text === "string" ? msg.text.split(/\r?\n/) : [];
+    if (parts.length && parts[parts.length - 1] === "") parts.pop();
+    const change = retainLogLines(v, parts, !!msg.reset);
+    const initial = v.initialSnapshot;
+    v.initialSnapshot = false;
+    if (!v.follow) {
+      if (initial) redraw(v); else updateCount(v);
+      return;
+    }
+    if (msg.reset || (change.trimmed > 0 && v.filter)) return redraw(v);
+    for (let i = 0; i < change.removedOld; i++) v.pre.firstChild?.remove();
+    appendLines(v, change.added);
+  };
+}
+
+function retainLogLines(v, incoming, reset = false) {
+  if (reset) { v.lines = []; v.characters = 0; }
+  const before = v.lines.length;
+  const parts = incoming.map((line) => line.length <= MAX_LINE_CHARS ? line
+    : line.slice(0, MAX_LINE_CHARS - LINE_TRUNCATED.length) + LINE_TRUNCATED);
+  for (const line of parts) {
+    v.lines.push(line);
+    v.characters += line.length + 1;
+  }
+  let trimmed = 0;
+  while (v.lines.length - trimmed > MAX_LINES || v.characters > MAX_LOG_CHARS) {
+    v.characters -= v.lines[trimmed].length + 1;
+    trimmed += 1;
+  }
+  if (trimmed) v.lines.splice(0, trimmed);
+  // A large batch can evict its own beginning. Never append the raw batch
+  // after trimming the model, or the DOM remains much larger than the buffer.
+  return { trimmed, removedOld: Math.min(trimmed, before), added: parts.slice(Math.max(0, trimmed - before)) };
+}
+
+function lineNode(line) {
+  const span = document.createElement("span");
+  if (line.startsWith("===== mcpm ")) span.className = "mark";
+  else if (/\b(error|exception|traceback|critical|fatal)\b/i.test(line)) span.className = "err";
+  else if (/\bwarn(ing)?\b/i.test(line)) span.className = "wrn";
+  span.textContent = line + "\n";
+  return span;
+}
+const matches = (v, line) => !v.filter || line.toLowerCase().includes(v.filter);
+function appendLines(v, parts) {
+  const frag = document.createDocumentFragment();
+  for (const line of parts) if (matches(v, line)) frag.append(lineNode(line));
+  v.pre.append(frag);
+  stick(v);
+  updateCount(v);
+}
+function redraw(v) {
+  v.pre.replaceChildren();
+  appendLines(v, v.lines);
+}
+function stick(v) { if (v.atBottom) v.pre.scrollTop = v.pre.scrollHeight; }
+function updateCount(v) { v.count.textContent = `${v.lines.length} 行${v.follow ? "" : " · 已暂停"}`; }
+
+// -- shell ---------------------------------------------------------------------
+function render() {
+  const m = state.manager;
+  $("#meta").textContent = m ? `${m.root} · ${m.platform} · 管理器 pid ${m.pid} · v${m.mcpm}` : "";
+  if (state.active !== "overview" && !state.open.includes(state.active)) state.active = "overview";
+  renderTabs();
+  if (state.active === "overview") renderOverview();
+  else renderService(state.active);
+}
+
+$("#rescan").addEventListener("click", async () => {
+  try {
+    const data = await api("POST", "/api/rescan");
+    toast(`重新扫描完成：${data.services.length} 个服务`);
+  } catch (err) {
+    toast(err.message, "error");
+  }
+  refresh();
+});
+
+takeHashTab();
+render();
+resumeUpdates();
+</script>
+</body>
+</html>

@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:agent-nexus:schema:device-contract:v1",
+  "title": "anx.device/1 device descriptor",
+  "description": "The catalog's `device` block and the result of the device plugin's `device_info` tool (design §5.2). Unknown keys are allowed so later contract versions can add facts; legacy gateways ignore the whole block.",
+  "type": "object",
+  "required": ["contract", "platform", "capabilities"],
+  "properties": {
+    "contract": {"const": "anx.device/1"},
+    "id": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,100}$"},
+    "hostname": {"type": "string", "minLength": 1, "maxLength": 255},
+    "profile": {"enum": ["full", "lite", "relay"]},
+    "form": {"enum": ["desktop", "laptop", "server", "phone", "tablet", "watch", "edge"]},
+    "platform": {"type": "string", "minLength": 1, "maxLength": 32},
+    "os": {"type": "string", "maxLength": 100},
+    "arch": {"type": "string", "maxLength": 32},
+    "agent_version": {"type": "string", "maxLength": 64},
+    "plugin_version": {"type": "string", "maxLength": 64},
+    "mcp": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,100}$"},
+    "reachable": {"enum": ["always", "intermittent", "push-only"]},
+    "degraded": {"type": "boolean"},
+    "capabilities": {
+      "type": "object",
+      "propertyNames": {"pattern": "^[a-z][a-z0-9_]{0,31}$"},
+      "additionalProperties": {"$ref": "#/$defs/capability"}
+    },
+    "agent_runtimes": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["available"],
+        "properties": {
+          "available": {"type": "boolean"},
+          "path_known": {"type": "boolean"},
+          "routes": {"type": "integer", "minimum": 0}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "capability": {
+      "type": "object",
+      "required": ["v"],
+      "properties": {
+        "v": {"type": "integer", "minimum": 1},
+        "available": {"type": "boolean"},
+        "reason": {"type": ["string", "null"], "maxLength": 500}
+      }
+    }
+  },
+  "x-anx-core-capabilities": ["info", "notify", "files", "time"],
+  "x-anx-optional-tools": {},
+  "x-anx-standard-tools": {
+    "info": ["device_info"],
+    "notify": ["notify"],
+    "files": ["file_list", "file_read", "file_write", "file_stat"],
+    "time": ["curr_time", "sleep"],
+    "exec": ["exec_command", "write_stdin", "exec_kill", "exec_list"],
+    "edit": ["edit_file", "patch_file"],
+    "search": ["file_glob", "file_grep"],
+    "plan": ["update_plan"],
+    "media": ["view_image"],
+    "watch": ["watch_create", "watch_training", "watch_list", "watch_cancel", "watch_event", "watch_events"],
+    "ask": ["request_user_input", "request_user_input_async", "request_user_input_result"],
+    "agents": ["agent_sessions"],
+    "companion": ["companion_routes"],
+    "screen": ["list_screens", "screenshot", "vision"],
+    "uia": ["start_control", "stop_control", "control_status", "read_ui", "element"],
+    "input": ["mouse", "keyboard"]
+  }
+}

@@ -1,0 +1,115 @@
+{
+  "mcpdetail": {
+    "additionalProperties": false,
+    "properties": {
+      "mcp_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "mcp_id"
+    ],
+    "type": "object"
+  },
+  "mcplist": {
+    "additionalProperties": false,
+    "properties": {
+      "agent_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "type": "object"
+  },
+  "set_workspace": {
+    "additionalProperties": false,
+    "properties": {
+      "agent_id": {
+        "type": "string"
+      },
+      "workspace": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "agent_id",
+      "workspace"
+    ],
+    "type": "object"
+  },
+  "toolsearch": {
+    "additionalProperties": false,
+    "properties": {
+      "agent_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      },
+      "limit": {
+        "default": 20,
+        "type": "integer"
+      },
+      "offset": {
+        "default": 0,
+        "type": "integer"
+      },
+      "query": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "query"
+    ],
+    "type": "object"
+  },
+  "tooluse": {
+    "additionalProperties": false,
+    "properties": {
+      "arguments": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "mcp_id": {
+        "type": "string"
+      },
+      "tool": {
+        "type": "string"
+      },
+      "workspace_id": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
+      }
+    },
+    "required": [
+      "mcp_id",
+      "tool",
+      "arguments"
+    ],
+    "type": "object"
+  },
+  "workspace_list": {
+    "additionalProperties": false,
+    "properties": {},
+    "type": "object"
+  }
+}

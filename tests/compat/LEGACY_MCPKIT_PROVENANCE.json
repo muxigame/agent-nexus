@@ -1,0 +1,10 @@
+{
+  "description": "Baseline mcpkit config module frozen for the shadow-root compatibility test (design section 4.5). Do not edit.",
+  "source_commit": "f343399229f9a5166192059c09346413f681f80f",
+  "source_path": "builtins/mcpkit/src/mcpkit/config.py",
+  "generated_with": "git show <source_commit>:<source_path> > tests/compat/legacy_mcpkit/config.py",
+  "digest": "sha256 of the bytes with CRLF normalized to LF (the baseline blob uses CRLF; checkouts may differ)",
+  "files": {
+    "config.py": "5d736cf0f1cb33b1fd69ef34504647ac10b170703099dcedf65568077d0e8ba4"
+  }
+}

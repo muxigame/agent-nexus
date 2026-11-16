@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>授权 ChatGPT 访问 Agent Nexus</title>
+<!-- Production (mcpkit oauth.py): the CSP is default-src 'none'; style-src 'unsafe-inline', so the page
+     inlines a trimmed copy of tokens.css + the auth rules of ui.css in one <style>, with no script. -->
+<link rel="stylesheet" href="../../agent_nexus/static/ui/tokens.css">
+<link rel="stylesheet" href="../../agent_nexus/static/ui/ui.css">
+</head>
+<body>
+<main class="auth">
+  <form class="auth-card wide" method="post" action="/login">
+    <div class="auth-head">
+      <div class="connect-visual" aria-hidden="true">
+        <span class="avatar"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/></svg></span>
+        <span class="link-line"></span>
+        <svg class="brand-mark" width="48" height="48" viewBox="0 0 32 32"><rect width="32" height="32" rx="9" fill="var(--accent)"/><g stroke="var(--text-on-accent)" stroke-width="2.2" stroke-linecap="round" fill="none"><path d="M16 16 L16 8.5 M16 16 L9.5 20.5 M16 16 L22.5 20.5" opacity=".75"/></g><g fill="var(--text-on-accent)"><circle cx="16" cy="16" r="3.6"/><circle cx="16" cy="7.6" r="2.4"/><circle cx="8.7" cy="21.2" r="2.4"/><circle cx="23.3" cy="21.2" r="2.4"/></g></svg>
+      </div>
+      <h1>授权 ChatGPT 访问 Agent Nexus</h1>
+      <p>仅在你刚刚从客户端发起连接时授权。授权后，该客户端可以使用你的设备、连接器和邮箱工具。</p>
+    </div>
+
+    <div class="scope-list">
+      <div><svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg>
+        <div class="stack" style="gap:0"><span class="faint xs">授权后返回</span><span class="mono strong">chatgpt.com</span></div></div>
+      <div><svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/></svg>
+        <div class="stack" style="gap:0"><span class="faint xs">权限</span><span class="mono">mcp:tools / mcp:read</span></div></div>
+    </div>
+
+    <p class="error-text" role="alert" hidden></p>
+    <input type="hidden" name="flow" value="flow-key">
+    <input type="hidden" name="csrf" value="csrf-token">
+    <div class="field">
+      <label for="password">Agent Nexus 授权密码</label>
+      <input class="input input-lg" id="password" name="password" type="password" autocomplete="current-password" maxlength="4096" autofocus>
+      <span class="hint">即网关的 owner 密码。</span>
+    </div>
+    <!-- approve comes first in the DOM so Enter in the password field approves (as today); row-reverse puts it on the right -->
+    <div class="row" style="gap:8px;flex-direction:row-reverse">
+      <button class="btn btn-primary btn-lg" name="decision" value="approve" type="submit" style="flex:2">授权</button>
+      <button class="btn btn-lg" name="decision" value="deny" type="submit" style="flex:1">拒绝</button>
+    </div>
+  </form>
+  <div class="auth-foot"><span>Agent Nexus · hub.example.com</span></div>
+</main>
+</body>
+</html>

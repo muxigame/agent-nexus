@@ -1,0 +1,725 @@
+{
+ "_source": "device plugin tool surface before anx.device/1 (f343399, windows); apply_patch and codex_info were later replaced by edit_file / patch_file",
+ "tools": {
+  "companion_routes": {
+   "annotations": {
+    "openWorldHint": true,
+    "readOnlyHint": true
+   },
+   "properties": {},
+   "required": [],
+   "title": "查看 GPT Companion 路由"
+  },
+  "control_status": {
+   "annotations": {
+    "openWorldHint": false,
+    "readOnlyHint": true
+   },
+   "properties": {},
+   "required": [],
+   "title": "查看屏幕控制状态"
+  },
+  "curr_time": {
+   "annotations": {
+    "openWorldHint": false,
+    "readOnlyHint": true
+   },
+   "properties": {},
+   "required": [],
+   "title": "当前时间（UTC）"
+  },
+  "element": {
+   "annotations": {
+    "destructiveHint": false,
+    "idempotentHint": false,
+    "openWorldHint": true,
+    "readOnlyHint": false
+   },
+   "properties": {
+    "action": "string",
+    "observe": "string",
+    "ref": "string",
+    "text": "string"
+   },
+   "required": [
+    "action",
+    "ref"
+   ],
+   "title": "操作界面元素"
+  },
+  "exec_command": {
+   "annotations": {
+    "destructiveHint": false,
+    "idempotentHint": false,
+    "openWorldHint": true,
+    "readOnlyHint": false
+   },
+   "properties": {
+    "cmd": "string",
+    "login": [
+     {
+      "type": "boolean"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "max_output_tokens": [
+     {
+      "type": "number"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "shell": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "tty": "boolean",
+    "workdir": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "yield_time_ms": [
+     {
+      "type": "number"
+     },
+     {
+      "type": "null"
+     }
+    ]
+   },
+   "required": [
+    "cmd"
+   ],
+   "title": "运行命令"
+  },
+  "exec_kill": {
+   "annotations": {
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": false,
+    "readOnlyHint": false
+   },
+   "properties": {
+    "session_id": "integer"
+   },
+   "required": [
+    "session_id"
+   ],
+   "title": "终止命令"
+  },
+  "exec_list": {
+   "annotations": {
+    "openWorldHint": false,
+    "readOnlyHint": true
+   },
+   "properties": {},
+   "required": [],
+   "title": "列出运行中的命令"
+  },
+  "keyboard": {
+   "annotations": {
+    "destructiveHint": false,
+    "idempotentHint": false,
+    "openWorldHint": true,
+    "readOnlyHint": false
+   },
+   "properties": {
+    "action": "string",
+    "keys": "string",
+    "observe": "string",
+    "text": "string"
+   },
+   "required": [
+    "action"
+   ],
+   "title": "键盘输入"
+  },
+  "list_screens": {
+   "annotations": {
+    "openWorldHint": false,
+    "readOnlyHint": true
+   },
+   "properties": {},
+   "required": [],
+   "title": "列出显示器"
+  },
+  "mouse": {
+   "annotations": {
+    "destructiveHint": false,
+    "idempotentHint": false,
+    "openWorldHint": true,
+    "readOnlyHint": false
+   },
+   "properties": {
+    "action": "string",
+    "amount": "integer",
+    "button": "string",
+    "clicks": "integer",
+    "horizontal": "boolean",
+    "observe": "string",
+    "ref": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "to_x": [
+     {
+      "type": "integer"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "to_y": [
+     {
+      "type": "integer"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "x": [
+     {
+      "type": "integer"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "y": [
+     {
+      "type": "integer"
+     },
+     {
+      "type": "null"
+     }
+    ]
+   },
+   "required": [
+    "action"
+   ],
+   "title": "鼠标操作"
+  },
+  "read_ui": {
+   "annotations": {
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": false,
+    "readOnlyHint": false
+   },
+   "properties": {
+    "filter": "string",
+    "limit": "integer",
+    "query": "string",
+    "scope": "string"
+   },
+   "required": [],
+   "title": "读取界面元素"
+  },
+  "request_user_input": {
+   "annotations": {
+    "destructiveHint": false,
+    "idempotentHint": false,
+    "openWorldHint": true,
+    "readOnlyHint": false
+   },
+   "properties": {
+    "allow_custom": "boolean",
+    "kind": "string",
+    "options": [
+     {
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "question": "string",
+    "timeout_s": [
+     {
+      "type": "number"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "title": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ]
+   },
+   "required": [
+    "question"
+   ],
+   "title": "向你提问并等待回答"
+  },
+  "request_user_input_async": {
+   "annotations": {
+    "destructiveHint": false,
+    "idempotentHint": false,
+    "openWorldHint": true,
+    "readOnlyHint": false
+   },
+   "properties": {
+    "allow_custom": "boolean",
+    "kind": "string",
+    "options": [
+     {
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "question": "string",
+    "title": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ]
+   },
+   "required": [
+    "question"
+   ],
+   "title": "向你提问（不等待）"
+  },
+  "request_user_input_result": {
+   "annotations": {
+    "openWorldHint": true,
+    "readOnlyHint": true
+   },
+   "properties": {
+    "question_id": "string",
+    "wait_s": "number"
+   },
+   "required": [
+    "question_id"
+   ],
+   "title": "获取提问的回答"
+  },
+  "screenshot": {
+   "annotations": {
+    "openWorldHint": false,
+    "readOnlyHint": true
+   },
+   "properties": {
+    "max_edge": [
+     {
+      "type": "integer"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "region": [
+     {
+      "additionalProperties": {
+       "type": "integer"
+      },
+      "type": "object"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "screen": [
+     {
+      "type": "integer"
+     },
+     {
+      "type": "null"
+     }
+    ]
+   },
+   "required": [],
+   "title": "截取屏幕"
+  },
+  "sleep": {
+   "annotations": {
+    "openWorldHint": false,
+    "readOnlyHint": true
+   },
+   "properties": {
+    "duration_ms": "integer"
+   },
+   "required": [
+    "duration_ms"
+   ],
+   "title": "等待一段时间"
+  },
+  "start_control": {
+   "annotations": {
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": false,
+    "readOnlyHint": false
+   },
+   "properties": {
+    "reason": "string"
+   },
+   "required": [],
+   "title": "开始控制屏幕"
+  },
+  "stop_control": {
+   "annotations": {
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": false,
+    "readOnlyHint": false
+   },
+   "properties": {},
+   "required": [],
+   "title": "结束控制屏幕"
+  },
+  "update_plan": {
+   "annotations": {
+    "idempotentHint": true,
+    "openWorldHint": false,
+    "readOnlyHint": true
+   },
+   "properties": {
+    "explanation": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "plan": "array"
+   },
+   "required": [
+    "plan"
+   ],
+   "title": "更新任务计划"
+  },
+  "view_image": {
+   "annotations": {
+    "destructiveHint": false,
+    "idempotentHint": false,
+    "openWorldHint": true,
+    "readOnlyHint": false
+   },
+   "properties": {
+    "detail": "string",
+    "path": "string",
+    "workdir": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ]
+   },
+   "required": [
+    "path"
+   ],
+   "title": "查看本地图片"
+  },
+  "vision": {
+   "annotations": {
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": true,
+    "readOnlyHint": false
+   },
+   "properties": {
+    "action": "string",
+    "caption": "boolean",
+    "device": "string"
+   },
+   "required": [],
+   "title": "加载或卸载图标识别模型"
+  },
+  "watch_cancel": {
+   "annotations": {
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": false,
+    "readOnlyHint": false
+   },
+   "properties": {
+    "group_id": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "watch_id": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ]
+   },
+   "required": [],
+   "title": "取消后台监视"
+  },
+  "watch_create": {
+   "annotations": {
+    "destructiveHint": false,
+    "idempotentHint": false,
+    "openWorldHint": true,
+    "readOnlyHint": false
+   },
+   "properties": {
+    "companion_project_id": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "from_start": "boolean",
+    "glob_pattern": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "kind": "string",
+    "label": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "patterns": [
+     {
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "poll_interval_s": [
+     {
+      "type": "number"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "session_id": [
+     {
+      "type": "integer"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "target": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "workdir": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ]
+   },
+   "required": [
+    "kind"
+   ],
+   "title": "创建后台监视"
+  },
+  "watch_event": {
+   "annotations": {
+    "openWorldHint": false,
+    "readOnlyHint": true
+   },
+   "properties": {
+    "event_id": "string"
+   },
+   "required": [
+    "event_id"
+   ],
+   "title": "读取一条监视事件"
+  },
+  "watch_events": {
+   "annotations": {
+    "openWorldHint": false,
+    "readOnlyHint": true
+   },
+   "properties": {
+    "group_id": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "limit": "integer",
+    "watch_id": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ]
+   },
+   "required": [],
+   "title": "读取监视事件记录"
+  },
+  "watch_list": {
+   "annotations": {
+    "openWorldHint": false,
+    "readOnlyHint": true
+   },
+   "properties": {
+    "group_id": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "include_inactive": "boolean"
+   },
+   "required": [],
+   "title": "列出后台监视"
+  },
+  "watch_training": {
+   "annotations": {
+    "destructiveHint": false,
+    "idempotentHint": false,
+    "openWorldHint": true,
+    "readOnlyHint": false
+   },
+   "properties": {
+    "checkpoint_glob": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "companion_project_id": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "error_patterns": [
+     {
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "label": "string",
+    "log_path": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "poll_interval_s": "number",
+    "session_id": [
+     {
+      "type": "integer"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "workdir": "string"
+   },
+   "required": [
+    "workdir"
+   ],
+   "title": "监视模型训练"
+  },
+  "write_stdin": {
+   "annotations": {
+    "destructiveHint": false,
+    "idempotentHint": false,
+    "openWorldHint": true,
+    "readOnlyHint": false
+   },
+   "properties": {
+    "chars": "string",
+    "max_output_tokens": [
+     {
+      "type": "number"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "session_id": "integer",
+    "yield_time_ms": [
+     {
+      "type": "number"
+     },
+     {
+      "type": "null"
+     }
+    ]
+   },
+   "required": [
+    "session_id"
+   ],
+   "title": "向命令输入 / 等待输出"
+  }
+ }
+}

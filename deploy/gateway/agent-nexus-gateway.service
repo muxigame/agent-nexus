@@ -1,0 +1,33 @@
+# agent-nexus gateway (production instance).
+# Install: cp agent-nexus-gateway.service /etc/systemd/system/ && systemctl daemon-reload
+#          && systemctl enable --now agent-nexus-gateway.service
+# Layout: release under /opt/agent-nexus/current, config /etc/agent-nexus/gateway.json
+# (host/port live there; the reference setup listens on 127.0.0.1:8440 behind a
+# reverse proxy), secrets in /etc/agent-nexus/gateway.env, state in /var/lib/agent-nexus.
+[Unit]
+Description=Agent Nexus gateway (cloud MCP endpoint and device ingress)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=agent-nexus
+Group=agent-nexus
+WorkingDirectory=/opt/agent-nexus/current
+EnvironmentFile=/etc/agent-nexus/gateway.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/agent-nexus/current/.venv/bin/python -m agent_nexus.cloud --config /etc/agent-nexus/gateway.json
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=20
+StateDirectory=agent-nexus
+StateDirectoryMode=0750
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/agent-nexus
+
+[Install]
+WantedBy=multi-user.target

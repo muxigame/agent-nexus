@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>设备 · Agent Nexus</title>
+<link rel="stylesheet" href="../../agent_nexus/static/ui/tokens.css">
+<link rel="stylesheet" href="../../agent_nexus/static/ui/ui.css">
+<script type="module" src="mock.js"></script>
+</head>
+<body data-shell="cloud" data-active="/devices" data-title="设备">
+<template id="content">
+  <div class="page-head">
+    <div class="titles">
+      <h1>设备</h1>
+      <p>运行 Agent Nexus 客户端并加入网关的电脑。每台设备有自己的凭据，可以随时吊销。</p>
+    </div>
+    <div class="actions">
+      <button class="btn btn-primary" type="button" data-open="invite"><i data-icon="ticket"></i>邀请新设备</button>
+    </div>
+  </div>
+
+  <div class="table-wrap">
+    <table class="table stack-sm">
+      <thead>
+        <tr><th>设备</th><th>状态</th><th>agent_id</th><th>版本</th><th>入网方式</th><th>最后在线</th><th></th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="cell-first"><div class="cell-main"><span class="avatar"><i data-icon="monitor"></i></span>
+            <div class="stack" style="gap:0"><span class="title">工作站</span><span class="sub">主机名 <span class="mono">DESKTOP-7Q2K</span> · Windows 11</span></div></div></td>
+          <td data-label="状态"><span class="pill ok">在线</span></td>
+          <td data-label="agent_id"><span class="mono">pc-main</span></td>
+          <td data-label="版本"><span class="mono">0.2.0</span></td>
+          <td data-label="入网方式"><span class="tag">令牌映射</span></td>
+          <td data-label="最后在线" class="muted">刚刚</td>
+          <td class="actions"><div class="btn-group">
+            <button class="btn btn-sm" type="button" data-open="rename"><i data-icon="pencil" data-size="14"></i>备注名</button>
+            <button class="btn btn-ghost btn-sm btn-icon" type="button" aria-label="更多"><i data-icon="ellipsis"></i></button></div></td>
+        </tr>
+        <tr>
+          <td class="cell-first"><div class="cell-main"><span class="avatar"><i data-icon="laptop"></i></span>
+            <div class="stack" style="gap:0"><span class="title">笔记本</span><span class="sub">主机名 <span class="mono">LAPTOP-LI</span> · Windows 11</span></div></div></td>
+          <td data-label="状态"><span class="pill ok">在线</span></td>
+          <td data-label="agent_id"><span class="mono">laptop</span></td>
+          <td data-label="版本"><span class="mono">0.2.0</span></td>
+          <td data-label="入网方式"><span class="tag">邀请码</span></td>
+          <td data-label="最后在线" class="muted">刚刚</td>
+          <td class="actions"><div class="btn-group">
+            <button class="btn btn-sm" type="button" data-open="rename"><i data-icon="pencil" data-size="14"></i>备注名</button>
+            <button class="btn btn-ghost btn-sm btn-icon" type="button" aria-label="更多"><i data-icon="ellipsis"></i></button></div></td>
+        </tr>
+        <tr>
+          <td class="cell-first"><div class="cell-main"><span class="avatar"><i data-icon="server"></i></span>
+            <div class="stack" style="gap:0"><span class="title">构建机</span><span class="sub">主机名 <span class="mono">build-01</span> · Ubuntu 24.04</span></div></div></td>
+          <td data-label="状态"><span class="pill">离线</span></td>
+          <td data-label="agent_id"><span class="mono">build-01</span></td>
+          <td data-label="版本"><span class="mono">0.1.9</span> <span class="pill warn plain" title="0.2.0 可用">可更新</span></td>
+          <td data-label="入网方式"><span class="tag">邀请码</span></td>
+          <td data-label="最后在线" class="muted">3 小时前</td>
+          <td class="actions"><div class="btn-group">
+            <button class="btn btn-sm" type="button" data-open="rename"><i data-icon="pencil" data-size="14"></i>备注名</button>
+            <button class="btn btn-ghost btn-sm btn-icon" type="button" aria-label="更多"><i data-icon="ellipsis"></i></button></div></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <section>
+    <div class="section-head"><h2>未使用的邀请</h2><span class="faint small hide-sm">邀请只能使用一次，过期后自动失效</span></div>
+    <div class="list">
+      <div class="list-item">
+        <span class="avatar accent"><i data-icon="ticket"></i></span>
+        <div class="stack grow" style="gap:0"><span class="title">家里的台式机</span><span class="sub"><span class="mono">inv_4fK9q2</span> · 创建于 10 分钟前</span></div>
+        <div class="meta"><span class="faint xs hide-sm">23 小时后过期</span><span class="pill accent">未使用</span>
+          <button class="btn btn-ghost btn-sm btn-icon" type="button" aria-label="作废" data-toast="邀请已作废"><i data-icon="trash"></i></button></div>
+      </div>
+      <div class="list-item">
+        <span class="avatar accent"><i data-icon="ticket"></i></span>
+        <div class="stack grow" style="gap:0"><span class="title">测试虚拟机</span><span class="sub"><span class="mono">inv_Q8w1mz</span> · 创建于 2 天前</span></div>
+        <div class="meta"><span class="faint xs hide-sm">5 天后过期</span><span class="pill accent">未使用</span>
+          <button class="btn btn-ghost btn-sm btn-icon" type="button" aria-label="作废" data-toast="邀请已作废"><i data-icon="trash"></i></button></div>
+      </div>
+    </div>
+  </section>
+</template>
+
+<template id="invite" data-kind="modal" data-title="邀请新设备" data-desc="在新电脑上安装 Agent Nexus，打开“连接云端”，粘贴下面的邀请码。"
+  data-actions='[{"label":"完成","variant":"primary"}]'>
+  <div class="stack lg">
+    <div class="banner ok"><i data-icon="circle-check"></i><div class="banner-body"><div class="banner-title">邀请已创建</div><div class="muted">邀请码只显示这一次，24 小时内有效，只能使用一次。</div></div></div>
+    <div class="field">
+      <span class="field-label">邀请码</span>
+      <div class="token multiline"><code>anx1.eyJodWIiOiJodHRwczovL2h1Yi5leGFtcGxlLmNvbSIsImlkIjoiaW52XzRmSzlxMiIsInNlY3JldCI6InotWUlZQ2NzeTl6SjZMVUJfcXBvQ3FGdnJaNVc5cGJ3OVF4WDdfcGprYTAifQ</code><button class="btn btn-sm" type="button" data-copy="anx1.eyJodWIiOiJodHRwczovL2h1Yi5leGFtcGxlLmNvbSIsImlkIjoiaW52XzRmSzlxMiIsInNlY3JldCI6InotWUlZQ2NzeTl6SjZMVUJfcXBvQ3FGdnJaNVc5cGJ3OVF4WDdfcGprYTAifQ"><i data-icon="copy" data-size="14"></i>复制</button></div>
+      <span class="hint">邀请码里已经带有网关地址，客户端粘贴即可，无需再填写服务器。</span>
+    </div>
+    <div class="field">
+      <span class="field-label">或者在已安装客户端的电脑上打开链接</span>
+      <div class="token"><code>agentnexus://enroll?invite=anx1.eyJodWIiOiJodHRwczovL2h1Yi5leGFtcGxlLmNvbSIs…</code><button class="btn btn-sm" type="button" data-copy="agentnexus://enroll?invite=anx1.example"><i data-icon="copy" data-size="14"></i>复制链接</button></div>
+    </div>
+    <dl class="kv">
+      <dt>备注</dt><dd>家里的台式机</dd>
+      <dt>过期时间</dt><dd>明天 15:42</dd>
+      <dt>还没装客户端？</dt><dd><a href="cloud-downloads.html">下载 Windows 安装包</a></dd>
+    </dl>
+  </div>
+</template>
+
+<template id="rename" data-kind="modal" data-size="sm" data-title="设置备注名" data-desc="Agent 在 device_list、地址和提醒中看到的都是备注名；agent_id 不变。"
+  data-actions='[{"label":"取消"},{"label":"保存","variant":"primary","toast":"备注名已更新"}]'>
+  <div class="form">
+    <div class="field"><label for="alias">备注名</label><input class="input" id="alias" value="工作站"><span class="hint">留空则显示主机名 DESKTOP-7Q2K</span></div>
+  </div>
+</template>
+</body>
+</html>

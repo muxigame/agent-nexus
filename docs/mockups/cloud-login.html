@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>登录 · Agent Nexus</title>
+<link rel="stylesheet" href="../../agent_nexus/static/ui/tokens.css">
+<link rel="stylesheet" href="../../agent_nexus/static/ui/ui.css">
+<script type="module" src="mock.js"></script>
+</head>
+<body>
+<template id="content">
+  <main class="auth">
+    <form class="auth-card" method="post" action="/auth/login">
+      <div class="auth-head">
+        <span data-logo="44"></span>
+        <h1>登录 Agent Nexus</h1>
+        <p>输入网关的 owner 密码。它与 ChatGPT、Claude 连接时授权页使用的密码相同。</p>
+      </div>
+      <div class="form">
+        <input type="hidden" name="next" value="/#/">
+        <div class="field">
+          <label for="password">Owner 密码</label>
+          <input class="input input-lg" id="password" name="password" type="password" autocomplete="current-password" maxlength="4096" autofocus>
+        </div>
+        <label class="check"><input type="checkbox" name="remember" checked> 在这台设备上保持登录 30 天</label>
+        <button class="btn btn-primary btn-lg btn-block" type="submit">登录</button>
+      </div>
+    </form>
+    <div class="auth-foot">
+      <span>hub.example.com</span>
+      <a href="cloud-downloads.html">下载客户端</a>
+    </div>
+  </main>
+</template>
+</body>
+</html>
