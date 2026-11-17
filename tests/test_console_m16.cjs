@@ -38,7 +38,7 @@ test("the QR SVG is black on white with a quiet zone, and long input is refused"
 
 test("invite codes decode in the browser like on the gateway", async () => {
   const { decodeInvite, inviteFromText, hubHost } = await load("ui/invite.js");
-  const payload = { hub: "https://hub.example.test", id: "inv_4fK9q2ab", secret: "z-YIYCcsy9zJ6LUB_qpoCqFvrZ5W9pbw9QxX7_pjka0" };
+  const payload = { hub: "https://hub.example.test", id: "inv_4fK9q2ab", secret: "z-YIYCcsy9zJ6LUB_qpoCqFvrZ5W9pbw9QxX7_pjka0" }; // gitleaks:allow (synthetic)
   const code = "anx1." + Buffer.from(JSON.stringify(payload)).toString("base64url");
   assert.deepEqual(decodeInvite(code), payload);
   assert.deepEqual(decodeInvite(`agentnexus://enroll?invite=${code}`), payload);

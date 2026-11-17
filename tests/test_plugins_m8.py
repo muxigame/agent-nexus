@@ -245,7 +245,7 @@ def test_failed_health_check_rolls_a_fresh_install_back(root, tmp_path):
 
 def test_unhealthy_update_rolls_back_to_the_previous_version(root, tmp_path):
     good = make_plugin(tmp_path / "v1" / "fixture", version="1.0.0")
-    port = json.loads((good / "mcp-service.json").read_text())["port"]
+    port = json.loads((good / "mcp-service.json").read_text(encoding="utf-8"))["port"]
     bad = make_plugin(tmp_path / "v2" / "fixture", version="2.0.0", mode="unhealthy", port=port)
     sup = Supervisor(root)
     inst = Installer(root, sup, health_timeout=8)

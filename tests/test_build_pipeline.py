@@ -419,6 +419,7 @@ class RipgrepBundleTests(unittest.TestCase):
             rg.write_bytes(b"MZrg")
             uv = Path(scratch) / "uv.exe"
             uv.write_bytes(b"MZuv")
+            uv.chmod(0o755)
             files = dict((name, path) for path, name in release.release_files("runtime", uv=str(uv), rg=str(rg)))
             self.assertEqual(files["tools/rg.exe"], rg)
             self.assertEqual(files["tools/uv.exe"], uv)

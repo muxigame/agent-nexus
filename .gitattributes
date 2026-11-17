@@ -1,0 +1,8 @@
+# Checked-in text is LF everywhere; Windows scripts keep CRLF.
+* text=auto eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+# Frozen legacy packages are hashed byte for byte (tests/compat): never convert them.
+tests/compat/legacy_mcpm/** -text
+tests/compat/legacy_mcpkit/** -text

@@ -1,4 +1,5 @@
 import base64
+import sys
 from pathlib import Path
 
 import pytest
@@ -15,7 +16,7 @@ def server(tmp_path: Path) -> DeviceServer:
 @pytest.mark.asyncio
 async def test_expected_tool_surface(server: DeviceServer) -> None:
     tools = await server.mcp.list_tools()
-    assert [tool.name for tool in tools] == [
+    expected = [
         "exec_command",
         "write_stdin",
         "exec_kill",
@@ -57,6 +58,11 @@ async def test_expected_tool_surface(server: DeviceServer) -> None:
         "file_write",
         "agent_sessions",
     ]
+    if sys.platform != "win32":  # desktop control (uia) is a Windows capability
+        uia = {"start_control", "stop_control", "control_status", "list_screens", "screenshot",
+               "vision", "read_ui", "element", "mouse", "keyboard"}
+        expected = [name for name in expected if name not in uia]
+    assert [tool.name for tool in tools] == expected
 
 
 

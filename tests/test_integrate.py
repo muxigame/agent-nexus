@@ -190,17 +190,20 @@ def _backups(path: Path) -> list[Path]:
     return sorted(path.parent.glob(path.name + ".anx-backup-*"))
 
 
+ROOT = Path("C:/anx-root") if os.name == "nt" else Path("/anx-root")
+
+
 def test_integrate_claude_adds_is_idempotent_backs_up_and_removes(home, capsys):
     settings = home / ".claude" / "settings.json"
     settings.parent.mkdir()
     settings.write_text(json.dumps(USER_SETTINGS, indent=4), encoding="utf-8")
     original = settings.read_text(encoding="utf-8")
 
-    assert integrate.run("claude", dry_run=True, root=Path("C:/anx-root")) == 0
+    assert integrate.run("claude", dry_run=True, root=ROOT) == 0
     assert settings.read_text(encoding="utf-8") == original and not _backups(settings)
     assert "would add hooks.SessionStart" in capsys.readouterr().out
 
-    assert integrate.run("claude", root=Path("C:/anx-root")) == 0
+    assert integrate.run("claude", root=ROOT) == 0
     data = json.loads(settings.read_text(encoding="utf-8"))
     assert data["env"] == {"FOO": "1"} and data["enabledPlugins"] == {"x@y": True}
     assert data["hooks"]["PreToolUse"] == USER_SETTINGS["hooks"]["PreToolUse"]
@@ -208,7 +211,7 @@ def test_integrate_claude_adds_is_idempotent_backs_up_and_removes(home, capsys):
     assert start[0] == USER_SETTINGS["hooks"]["SessionStart"][0]
     ours = start[1]["hooks"][0]
     assert ours["type"] == "command" and ours["timeout"] == 5 and ours["async"] is True
-    assert ours["command"].endswith(" --root C:/anx-root hook claude --event SessionStart")
+    assert ours["command"].endswith(f" --root {ROOT.as_posix()} hook claude --event SessionStart")
     assert "\\" not in ours["command"]
     prompt = data["hooks"]["UserPromptSubmit"]
     assert len(prompt) == 1 and "matcher" not in prompt[0]
@@ -217,7 +220,7 @@ def test_integrate_claude_adds_is_idempotent_backs_up_and_removes(home, capsys):
     assert len(backups) == 1 and backups[0].read_text(encoding="utf-8") == original
 
     capsys.readouterr()
-    assert integrate.run("claude", root=Path("C:/anx-root")) == 0  # idempotent: no change, no new backup
+    assert integrate.run("claude", root=ROOT) == 0  # idempotent: no change, no new backup
     assert "nothing to change" in capsys.readouterr().out and len(_backups(settings)) == 1
 
     assert integrate.run("claude", remove=True) == 0

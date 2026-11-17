@@ -603,7 +603,7 @@ def test_a_package_without_the_owners_config_installs_as_needs_config(tmp_path):
 
 # -- regressions from the independent verification ---------------------------------------------
 
-SECRET_VALUE = "Xk9vQ2mPz7Lr4tWb"
+SECRET_VALUE = "Xk9vQ2mPz7Lr4tWb"  # gitleaks:allow (synthetic)
 
 
 def test_pack_excludes_owner_data_whatever_the_letter_case(tmp_path):
