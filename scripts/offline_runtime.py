@@ -65,7 +65,7 @@ def managed_python(uv: str) -> Path:
 def _sync(uv: str, stage: Path, project: Path, flags: list[str], venv: Path, offline: bool) -> None:
     env = {**os.environ, "UV_CACHE_DIR": str(stage / "tools" / "uv-cache"),
            "UV_PYTHON_INSTALL_DIR": str(stage / "tools" / "python"), "UV_PYTHON_PREFERENCE": "only-managed",
-           "UV_PROJECT_ENVIRONMENT": str(venv), "UV_LINK_MODE": "copy"}
+           "UV_PROJECT_ENVIRONMENT": str(venv), "UV_LINK_MODE": "copy", "PYTHONDONTWRITEBYTECODE": "1"}
     env.pop("VIRTUAL_ENV", None)
     if offline:
         env["UV_OFFLINE"] = "1"
@@ -120,7 +120,10 @@ def bundle(files: list[tuple[Path, str]], uv: str, scratch: Path) -> list[tuple[
     report = prepare(stage, uv)
     extra = [(path, path.relative_to(stage).as_posix())
              for folder in (stage / "tools" / "python", stage / "tools" / "uv-cache")
-             for path in sorted(folder.rglob("*")) if path.is_file()]
+             for path in sorted(folder.rglob("*"))
+             # Running the staged interpreter (uv sync, build backends) leaves bytecode
+             # behind; clients compile their own and release verification rejects it.
+             if path.is_file() and "__pycache__" not in path.parts and path.suffix != ".pyc"]
     longest = max((len(name) for _, name in extra), default=0)
     print(f"offline runtime: {report['python']}, {len(report['projects'])} projects, {len(extra)} files, "
           f"longest path {longest} chars")
