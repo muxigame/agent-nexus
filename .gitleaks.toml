@@ -9,3 +9,8 @@ paths = [
   '''(^|/)Cargo\.lock$''',
   '''^tests/test_hygiene\.py$''',
 ]
+# Synthetic secrets in test fixtures (matched on the secret, so history scans pass too).
+regexes = [
+  '''^Xk9vQ2mPz7Lr4tWb$''',
+  '''^z-YIYCcsy9zJ6LUB_qpoCqFvrZ5W9pbw9QxX7_pjka0$''',
+]
