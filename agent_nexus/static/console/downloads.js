@@ -22,7 +22,7 @@ export async function renderDownloads(target, { inviteHref = "/#/devices?invite=
   if (!items.length && !(data.links || []).length) {
     sections.push(el("section", { class: "card" }, el("div", { class: "card-body" }, emptyState({
       icon: "package", title: "还没有可下载的安装包",
-      text: "把发布产物（agent-nexus_<版本>_x64-setup.exe 等）复制到网关的 downloads.dir 目录（默认 <状态目录>/downloads），或在 gateway.json 配置 downloads.links / release_url。",
+      text: "在 gateway.json 配置 downloads.manifest_url（发布 CI 写到 OSS 的 downloads.json），或把发布产物复制到网关的 downloads.dir 目录（默认 <状态目录>/downloads）。",
     }))));
     mount(target, sections);
     return;
@@ -42,7 +42,8 @@ export async function renderDownloads(target, { inviteHref = "/#/devices?invite=
   }
   const steps = el("section", { class: "card" }, el("div", { class: "card-head" }, el("h2", {}, "安装之后")),
     el("div", { class: "card-body" }, el("div", { class: "steps" },
-      step("运行安装包", "安装包没有代码签名，Windows SmartScreen 提示时选择“更多信息 → 仍要运行”。安装后托盘出现 Agent Nexus 图标。"),
+      step("运行安装包", el("span", {}, "Windows：运行 setup.exe，SmartScreen 提示时选择“更多信息 → 仍要运行”。Ubuntu 22.04+：",
+        el("span", { class: "mono" }, "sudo apt install ./agent-nexus_<版本>_amd64.deb"), "，然后从应用菜单启动。安装后托盘出现 Agent Nexus 图标。")),
       step("用邀请码加入网关", el("span", {}, "在 ", el("a", { href: inviteHref }, "设备 → 邀请新设备"), " 生成邀请码，粘贴到客户端的“连接云端”页（或命令行 ", el("span", { class: "mono" }, "anx join <邀请码>"), "）。")),
       step("安装和启用插件", "在客户端“插件”页：标着“未安装”的插件点“安装”，选它的文件夹、Git 地址或压缩包；已安装的打开开关即可启动，需要配置的会提示你填写。"))));
   const otherCard = el("section", { class: "card" }, el("div", { class: "card-head" }, el("h2", {}, "其他平台与链接")),

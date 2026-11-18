@@ -78,6 +78,24 @@ def test_dry_run_needs_no_credentials_and_keeps_latest_for_prereleases(tmp_path:
     assert "agent-nexus/latest.json <- latest.json of 0.2.1" in capsys.readouterr().out
 
 
+def test_manifest_lists_the_installers_with_public_urls(tmp_path: Path) -> None:
+    dist = release(tmp_path)
+    (dist / "agent-nexus_0.2.1_amd64.deb").write_bytes(b"!<arch>deb")
+    listing = publish.manifest(dist, "0.2.1", BASE, "2026-11-18")
+    assert listing["version"] == "0.2.1" and listing["published_at"] == "2026-11-18"
+    names = [entry["filename"] for entry in listing["files"]]
+    assert names == ["agent-nexus_0.2.1_amd64.deb", "agent-nexus_0.2.1_x64-setup.exe"]
+    deb = listing["files"][0]
+    assert deb["url"] == f"{BASE}/releases/0.2.1/agent-nexus_0.2.1_amd64.deb"
+    assert deb["size"] == len(b"!<arch>deb") and len(deb["sha256"]) == 64
+
+
+def test_dry_run_announces_the_manifest(tmp_path: Path, capsys) -> None:
+    dist = release(tmp_path)
+    assert publish.main(["--dist", str(dist), "--version", "0.2.1", "--public-base", BASE, "--dry-run"]) == 0
+    assert "agent-nexus/downloads.json <- 1 file(s) of 0.2.1" in capsys.readouterr().out
+
+
 def test_the_desktop_updater_polls_the_oss_feed() -> None:
     conf = json.loads((ROOT / "desktop/src-tauri/tauri.conf.json").read_text(encoding="utf-8"))
     assert conf["plugins"]["updater"]["endpoints"] == [f"{publish.DEFAULT_PUBLIC_BASE}/latest.json"]

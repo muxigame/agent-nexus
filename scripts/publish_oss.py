@@ -3,11 +3,15 @@
 Layout under ``<prefix>`` (default ``agent-nexus``) in the public-read bucket::
 
     <prefix>/releases/<version>/<every release file, latest.json included>
+    <prefix>/downloads.json     <- the public file list the gateway's /downloads page reads
     <prefix>/latest.json        <- what tauri.conf.json's updater endpoint polls
 
 Order matters: every versioned file is uploaded first and then fetched back
 through its public URL (size must match); only then is ``<prefix>/latest.json``
 replaced, so a client never sees a feed whose installer is missing or partial.
+``<prefix>/downloads.json`` (every installer of this version with its size,
+SHA-256 and public URL) moves together with it, so the website's download page
+lists a new release without anyone copying files to the gateway host.
 A prerelease version (``1.2.3-rc.1``) is uploaded but never becomes latest.
 
 Credentials come from the environment, as set by
@@ -22,6 +26,8 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import datetime as _dt
+import hashlib
 import json
 import mimetypes
 import os
@@ -35,6 +41,7 @@ DEFAULT_ENDPOINT = "https://oss-cn-hangzhou.aliyuncs.com"
 DEFAULT_PREFIX = "agent-nexus"
 DEFAULT_PUBLIC_BASE = f"https://{DEFAULT_BUCKET}.oss-cn-hangzhou.aliyuncs.com/{DEFAULT_PREFIX}"
 FEED = "latest.json"
+MANIFEST = "downloads.json"
 NO_CACHE = "no-cache, max-age=0"
 RESUMABLE_BYTES = 20 * 1024 * 1024
 
@@ -72,6 +79,23 @@ def check_feed(feed_path: Path, version: str, public_base: str) -> dict:
     if not feed.get("platforms"):
         raise PublishError(f"{FEED} lists no platform")
     return feed
+
+
+def manifest(dist: Path, version: str, public_base: str, published_at: str) -> dict:
+    """The download list for ``<prefix>/downloads.json``: installers only (no feed, signatures or sums)."""
+    files = []
+    for path in sorted(dist.iterdir()):
+        if not path.is_file() or path.name in {FEED, MANIFEST, "SHA256SUMS"} or path.suffix == ".sig":
+            continue
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        files.append({"filename": path.name, "size": path.stat().st_size, "sha256": digest.hexdigest(),
+                      "url": f"{public_base.rstrip('/')}/releases/{quote(version)}/{quote(path.name)}"})
+    if not files:
+        raise PublishError(f"{dist} has no installer to list in {MANIFEST}")
+    return {"version": version, "published_at": published_at, "files": files}
 
 
 def public_url(public_base: str, key: str, prefix: str) -> str:
@@ -127,12 +151,15 @@ def main(argv: list[str] | None = None) -> int:
     try:
         steps = plan(args.dist, version, args.prefix)
         check_feed(args.dist / FEED, version, args.public_base)
+        downloads = manifest(args.dist, version, args.public_base, _dt.date.today().isoformat())
         latest_key = f"{args.prefix.strip('/')}/{FEED}"
+        manifest_key = f"{args.prefix.strip('/')}/{MANIFEST}"
         for path, key in steps:
             print(f"{'would upload' if args.dry_run else 'upload'} {path.name} -> oss://{args.bucket}/{key}")
         if prerelease(version):
-            print(f"{version} is a prerelease: {latest_key} stays as it is")
+            print(f"{version} is a prerelease: {latest_key} and {manifest_key} stay as they are")
         else:
+            print(f"then {manifest_key} <- {len(downloads['files'])} file(s) of {version}")
             print(f"then {latest_key} <- {FEED} of {version}")
         if args.dry_run:
             return 0
@@ -146,6 +173,10 @@ def main(argv: list[str] | None = None) -> int:
                 raise PublishError(f"{url} answers with {size} bytes, expected {path.stat().st_size}; latest.json not moved")
             print(f"verified {url}")
         if not prerelease(version):
+            listing = args.dist.parent / f".{MANIFEST}"
+            listing.write_text(json.dumps(downloads, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            upload(oss2, bucket, listing, manifest_key, NO_CACHE)
+            print(f"published {public_url(args.public_base, manifest_key, args.prefix)} -> {version}")
             upload(oss2, bucket, args.dist / FEED, latest_key, NO_CACHE)
             print(f"published {public_url(args.public_base, latest_key, args.prefix)} -> {version}")
     except (PublishError, OSError, ValueError) as error:

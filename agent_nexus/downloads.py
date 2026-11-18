@@ -3,8 +3,14 @@
 ``gateway.json``::
 
     "downloads": {"dir": "<state_dir>/downloads",            # default
+                  "manifest_url": "https://<bucket>/agent-nexus/downloads.json",  # optional
                   "release_url": "https://github.com/<owner>/<repo>/releases",  # optional
                   "links": [{"label": "GitHub Releases", "url": "https://…"}]}  # optional
+
+``manifest_url`` is the file list release CI publishes with every release
+(scripts/publish_oss.py): its installers are listed with their public URLs, so
+a new release appears here without copying anything to the gateway host. It is
+fetched at most every few minutes; on failure the last good copy is kept.
 
 Release artifacts copied into ``dir`` (``agent-nexus_<v>_x64-setup.exe``, the
 ``.deb``, ``agent-nexus-gateway-<v>.zip``, and optionally ``SHA256SUMS``) are
@@ -18,8 +24,12 @@ from __future__ import annotations
 
 import datetime as _dt
 import hashlib
+import json
+import logging
 import re
 import threading
+import time
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -29,7 +39,11 @@ ARTIFACT_SUFFIXES = (".exe", ".msi", ".deb", ".rpm", ".appimage", ".dmg", ".zip"
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,199}")
 _VERSION = re.compile(r"(?<![0-9])(\d+\.\d+\.\d+(?:-(?:rc|beta|alpha|dev)[0-9.]*)?)", re.IGNORECASE)
 _HEX64 = re.compile(r"[0-9a-fA-F]{64}")
-KNOWN_KEYS = frozenset({"dir", "release_url", "links"})
+KNOWN_KEYS = frozenset({"dir", "manifest_url", "release_url", "links"})
+MANIFEST_TTL_S = 300
+MANIFEST_MAX_BYTES = 1024 * 1024
+
+log = logging.getLogger(__name__)
 
 
 def version_key(version: str | None) -> tuple:
@@ -78,6 +92,11 @@ class Downloads:
         if release is not None and (not isinstance(release, str) or not release.startswith(("https://", "http://"))):
             raise ConfigError("downloads.release_url must be an http(s) URL")
         self.release_url = release.rstrip("/") if release else None
+        manifest = section.get("manifest_url")
+        if manifest is not None and (not isinstance(manifest, str) or not manifest.startswith("https://")):
+            raise ConfigError("downloads.manifest_url must be an https URL")
+        self.manifest_url = manifest or None
+        self._remote_cache: tuple[float, list[dict]] | None = None
         links = section.get("links") or []
         if not isinstance(links, list) or not all(
                 isinstance(item, dict) and isinstance(item.get("url"), str) and item["url"].startswith(("https://", "http://"))
@@ -142,6 +161,38 @@ class Downloads:
             self._cache[path.name] = (stat.st_size, stat.st_mtime_ns, value)
         return value
 
+    def _remote(self) -> list[dict]:
+        """Installers listed by ``manifest_url`` (cached for MANIFEST_TTL_S; the last good list on failure)."""
+        if not self.manifest_url:
+            return []
+        now = time.monotonic()
+        with self._lock:
+            cached = self._remote_cache
+        if cached and now - cached[0] < MANIFEST_TTL_S:
+            return cached[1]
+        try:
+            request = urllib.request.Request(self.manifest_url, headers={
+                "Cache-Control": "no-cache", "User-Agent": "agent-nexus-gateway"})
+            with urllib.request.urlopen(request, timeout=5) as response:
+                data = json.loads(response.read(MANIFEST_MAX_BYTES))
+            published = str(data.get("published_at") or "")[:10] or None
+            entries = []
+            for entry in data.get("files") or []:
+                name, url, sha, size = (entry.get(key) for key in ("filename", "url", "sha256", "size"))
+                if (isinstance(name, str) and _NAME.fullmatch(name) and ".." not in name
+                        and name.lower().endswith(ARTIFACT_SUFFIXES)
+                        and isinstance(url, str) and url.startswith("https://")
+                        and isinstance(sha, str) and _HEX64.fullmatch(sha)
+                        and isinstance(size, int) and not isinstance(size, bool) and size >= 0):
+                    entries.append({"filename": name, "url": url, "sha256": sha.lower(), "size": size,
+                                    "published_at": published})
+        except (OSError, ValueError, AttributeError, TypeError) as exc:
+            log.warning("downloads.manifest_url %s: %s", self.manifest_url, exc)
+            entries = cached[1] if cached else []
+        with self._lock:
+            self._remote_cache = (now, entries)
+        return entries
+
     def items(self) -> dict:
         """``GET /api/downloads`` (blocking: hashes new files; call from a thread)."""
         found = []
@@ -163,6 +214,14 @@ class Downloads:
             item.update(filename=path.name, version=match.group(1) if match else None, size=stat.st_size,
                         sha256=sha, url="/downloads/" + path.name,
                         published_at=_dt.datetime.fromtimestamp(stat.st_mtime).date().isoformat())
+            found.append(item)
+        remote = self._remote()
+        listed = {entry["filename"] for entry in remote}
+        found = [item for item in found if item["filename"] not in listed]
+        for entry in remote:
+            match = _VERSION.search(entry["filename"])
+            item = classify(entry["filename"])
+            item.update(entry, version=match.group(1) if match else None)
             found.append(item)
         found.sort(key=lambda item: (version_key(item["version"]), item["filename"]), reverse=True)
         newest: dict[str, str | None] = {}

@@ -120,7 +120,10 @@ token on a bearer-only gateway. One sign-in also covers the `/inbox/` PWA.
 - **Downloads**: `GET /downloads` (a public page), `GET /api/downloads` and
   `GET /downloads/<file>` serve the release artifacts found in `downloads.dir`
   (default `<state_dir>/downloads`, created by `install.sh`; `anx-gateway migrate` writes the
-  key). Copy the new installer there after each release, for example
+  key), plus every installer of the latest release when `downloads.manifest_url` is set:
+  `"downloads": {"manifest_url": "https://muxigame-prod-static-cn.oss-cn-hangzhou.aliyuncs.com/agent-nexus/downloads.json"}`.
+  Release CI (`scripts/publish_oss.py`) rewrites that file with each release, so nothing has to be
+  copied to the host; the gateway re-reads it every 5 minutes. Without it, copy the installers by hand, e.g.
   `install -m 0644 -o agent-nexus agent-nexus_<version>_x64-setup.exe SHA256SUMS /var/lib/agent-nexus/downloads/`.
   Only `.exe .msi .deb .rpm .AppImage .dmg .zip .tar.gz` files directly in that directory
   are served; SHA-256 comes from `SHA256SUMS` or is computed once. Optional:
