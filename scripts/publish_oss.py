@@ -44,6 +44,9 @@ FEED = "latest.json"
 MANIFEST = "downloads.json"
 NO_CACHE = "no-cache, max-age=0"
 RESUMABLE_BYTES = 20 * 1024 * 1024
+#: Parallel multipart upload: one stream from a GitHub runner to Hangzhou is slow.
+PART_BYTES = 8 * 1024 * 1024
+UPLOAD_THREADS = 8
 
 
 class PublishError(RuntimeError):
@@ -131,7 +134,8 @@ def upload(oss2, bucket, path: Path, key: str, cache_control: str | None = None)
     if cache_control:
         headers["Cache-Control"] = cache_control
     if path.stat().st_size > RESUMABLE_BYTES:
-        oss2.resumable_upload(bucket, key, str(path), headers=headers, multipart_threshold=RESUMABLE_BYTES)
+        oss2.resumable_upload(bucket, key, str(path), headers=headers, multipart_threshold=RESUMABLE_BYTES,
+                              part_size=PART_BYTES, num_threads=UPLOAD_THREADS)
     else:
         bucket.put_object_from_file(key, str(path), headers=headers)
 

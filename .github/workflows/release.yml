@@ -143,6 +143,9 @@ jobs:
           role-to-assume: ${{ vars.ALIYUN_ROLE_ARN }}
           oidc-provider-arn: ${{ vars.ALIYUN_OIDC_PROVIDER_ARN }}
           role-session-name: agent-nexus-release
+          # GitHub's runners reach the Hangzhou bucket slowly; v0.2.2 outlived the default
+          # 30 minutes mid-upload. The role allows up to 3 h (MaxSessionDuration 10800).
+          role-session-expiration: 10800
       - name: Upload, verify, move latest.json
         env:
           ALIBABA_CLOUD_ACCESS_KEY_ID: ${{ steps.aliyun.outputs.aliyun-access-key-id }}
