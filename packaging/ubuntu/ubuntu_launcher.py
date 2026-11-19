@@ -49,15 +49,40 @@ STARTUP_LOG = ROOT / ".anx/logs/startup.log"
 LOG = logging.getLogger(__name__)
 
 
+def _walk(top):
+    """Every path under ``top``; symlinks are yielded, never followed."""
+    for directory, directories, files in os.walk(top):
+        base = Path(directory)
+        for name in sorted(directories) + sorted(files):
+            yield base / name
+
+
+def _remove(path):
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.is_dir():
+        shutil.rmtree(path)
+
+
 def prepare():
     ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
     version = hashlib.sha256((SOURCE / "SHA256.json").read_bytes()).hexdigest()
     if (ROOT / ".installed-version").exists() and (ROOT / ".installed-version").read_text() == version and (ROOT / "tools/uv").is_file() and (ROOT / "agent_nexus/cli.py").is_file():
         return
-    for source in SOURCE.rglob("*"):
+    for source in _walk(SOURCE):
         relative = source.relative_to(SOURCE)
         target = ROOT / relative
-        if source.is_dir():
+        if source.is_symlink():
+            # uv's cache links (relative, inside the bundled cache).
+            link = os.readlink(source)
+            if target.is_symlink() and os.readlink(target) == link:
+                continue
+            _remove(target)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            os.symlink(link, target)
+        elif source.is_dir():
+            if target.is_symlink() or target.is_file():
+                _remove(target)
             target.mkdir(parents=True, exist_ok=True)
         elif relative.as_posix() not in CONFIG_NAMES or not _has_config(ROOT):
             target.parent.mkdir(parents=True, exist_ok=True)

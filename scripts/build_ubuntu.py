@@ -3,6 +3,7 @@ import argparse
 import hashlib
 import io
 import json
+import os
 import re
 import tarfile
 import tempfile
@@ -28,6 +29,10 @@ LAUNCHER = "agent-nexus"
 DESKTOP_ID = "agent-nexus"
 
 
+#: Mode of an entry that is a symlink; its data is the (relative) link target.
+SYMLINK = None
+
+
 def tar_bytes(entries):
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w:xz", format=tarfile.GNU_FORMAT, preset=3) as archive:
@@ -40,8 +45,13 @@ def tar_bytes(entries):
             archive.addfile(info)
         for name, (data, mode) in sorted(entries.items()):
             info = tarfile.TarInfo(name)
-            info.size, info.mode, info.uid, info.gid = len(data), mode, 0, 0
+            info.uid, info.gid = 0, 0
             info.uname = info.gname = "root"
+            if mode is SYMLINK:
+                info.type, info.linkname, info.mode = tarfile.SYMTYPE, data.decode(), 0o777
+                archive.addfile(info)
+                continue
+            info.size, info.mode = len(data), mode
             archive.addfile(info, io.BytesIO(data))
     return buffer.getvalue()
 
@@ -71,9 +81,14 @@ def build(uv, out, enrollment=None, offline=False):
     if offline:
         with tempfile.TemporaryDirectory(prefix="anx-ubuntu-offline-") as scratch:
             for source, relative in offline_runtime.bundle(files, str(uv), Path(scratch)):
-                data = source.read_bytes()
-                entries[LIB + "runtime/" + relative] = (data, 0o755 if source.stat().st_mode & 0o111 else 0o644)
-                manifest[relative] = hashlib.sha256(data).hexdigest()
+                if source.is_symlink():
+                    data, mode = os.readlink(source).encode(), SYMLINK
+                    manifest[relative] = hashlib.sha256(b"symlink:" + data).hexdigest()
+                else:
+                    data = source.read_bytes()
+                    mode = 0o755 if source.stat().st_mode & 0o111 else 0o644
+                    manifest[relative] = hashlib.sha256(data).hexdigest()
+                entries[LIB + "runtime/" + relative] = (data, mode)
     entries[LIB + "runtime/tools/uv"] = (binary, 0o755)
     manifest["tools/uv"] = hashlib.sha256(binary).hexdigest()
     config = json.loads((ROOT / "config/client.example.json").read_bytes())
@@ -109,7 +124,7 @@ Description: Agent Nexus desktop, device plugin and outbound gateway connector
  Close the window to keep services running; quit from the tray to stop all owned services.
 """
     control_entries = {"control": (control.encode(), 0o644),
-                       "md5sums": ("\n".join(hashlib.md5(data).hexdigest() + "  " + path for path, (data, mode) in sorted(entries.items())).encode() + b"\n", 0o644)}
+                       "md5sums": ("\n".join(hashlib.md5(data).hexdigest() + "  " + path for path, (data, mode) in sorted(entries.items()) if mode is not SYMLINK).encode() + b"\n", 0o644)}
     out.mkdir(parents=True, exist_ok=True)
     deb = out / f"{name}_{VERSION}_amd64.deb"
     deb.write_bytes(b"!<arch>\n" + ar_member("debian-binary", b"2.0\n") + ar_member("control.tar.xz", tar_bytes(control_entries)) + ar_member("data.tar.xz", tar_bytes(entries)))

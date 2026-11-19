@@ -9,6 +9,7 @@ import io
 import json
 import lzma
 import os
+import posixpath
 import re
 import tarfile
 import zipfile
@@ -72,6 +73,10 @@ def read_zip(data):
                     "ZIP symlink is not supported")
             entries[entry.filename] = archive.read(entry)
         return entries
+
+
+#: modes[] value of a symlink member (its entries[] value is b"symlink:" + target).
+SYMLINK_MODE = 0o120777
 
 
 def verify_manifest(entries):
@@ -200,6 +205,14 @@ def read_tar(data):
             if member.isdir():
                 require(member.mode == 0o755, "Unexpected directory permissions: " + name)
                 directories.add(name)
+            elif member.issym():
+                # Only uv's cache links (relative, staying inside the bundled cache).
+                require("tools/uv-cache/" in name and not member.linkname.startswith("/"),
+                        "Unexpected symlink: " + name)
+                cache = name[:name.index("tools/uv-cache/") + len("tools/uv-cache")]
+                resolved = posixpath.normpath(posixpath.join(posixpath.dirname(name), member.linkname))
+                require(resolved.startswith(cache + "/"), "Symlink leaves the bundled cache: " + name)
+                entries[name], modes[name] = b"symlink:" + member.linkname.encode(), SYMLINK_MODE
             else:
                 require(member.isfile(), "Tar links and special files are not supported")
                 stream = archive.extractfile(member)
@@ -242,7 +255,8 @@ def verify_deb(data, root, enrollment, token, *, private, version):
         expected, name = line.split("  ", 1)
         require(name not in md5s, "Duplicate Debian md5 entry")
         md5s[name] = expected
-    require(set(md5s) == set(entries), "Debian md5 list does not cover the exact data file set")
+    files = {name for name in entries if modes[name] != SYMLINK_MODE}
+    require(set(md5s) == files, "Debian md5 list does not cover the exact data file set")
     for name, expected in md5s.items():
         require(hashlib.md5(entries[name]).hexdigest() == expected, "Debian md5 mismatch: " + name)
     prefix = UBUNTU_LIB
@@ -261,7 +275,7 @@ def verify_deb(data, root, enrollment, token, *, private, version):
                 "Debian integration file mismatch: " + name)
     for name in runtime:
         # The bundled CPython and package cache keep their executables executable.
-        allowed = ({0o755} if name == "tools/uv" else {0o644, 0o755}
+        allowed = ({0o755} if name == "tools/uv" else {0o644, 0o755, SYMLINK_MODE}
                    if name.startswith(("tools/python/", "tools/uv-cache/")) else {0o644})
         require(modes[runtime_prefix + name] in allowed, "Debian runtime permissions mismatch: " + name)
     return {name[len(prefix):]: (digest(data), modes[name]) for name, data in entries.items() if name.startswith(prefix)}

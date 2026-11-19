@@ -9,11 +9,11 @@ exactly the way its service starts). agent-nexus and the desktop app point
 from disk. Optional extras that a service does not start with (the device plugin's
 multi-gigabyte ``vision``) are deliberately left out.
 
-On Unix uv also links each cached wheel to its unpacked archive with an
-absolute symlink into the build machine's cache, which would dangle on a
-client. uv finds a cached wheel through the archive id recorded in its
-``.http`` entry, so those links are dropped, and the offline proof runs against
-exactly that layout.
+On Unix uv links each cached wheel to its unpacked archive with an absolute
+symlink into the build machine's cache. uv needs those links (they are how it
+finds a cached wheel, and how ``uv cache prune`` knows an archive is in use),
+so they are rewritten as relative links. The last proof runs on a copy of the
+finished cache at another path: what ships is what was proven, relocated.
 """
 from __future__ import annotations
 
@@ -72,8 +72,9 @@ def managed_python(uv: str) -> Path:
     return candidates[-1]
 
 
-def _sync(uv: str, stage: Path, project: Path, flags: list[str], venv: Path, offline: bool) -> None:
-    env = {**os.environ, "UV_CACHE_DIR": str(stage / "tools" / "uv-cache"),
+def _sync(uv: str, stage: Path, project: Path, flags: list[str], venv: Path, offline: bool,
+          cache: Path | None = None) -> None:
+    env = {**os.environ, "UV_CACHE_DIR": str(cache or stage / "tools" / "uv-cache"),
            "UV_PYTHON_INSTALL_DIR": str(stage / "tools" / "python"), "UV_PYTHON_PREFERENCE": "only-managed",
            "UV_PROJECT_ENVIRONMENT": str(venv), "UV_LINK_MODE": "copy", "PYTHONDONTWRITEBYTECODE": "1"}
     env.pop("VIRTUAL_ENV", None)
@@ -93,21 +94,38 @@ def prepare(stage: Path, uv: str) -> dict:
         for label, project, flags in projects(stage):
             _sync(uv, stage, project, flags, Path(scratch) / f"online-{label}", offline=False)
             report["projects"][label] = flags
-        _drop_machine_specific(uv, stage / "tools" / "uv-cache")
-        _drop_links(stage / "tools" / "uv-cache")
+        cache = stage / "tools" / "uv-cache"
+        _drop_machine_specific(uv, cache)
+        _relative_links(cache)
         # The proof: a cold environment for every project, with the network off.
         for label, project, flags in projects(stage):
             _sync(uv, stage, project, flags, Path(scratch) / f"offline-{label}", offline=True)
-    # The proof rebuilt the packaged projects into the cache; drop them again.
-    _drop_machine_specific(uv, stage / "tools" / "uv-cache")
-    _drop_links(stage / "tools" / "uv-cache")
+        # The proof rebuilt the packaged projects into the cache; drop them again.
+        _drop_machine_specific(uv, cache)
+        _relative_links(cache)
+        # The final proof: the finished cache, copied elsewhere (as a client gets it).
+        moved = Path(scratch) / "relocated-uv-cache"
+        shutil.copytree(cache, moved, symlinks=True)
+        for label, project, flags in projects(stage):
+            _sync(uv, stage, project, flags, Path(scratch) / f"relocated-{label}", offline=True, cache=moved)
     return report
 
 
-def _drop_links(cache: Path) -> None:
-    """Remove the cache's symlinks (Unix only: absolute links into this build machine's cache)."""
+def _relative_links(cache: Path) -> None:
+    """Rewrite the cache's symlinks (Unix) relative to themselves; each must stay inside the cache."""
+    inside = cache.resolve()
     for link in [path for path in cache.rglob("*") if path.is_symlink()]:
-        link.unlink()
+        target = Path(os.readlink(link))
+        absolute = (link.parent / target).resolve() if not target.is_absolute() else target.resolve()
+        if not absolute.exists():
+            link.unlink()  # dangling: uv treats it as a miss either way
+            continue
+        if inside not in absolute.parents:
+            raise RuntimeError(f"{link} points outside the cache: {target}")
+        relative = os.path.relpath(absolute, link.parent)
+        if str(target) != relative:
+            link.unlink()
+            link.symlink_to(relative)
 
 
 def _drop_machine_specific(uv: str, cache: Path) -> None:
@@ -136,16 +154,14 @@ def bundle(files: list[tuple[Path, str]], uv: str, scratch: Path) -> list[tuple[
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(path, destination)
     report = prepare(stage, uv)
-    links = [path for folder in (stage / "tools" / "python", stage / "tools" / "uv-cache")
-             for path in folder.rglob("*") if path.is_symlink()]
-    if links:
-        raise RuntimeError(f"offline runtime still has symlinks, e.g. {links[0]}")
     extra = [(path, path.relative_to(stage).as_posix())
              for folder in (stage / "tools" / "python", stage / "tools" / "uv-cache")
              for path in sorted(folder.rglob("*"))
              # Running the staged interpreter (uv sync, build backends) leaves bytecode
              # behind; clients compile their own and release verification rejects it.
-             if path.is_file() and "__pycache__" not in path.parts and path.suffix != ".pyc"]
+             # Symlinks (uv's Unix cache links, made relative) are kept as links.
+             if (path.is_symlink() or path.is_file()) and "__pycache__" not in path.parts
+             and path.suffix != ".pyc"]
     longest = max((len(name) for _, name in extra), default=0)
     print(f"offline runtime: {report['python']}, {len(report['projects'])} projects, {len(extra)} files, "
           f"longest path {longest} chars")
