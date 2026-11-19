@@ -112,8 +112,8 @@ def build(uv, out, enrollment=None, offline=False):
 Version: {VERSION}
 Architecture: amd64
 Maintainer: agent-nexus maintainers
-Depends: python3 (>= 3.10), python3-gi, gir1.2-gtk-3.0, gir1.2-webkit2-4.1, gir1.2-ayatanaappindicator3-0.1, ca-certificates, systemd, xdg-utils
-Recommends: gnome-shell-extension-appindicator
+Depends: python3 (>= 3.10), ca-certificates, systemd
+Recommends: python3-gi, gir1.2-gtk-3.0, gir1.2-webkit2-4.1, gir1.2-ayatanaappindicator3-0.1, xdg-utils, gnome-shell-extension-appindicator
 Provides: agent-nexus-desktop
 Conflicts: {PACKAGE if private else PRIVATE_PACKAGE}
 Replaces: {PACKAGE if private else PRIVATE_PACKAGE}
@@ -122,6 +122,9 @@ Priority: optional
 Description: Agent Nexus desktop, device plugin and outbound gateway connector
  Per-user GTK/WebKit console, system tray and independent managed Python runtime.
  Close the window to keep services running; quit from the tray to stop all owned services.
+ .
+ Servers without a desktop: apt install --no-install-recommends ./agent-nexus_*.deb,
+ then `agent-nexus join <invite>` and `agent-nexus service enable`.
 """
     control_entries = {"control": (control.encode(), 0o644),
                        "md5sums": ("\n".join(hashlib.md5(data).hexdigest() + "  " + path for path, (data, mode) in sorted(entries.items()) if mode is not SYMLINK).encode() + b"\n", 0o644)}

@@ -139,6 +139,8 @@ jobs:
         run: uv run python scripts/build_ubuntu.py --uv "$(command -v uv)" --out build/ubuntu
       - name: Ubuntu package starts with no network
         run: bash scripts/ubuntu_offline_smoke.sh build/ubuntu/agent-nexus_*_amd64.deb
+      - name: Ubuntu package on a server without a desktop (join, systemd service)
+        run: bash scripts/ubuntu_headless_smoke.sh build/ubuntu/agent-nexus_*_amd64.deb
 
   console:
     runs-on: ubuntu-latest

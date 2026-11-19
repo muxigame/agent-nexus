@@ -1,4 +1,16 @@
-"""Ubuntu desktop shell uses distro GTK; managed Python lives in its own uv environment."""
+"""Ubuntu launcher: the GTK desktop shell, or headless commands on a server.
+
+The desktop shell uses distro GTK/WebKit (Recommends of the package); the
+manager itself runs from the bundled, offline uv environment and needs no
+display. Without a display (or without python3-gi) ``agent-nexus`` prints the
+headless commands instead of failing:
+
+    agent-nexus join <invite>          join a gateway with an invite code
+    agent-nexus service enable         run as a systemd user service, at boot
+    agent-nexus service status|logs|disable
+    agent-nexus anx <args>             any `anx` command (status, leave, plugin...)
+    agent-nexus --serve                run the manager in the foreground
+"""
 import argparse
 import hashlib
 import json
@@ -214,8 +226,13 @@ def serve():
                      "anx", "--root", str(ROOT), "serve"])
 
 
+def unit_path():
+    return Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "systemd/user" / UNIT
+
+
 def install_unit():
-    directory = Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "systemd/user"
+    """Write the user unit and start it (the desktop shell; ``service enable`` also enables it)."""
+    directory = unit_path().parent
     directory.mkdir(parents=True, exist_ok=True)
     log = STARTUP_LOG
     log.parent.mkdir(parents=True, exist_ok=True)
@@ -231,13 +248,187 @@ StandardOutput=journal
 StandardError=journal
 KillMode=mixed
 TimeoutStopSec=30
-Restart=no
+Restart=on-failure
+RestartSec=10
 [Install]
 WantedBy=default.target
 """ % (json.dumps(str(HERE / "ubuntu_launcher.py")), json.dumps("ANX_ROOT=" + str(ROOT)))
     (directory / UNIT).write_text(unit)
     subprocess.run(["systemctl", "--user", "daemon-reload"], check=True, capture_output=True)
     subprocess.run(["systemctl", "--user", "start", UNIT], check=True, capture_output=True)
+
+
+# -- headless (servers without a desktop) -----------------------------------------------
+
+HEADLESS_HELP = """Agent Nexus（无桌面模式）
+
+  agent-nexus join <邀请码>        用邀请码加入网关
+  agent-nexus service enable       作为 systemd 用户服务运行（开机自启，退出登录后继续运行）
+  agent-nexus service status       服务状态和云端连接
+  agent-nexus service logs [-f]    最近的日志（-f 持续输出）
+  agent-nexus service restart      重启服务
+  agent-nexus service disable      停止并取消自启
+  agent-nexus anx <参数>           其他 anx 命令，例如 anx status、anx leave、anx plugin list
+  agent-nexus --serve              在前台运行管理器（调试用）
+
+本机控制台在 http://127.0.0.1:8399 ；在自己电脑上执行
+  ssh -L 8399:127.0.0.1:8399 <用户>@<服务器>
+后即可在浏览器打开。
+"""
+
+
+class HeadlessError(Exception):
+    pass
+
+
+def _user():
+    import getpass
+    return os.environ.get("USER") or getpass.getuser()
+
+
+def _systemctl(*args, check=True):
+    try:
+        result = subprocess.run(["systemctl", "--user", *args], capture_output=True, text=True)
+    except FileNotFoundError:
+        raise HeadlessError("找不到 systemctl：这台机器没有 systemd，请用 agent-nexus --serve 在前台运行") from None
+    if check and result.returncode:
+        detail = (result.stderr or result.stdout or "").strip()
+        if "bus" in detail.lower() or "XDG_RUNTIME_DIR" in detail:
+            raise HeadlessError("无法连接 systemd 用户实例（%s）。请用 SSH 直接登录这个用户再运行，"
+                                "不要通过 su/sudo 切换用户；或先执行 sudo loginctl enable-linger %s"
+                                % (detail.splitlines()[-1] if detail else "no bus", _user()))
+        raise HeadlessError("systemctl --user %s 失败：%s" % (" ".join(args), detail))
+    return result
+
+
+def enable_linger():
+    """Keep the user's services running without a login session (servers, after SSH logout)."""
+    user = _user()
+    try:
+        state = subprocess.run(["loginctl", "show-user", user, "--property=Linger", "--value"],
+                               capture_output=True, text=True)
+        if state.stdout.strip() == "yes":
+            return True
+        return subprocess.run(["loginctl", "enable-linger", user], capture_output=True).returncode == 0
+    except FileNotFoundError:
+        return False
+
+
+def wait_ready(timeout=300):
+    """Wait for the manager the unit started (the first start installs the bundled runtime)."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            if api("/api/ping"):
+                print("管理器已就绪：%s" % base_url())
+                return 0
+        except Exception:
+            pass
+        if _systemctl("is-active", UNIT, check=False).stdout.strip() == "failed":
+            break
+        time.sleep(1)
+    raise HeadlessError("管理器没有启动；查看日志：agent-nexus service logs")
+
+
+def service(action, options=()):
+    if action == "enable":
+        prepare()
+        install_unit()
+        _systemctl("enable", UNIT)
+        lingering = enable_linger()
+        print("已启用 %s：开机自启，现在正在运行。" % UNIT)
+        if not lingering:
+            print("注意：没能开启 linger，退出 SSH 后服务会停止。请执行：sudo loginctl enable-linger %s" % _user())
+        return wait_ready()
+    if action == "restart":
+        _systemctl("restart", UNIT)
+        return wait_ready()
+    if action == "disable":
+        _systemctl("disable", "--now", UNIT, check=False)
+        print("已停止并取消自启：%s" % UNIT)
+        return 0
+    if action == "status":
+        active = _systemctl("is-active", UNIT, check=False).stdout.strip() or "unknown"
+        enabled = _systemctl("is-enabled", UNIT, check=False).stdout.strip() or "not-found"
+        print("服务：%s（%s）" % (active, enabled))
+        try:
+            info = api("/api/cloud")
+        except Exception:
+            print("管理器：未运行")
+            return 0 if active == "active" else 3
+        print("管理器：运行中 %s" % base_url())
+        hub = info.get("hub")
+        print("网关：%s%s" % (info.get("state"), "（%s）" % hub if hub else ""))
+        return 0
+    if action == "logs":
+        command = ["journalctl", "--user", "-u", UNIT, "-n", "200", "--no-pager"]
+        if "-f" in options:
+            command.append("-f")
+        return subprocess.call(command)
+    raise HeadlessError("未知的 service 操作：%s（enable / restart / disable / status / logs）" % action)
+
+
+def anx(arguments):
+    """``anx --root ROOT <arguments>`` from the bundled environment (offline)."""
+    prepare()
+    env = dict(os.environ)
+    for key, value in runtime_env().items():
+        env.setdefault(key, value)
+    env.update(ANX_ROOT=str(ROOT), PYTHONUTF8="1")
+    env.pop("MCPM_ROOT", None)
+    offline = ["--offline"] if (ROOT / "tools/uv-cache").is_dir() else []
+    command = [str(ROOT / "tools/uv"), "run", "-q", *offline, "--no-dev", "--python", "3.12", "--project", str(ROOT),
+               "anx", "--root", str(ROOT), *arguments]
+    return subprocess.call(command, env=env, cwd=str(ROOT))
+
+
+def has_display():
+    if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        return False
+    try:
+        import gi  # noqa: F401  (python3-gi is only Recommended)
+    except ImportError:
+        return False
+    return True
+
+
+def main(argv):
+    parser = argparse.ArgumentParser(prog="agent-nexus", add_help=False)
+    parser.add_argument("--serve", action="store_true")
+    parser.add_argument("--prepare", action="store_true")
+    parser.add_argument("-h", "--help", action="store_true")
+    parser.add_argument("command", nargs="?")
+    parser.add_argument("rest", nargs=argparse.REMAINDER)
+    args = parser.parse_args(argv)
+    try:
+        if args.serve:
+            return serve()
+        if args.prepare:
+            prepare()
+            return 0
+        if args.help or args.command == "help":
+            print(HEADLESS_HELP)
+            return 0
+        if args.command == "anx":
+            return anx(args.rest)
+        if args.command == "join":
+            if not args.rest:
+                raise HeadlessError("用法：agent-nexus join <邀请码> [--agent-id ID]")
+            code = anx(["join", *args.rest])
+            if code == 0 and _systemctl("is-active", UNIT, check=False).stdout.strip() != "active":
+                print("下一步：agent-nexus service enable（作为服务运行并连接网关）")
+            return code
+        if args.command == "service":
+            return service(args.rest[0] if args.rest else "status", args.rest[1:])
+        if args.command is not None:
+            raise HeadlessError("未知命令：%s\n\n%s" % (args.command, HEADLESS_HELP))
+        if not has_display():
+            print(HEADLESS_HELP)
+            return 0
+        return desktop()
+    except HeadlessError as exc:
+        print("agent-nexus: %s" % exc, file=sys.stderr)
+        return 1
 
 
 def create_desktop_application():
@@ -556,13 +747,4 @@ def desktop():
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--serve", action="store_true")
-    parser.add_argument("--prepare", action="store_true")
-    args = parser.parse_args()
-    if args.serve:
-        serve()
-    elif args.prepare:
-        prepare()
-    else:
-        sys.exit(desktop())
+    sys.exit(main(sys.argv[1:]))

@@ -38,7 +38,7 @@ def verify_package(package):
     assert members["debian-binary"] == b"2.0\n"
     with tarfile.open(fileobj=io.BytesIO(members["control.tar.xz"])) as control:
         metadata = control.extractfile("control").read().decode()
-        assert "Architecture: amd64" in metadata and "gir1.2-webkit2-4.1" in metadata
+        assert "Architecture: amd64" in metadata and "gir1.2-webkit2-4.1" in metadata and "Recommends:" in metadata
         assert f"\nVersion: {VERSION}\n" in metadata, "control Version differs from agent_nexus.__version__"
         sums = dict(line.split("  ", 1)[::-1] for line in control.extractfile("md5sums").read().decode().splitlines())
     with tarfile.open(fileobj=io.BytesIO(members["data.tar.xz"])) as data:
