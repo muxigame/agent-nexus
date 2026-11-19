@@ -32,7 +32,7 @@ from fastmcp.tools.base import ToolResult
 from jsonschema import Draft202012Validator
 
 from ..federation import RoutingError
-from .icons import RETRY_AFTER_S, IconError, IconFinder, IconStore, check_image
+from .icons import FINDER_VERSION, RETRY_AFTER_S, IconError, IconFinder, IconStore, check_image
 from .oauth import ConnectorAuth, LoginRequired, OAuthManager, expand, resource_metadata_hint
 from .registry import (ConnectorError, Registry, SecretStore, export_view, fingerprint, normalize,
                        public_view, valid_name)
@@ -450,7 +450,8 @@ class ConnectorHost:
         meta = self.icons.meta(name)
         if name in self._icon_busy or meta.get("source") == "upload":
             return
-        if not force and (meta.get("type") or (meta.get("tried_at") or 0) > time.time() - RETRY_AFTER_S):
+        recent = (meta.get("tried_at") or 0) > time.time() - RETRY_AFTER_S and meta.get("finder") == FINDER_VERSION
+        if not force and (meta.get("type") or recent):
             return
         self._icon_busy.add(name)
 
@@ -477,7 +478,7 @@ class ConnectorHost:
         if found:
             self.icons.save(name, found["data"], {"type": found["type"], "source": found["source"], "url": found["url"]})
         else:
-            self.icons.save(name, None, {"tried_at": time.time()})
+            self.icons.save(name, None, {"tried_at": time.time(), "finder": FINDER_VERSION})
         return self.icon_view(name)
 
     def icon(self, name: str) -> tuple[bytes, dict] | None:

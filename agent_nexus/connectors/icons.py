@@ -7,7 +7,9 @@ Where an icon comes from, first match wins:
 2. ``server`` -- ``serverInfo.icons`` from the MCP ``initialize`` answer (an
    ``https:`` URL or a ``data:`` URI).
 3. ``site`` -- the connector's website: ``<link rel="icon">`` on the home page
-   of the MCP host (then of its parent domain), else ``/favicon.ico``.
+   of the MCP host (then of its parent domain, then of the product site for API
+   domains that have no website of their own, :data:`SITE_HOMES`), else
+   ``/favicon.ico``.
 
 Fetching is the gateway reaching out on a server's say-so, so a URL is only
 followed when it is ``https:`` on a host that resolves to public addresses, or
@@ -47,6 +49,11 @@ MAX_REDIRECTS = 3
 #: A failed automatic search is not repeated sooner than this.
 RETRY_AFTER_S = 24 * 3600
 USER_AGENT = "agent-nexus-gateway (connector icon)"
+#: Bumped when discovery learns new places to look: a connector whose last search found
+#: nothing is searched again at once instead of after RETRY_AFTER_S.
+FINDER_VERSION = 2
+#: API-only domains (no website, no favicon) and the product site whose icon they use.
+SITE_HOMES = {"githubcopilot.com": "https://github.com", "aliyuncs.com": "https://www.aliyun.com"}
 SOURCES = ("upload", "server", "site")
 
 
@@ -313,6 +320,10 @@ class IconFinder:
             origins = [f"{parts.scheme}://{parts.netloc}"]
             if (parent := _parent_origin(connector_url)) and parent not in origins:
                 origins.append(parent)
+            host = (parts.hostname or "").lower()
+            for suffix, home in SITE_HOMES.items():
+                if (host == suffix or host.endswith("." + suffix)) and home not in origins:
+                    origins.append(home)
             for origin in origins:
                 page = await self.get(client, origin + "/", connector_url, MAX_PAGE_BYTES)
                 candidates = page_icons(page[0].decode("utf-8", errors="replace"), page[1]) if page else []

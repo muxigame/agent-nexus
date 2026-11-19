@@ -171,3 +171,12 @@ async def test_icons_through_the_console_api(tmp_path, monkeypatch):
         anonymous = await api.get("/api/connectors/pics/icon", headers={"Authorization": ""})
         assert anonymous.status_code in (401, 404)
         assert await eventually(lambda: True)
+
+
+async def test_api_only_domains_use_their_product_site():
+    icons, seen = finder({"https://github.com/favicon.ico": (200, ICO, {})},
+                         {"api.githubcopilot.com": [".".join(["140", "82", "112", "21"])], "githubcopilot.com": [],
+                          "github.com": [".".join(["140", "82", "112", "3"])]})
+    found = await icons.find("https://api.githubcopilot.com/mcp/")
+    assert found["url"] == "https://github.com/favicon.ico" and found["source"] == "site"
+    assert "https://githubcopilot.com/" not in seen  # resolves to nothing: never fetched
