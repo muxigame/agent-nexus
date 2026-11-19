@@ -9,6 +9,7 @@ Agent Nexus：MCP 插件管理器与云端网关（gateway）：本机服务管�
 下文的 `hub.example.test` 是占位符，换成你自己的网关域名。
 
 1. **下载安装包**：在网关的下载页 `https://hub.example.test/downloads`（不用登录）下载 Windows 安装包；或打开 GitHub 仓库的 [Releases](https://github.com/muxigame/agent-nexus/releases)，下载最新版本的 `agent-nexus_<version>_x64-setup.exe`（Windows 10/11 x64）。同一页的 `SHA256SUMS` 可以核对文件：PowerShell 里执行 `Get-FileHash .gent-nexus_<version>_x64-setup.exe`。安装包没有代码签名证书，SmartScreen 提示时选择“仍要运行”。Ubuntu 用户下载 `agent-nexus_<version>_amd64.deb`，执行 `sudo apt install ./agent-nexus_<version>_amd64.deb`。
+   - **没有桌面的 Ubuntu 服务器**：`sudo apt install --no-install-recommends ./agent-nexus_<version>_amd64.deb`（不装 GTK/WebKit），然后以要运行它的用户（直接 SSH 登录该用户，不要 su）执行 `agent-nexus join <邀请码>` 和 `agent-nexus service enable`：作为 systemd 用户服务运行，开机自启，退出 SSH 后继续运行。`agent-nexus service status` 查看状态和云端连接，`agent-nexus service logs -f` 看日志，`agent-nexus anx <参数>` 运行其他 `anx` 命令。本机控制台用 `ssh -L 8399:127.0.0.1:8399 <用户>@<服务器>` 转发后在浏览器打开 `http://127.0.0.1:8399`。
 2. **安装并启动**：按向导安装（只装到当前用户，不需要管理员权限）。安装后托盘出现 Agent Nexus 图标，默认随登录自动启动，可以在托盘菜单里关闭。右键托盘“打开控制台”进入本机控制台。
 3. **加入你的网关**（设计 §11.5）：
    - 网关 owner 打开云端控制台 `https://hub.example.test/`（owner 密码登录），在“设备 → 邀请新设备”生成一次性邀请码（形如 `anx1.…`，或 `agentnexus://enroll?invite=…` 链接，附二维码；默认 24 小时有效，只能用一次）。也可以在网关主机上执行 `anx-gateway invite create --config /etc/agent-nexus/gateway.json`。
