@@ -30,12 +30,26 @@ fi
 /usr/bin/agent-nexus --serve >"$log" 2>&1 &
 pid=$!
 cleanup() { pkill -TERM -P "$pid" 2>/dev/null || true; kill "$pid" 2>/dev/null || true; }
+# On failure: what uv decided about the bundled cache, so the cause is visible in the CI log.
+diagnose() {
+    echo "--- diagnosis: bundled cache and a verbose uv sync (online mode, then offline mode)" >&2
+    cache="$ANX_ROOT/tools/uv-cache"
+    ls -la "$ANX_ROOT/tools" "$cache" >&2 || true
+    ls -la "$cache"/wheels-v*/pypi/httpcore2 >&2 || true
+    for mode in 0 1; do
+        echo "--- UV_OFFLINE=$mode" >&2
+        (cd "$ANX_ROOT" && env UV_OFFLINE="$mode" UV_CACHE_DIR="$cache" UV_PYTHON_INSTALL_DIR="$ANX_ROOT/tools/python" \
+            UV_PYTHON_PREFERENCE=managed "$ANX_ROOT/tools/uv" sync -v --frozen --no-dev --python 3.12 --project "$ANX_ROOT" 2>&1 \
+            | grep -iE "httpcore2|fresh|stale|revalidat|cache (hit|miss)|error" | head -40) >&2 || true
+    done
+}
 trap cleanup EXIT
 
 for _ in $(seq 1 180); do
     if ! kill -0 "$pid" 2>/dev/null; then
         echo "error: agent-nexus --serve exited before the manager came up" >&2
         cat "$log" >&2
+        diagnose
         exit 1
     fi
     body="$(curl -fsS -m 2 -H 'X-ANX: 1' http://127.0.0.1:8399/api/services 2>/dev/null || true)"
