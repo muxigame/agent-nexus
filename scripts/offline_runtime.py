@@ -9,11 +9,11 @@ exactly the way its service starts). agent-nexus and the desktop app point
 from disk. Optional extras that a service does not start with (the device plugin's
 multi-gigabyte ``vision``) are deliberately left out.
 
-On Unix uv links each cached wheel to its unpacked archive with an absolute
-symlink into the build machine's cache, which would dangle on a client. Those
-links are replaced by the directories they point to (uv canonicalizes the
-entry, so a real directory resolves the same way), and the offline proof runs
-against exactly that layout.
+On Unix uv also links each cached wheel to its unpacked archive with an
+absolute symlink into the build machine's cache, which would dangle on a
+client. uv finds a cached wheel through the archive id recorded in its
+``.http`` entry, so those links are dropped, and the offline proof runs against
+exactly that layout.
 """
 from __future__ import annotations
 
@@ -94,36 +94,20 @@ def prepare(stage: Path, uv: str) -> dict:
             _sync(uv, stage, project, flags, Path(scratch) / f"online-{label}", offline=False)
             report["projects"][label] = flags
         _drop_machine_specific(uv, stage / "tools" / "uv-cache")
-        _materialize_links(stage / "tools" / "uv-cache")
+        _drop_links(stage / "tools" / "uv-cache")
         # The proof: a cold environment for every project, with the network off.
         for label, project, flags in projects(stage):
             _sync(uv, stage, project, flags, Path(scratch) / f"offline-{label}", offline=True)
     # The proof rebuilt the packaged projects into the cache; drop them again.
     _drop_machine_specific(uv, stage / "tools" / "uv-cache")
-    _materialize_links(stage / "tools" / "uv-cache")
+    _drop_links(stage / "tools" / "uv-cache")
     return report
 
 
-def _materialize_links(cache: Path) -> None:
-    """Replace every symlink in the cache by a copy of its target (the last user moves it)."""
-    users: dict[Path, list[Path]] = {}
-    for link in sorted(path for path in cache.rglob("*") if path.is_symlink()):
-        target = link.resolve()
-        if not target.exists():
-            link.unlink()  # dangling: nothing can resolve through it anyway
-            continue
-        users.setdefault(target, []).append(link)
-    inside = cache.resolve()
-    for target, links in users.items():
-        for index, link in enumerate(links):
-            link.unlink()
-            last = index == len(links) - 1
-            if last and inside in target.parents:
-                shutil.move(str(target), str(link))
-            elif target.is_dir():
-                shutil.copytree(target, link)
-            else:
-                shutil.copy2(target, link)
+def _drop_links(cache: Path) -> None:
+    """Remove the cache's symlinks (Unix only: absolute links into this build machine's cache)."""
+    for link in [path for path in cache.rglob("*") if path.is_symlink()]:
+        link.unlink()
 
 
 def _drop_machine_specific(uv: str, cache: Path) -> None:
