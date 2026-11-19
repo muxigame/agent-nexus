@@ -22,7 +22,7 @@ function deviceIcon(device) {
 function deviceAvatar(device) {
   const mark = osMark(device.os_family);
   if (mark) return el("span", { class: "avatar os-mark", title: mark.label, "aria-label": mark.label, html: mark.svg });
-  return deviceAvatar(device);
+  return el("span", { class: "avatar" }, icon(deviceIcon(device), { size: 16 }));
 }
 
 function deviceState(device) {

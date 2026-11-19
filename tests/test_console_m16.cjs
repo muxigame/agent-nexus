@@ -91,3 +91,21 @@ test("every os_family the gateway reports has a mark, and the device page offers
   const connectors = fs.readFileSync(path.join(STATIC, "console/connectors.js"), "utf8");
   for (const text of ["iconDialog(", "恢复自动获取", "/icon`", "connectorAvatar("]) assert.ok(connectors.includes(text), text);
 });
+
+test("deviceAvatar falls back to a generic glyph for a device with no os_family", async () => {
+  const { osMark } = await load("ui/os-icons.js");
+  const pages = fs.readFileSync(path.join(STATIC, "console/pages.js"), "utf8");
+  const pick = (name) => { const start = pages.indexOf(`function ${name}(device) {`); return pages.slice(start, pages.indexOf("}" + String.fromCharCode(10), pages.indexOf(String.fromCharCode(10) + "}", start)) + 1); };
+  const el = (tag, attrs, ...children) => ({ tag, attrs, children });
+  const icon = (name) => ({ icon: name });
+  const make = new Function("el", "icon", "osMark", `${pick("deviceIcon")}
+${pick("deviceAvatar")}
+return deviceAvatar;`);
+  const deviceAvatar = make(el, icon, osMark);
+  assert.equal(deviceAvatar({ os_family: "ubuntu" }).attrs.class, "avatar os-mark");
+  for (const device of [{}, { os_family: null }, { os_family: "plan9", form: "laptop" }, { platform: "linux" }]) {
+    const node = deviceAvatar(device);
+    assert.equal(node.attrs.class, "avatar");
+    assert.ok(node.children[0].icon, JSON.stringify(device));
+  }
+});
