@@ -99,11 +99,26 @@ def test_release_creates_a_draft_with_every_asset():
         assert needle in text, needle
 
 
-def test_deploy_workflow_is_manual_and_gated_by_the_production_environment():
+def test_release_tags_deploy_the_gateway_then_publish_without_approval():
+    """A release tag goes live by itself: deploy (with rollback), then the release leaves draft."""
+    yaml = pytest.importorskip("yaml")
+    jobs = yaml.safe_load((WORKFLOWS / "release.yml").read_text(encoding="utf-8"))["jobs"]
+    deploy = jobs["deploy-gateway"]
+    assert deploy["uses"] == "./.github/workflows/deploy-gateway.yml"
+    assert set(deploy["needs"]) == {"publish-oss", "draft-release"}
+    assert deploy["with"] == {"tag": "${{ github.ref_name }}", "target": "production"}
+    assert deploy["secrets"] == "inherit" and "contains(github.ref_name, '-')" in deploy["if"]
+    publish = jobs["publish-release"]
+    assert publish["needs"] == "deploy-gateway"
+    assert "--draft=false --latest" in json.dumps(publish)
+
+
+def test_deploy_workflow_runs_from_release_or_by_hand_in_the_production_environment():
     yaml = pytest.importorskip("yaml")
     document = yaml.safe_load((WORKFLOWS / "deploy-gateway.yml").read_text(encoding="utf-8"))
     triggers = document.get("on", document.get(True))
-    assert set(triggers) == {"workflow_dispatch"}
+    assert set(triggers) == {"workflow_dispatch", "workflow_call"}
+    assert triggers["workflow_call"]["inputs"]["tag"]["required"] is True
     job = document["jobs"]["deploy"]
     assert job["environment"] == "production"
     text = json.dumps(job)

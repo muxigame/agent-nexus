@@ -1,5 +1,8 @@
 # Deploy a released gateway zip to the hub host (docs/design.md §11.2, deploy/gateway/README.md).
-# Manual only, behind the `production` environment (configure required reviewers there).
+# release.yml calls it for every release tag (vX.Y.Z, not prereleases) once the files are on
+# OSS, with no manual approval; it can also be run by hand (workflow_dispatch) to redeploy or
+# roll back to an older tag. The `production` environment holds the deploy secrets and only
+# admits release tags and main.
 #
 # Environment secrets:
 #   DEPLOY_HOST, DEPLOY_USER (the dedicated anx-deploy user), DEPLOY_SSH_KEY (private key),
@@ -23,6 +26,14 @@ on:
         type: choice
         options: [trial, production]
         default: trial
+  workflow_call:
+    inputs:
+      tag:
+        type: string
+        required: true
+      target:
+        type: string
+        default: production
 
 permissions:
   contents: write  # reading the assets of a draft release needs write access

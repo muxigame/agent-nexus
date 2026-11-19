@@ -2,7 +2,9 @@
 # Windows installer, the updater feed, the gateway zip and the public Ubuntu package,
 # checks that none of them carries a private payload, publishes them to Aliyun OSS
 # (publish-oss: the desktop updater's feed <OSS_PUBLIC_BASE>/latest.json moves only
-# after every file is verified) and keeps a DRAFT GitHub release as an archive.
+# after every file is verified), deploys the gateway zip to the hub host (deploy-gateway.yml,
+# rolled back automatically if /healthz fails) and then publishes the GitHub release as latest.
+# A prerelease tag (vX.Y.Z-rc.1) stops at the draft: nothing is deployed or published.
 # The private (enrollment-embedded) edition is never built here (§11.4, decision D3).
 name: release
 
@@ -187,5 +189,29 @@ jobs:
           else
             gh release create "$tag" release/* --draft $prerelease --verify-tag \
               --title "Agent Nexus ${tag}" \
-              --notes "Draft created by release.yml. Check the assets, then publish; the desktop updater only sees published releases."
+              --notes "Created by release.yml; published automatically once the gateway is deployed."
           fi
+
+  # Every release tag goes live with no manual step: the gateway first (its download page
+  # reads <OSS_PUBLIC_BASE>/downloads.json), then the GitHub release leaves draft.
+  deploy-gateway:
+    needs: [publish-oss, draft-release]
+    if: ${{ !contains(github.ref_name, '-') }}
+    permissions:
+      contents: write  # gh release download of a draft
+    uses: ./.github/workflows/deploy-gateway.yml
+    with:
+      tag: ${{ github.ref_name }}
+      target: production
+    secrets: inherit
+
+  publish-release:
+    needs: deploy-gateway
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Publish the GitHub release as latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "${GITHUB_REF_NAME}" --repo "$GITHUB_REPOSITORY" --draft=false --latest
