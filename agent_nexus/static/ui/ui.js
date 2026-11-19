@@ -330,6 +330,7 @@ export async function fetchJSON(path, { method = "GET", body, headers = {}, quie
   if (method !== "GET" && method !== "HEAD") init.headers["X-ANX"] = "1";
   if (body !== undefined) {
     if (body instanceof FormData) init.body = body;
+    else if (body instanceof Blob) { init.headers["Content-Type"] = body.type || "application/octet-stream"; init.body = body; }
     else { init.headers["Content-Type"] = "application/json"; init.body = JSON.stringify(body); }
   }
   let response;

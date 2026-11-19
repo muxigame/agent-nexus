@@ -161,6 +161,11 @@ a.card { color: inherit; text-decoration: none; }
 .avatar.lg { width: 40px; height: 40px; border-radius: 10px; font-size: 15px; }
 .avatar.accent { background: var(--accent-subtle); color: var(--accent-text); border-color: transparent; }
 .avatar img { width: 100%; height: 100%; object-fit: contain; border-radius: inherit; }
+/* connector icons and OS marks: the image itself, on a neutral tile */
+.avatar.icon-avatar { background: #fff; padding: 4px; overflow: hidden; }
+.avatar.icon-avatar img { border-radius: 4px; }
+.avatar.os-mark { background: var(--surface-2); }
+.avatar.os-mark svg { display: block; }
 
 /* ---------- table ---------- */
 .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface); }

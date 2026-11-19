@@ -132,10 +132,20 @@ async def build_world(work: Path, downloads_dir: Path | None):
     tasks.append(asyncio.create_task(run_agent(laptop_root, {**cloud, "workspaces": {"home": {"path": str(laptop_root), "mcp": "device"}}},
                                                transports={"device": _device("laptop")}, ready=ready, status={})))
     await asyncio.wait_for(ready.wait(), 20)
-    # An offline build machine that joined with an invite earlier.
-    build_root = work / "build-root"
-    build_root.mkdir()
-    await asyncio.to_thread(joining.join, build_root, enrollment.create_invite(label="构建机")["code"], hostname="build-01")
+    # Offline devices of other systems, so every device icon shows (facts as each client would report them).
+    real_facts = joining.device_facts
+    for host, facts, revoke in (
+            ("build-01", {"platform": "linux", "os": "6.8.0-48-generic", "arch": "x64", "form": "pc", "distro": "ubuntu"}, False),
+            ("mac-studio", {"platform": "macos", "os": "24.6.0", "arch": "arm64", "form": "pc"}, False),
+            ("pixel-8", {"platform": "android", "os": "Android 15", "arch": "arm64", "form": "phone"}, False),
+            ("old-debian", {"platform": "linux", "os": "6.1.0-25-amd64", "arch": "x64", "form": "pc", "distro": "debian"}, True)):
+        joining.device_facts = lambda facts=facts: dict(facts)
+        root = work / f"{host}-root"
+        root.mkdir()
+        await asyncio.to_thread(joining.join, root, enrollment.create_invite(label=host)["code"], hostname=host)
+        if revoke:
+            await enrollment.revoke_device(host)
+    joining.device_facts = real_facts
     app.state.store.set_alias("pc-main", "工作站")
     enrollment.create_invite(label="家里的台式机")
     enrollment.create_invite(label="测试虚拟机", ttl_s=5 * 86400)
@@ -212,6 +222,9 @@ async def build_world(work: Path, downloads_dir: Path | None):
                        "auth": {"type": "bearer", "token": "screenshot-token-0123456789"}})
     for name in ("yunxiao", "wiki"):
         await host.test(name)
+    # An uploaded icon (a plain placeholder mark, not a vendor logo); the others fall back to initials.
+    host.upload_icon("yunxiao", b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="7" '
+                                b'fill="#1F6FEB"/><path d="M8 20l5-9 4 6 3-4 4 7z" fill="#fff"/></svg>')
     return {"origin": origin, "app": app,
             "servers": [(gw_server, gw_task)] + [(v["server"], v["task"]) for v in locals_.values()] + upstreams["servers"],
             "tasks": tasks, "local": locals_, "invite": invite_for_page, "upstreams": upstreams}

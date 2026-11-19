@@ -73,3 +73,21 @@ test("the console routes every nav entry and uses only local modules", () => {
   const join = fs.readFileSync(path.join(STATIC, "local/cloud.js"), "utf8");
   for (const text of ["加入你的 Agent Nexus", "/api/cloud/join", "/api/cloud/leave", "此设备已被吊销", "暂时仅本机使用"]) assert.ok(join.includes(text), text);
 });
+
+test("every os_family the gateway reports has a mark, and the device page offers delete", async () => {
+  const { osMark, OS_FAMILIES } = await load("ui/os-icons.js");
+  const py = fs.readFileSync(path.join(STATIC, "../osinfo.py"), "utf8");
+  const families = JSON.parse(py.match(/FAMILIES = (\([^)]*\))/)[1].replace(/\(/, "[").replace(/,?\s*\)$/, "]"));
+  assert.deepEqual([...OS_FAMILIES].sort(), [...families].sort());
+  for (const family of OS_FAMILIES) {
+    const mark = osMark(family, { size: 20 });
+    assert.ok(mark.label && mark.svg.startsWith("<svg") && mark.svg.includes('width="20"'), family);
+    assert.ok(!/<script|on\w+=/i.test(mark.svg), family);
+  }
+  assert.equal(osMark("plan9"), null);
+  assert.equal(osMark(undefined), null);
+  const pages = fs.readFileSync(path.join(STATIC, "console/pages.js"), "utf8");
+  for (const text of ["removeDevice(", "先吊销再删除", "method: \"DELETE\"", "osMark("]) assert.ok(pages.includes(text), text);
+  const connectors = fs.readFileSync(path.join(STATIC, "console/connectors.js"), "utf8");
+  for (const text of ["iconDialog(", "恢复自动获取", "/icon`", "connectorAvatar("]) assert.ok(connectors.includes(text), text);
+});

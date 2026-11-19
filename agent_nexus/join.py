@@ -69,7 +69,11 @@ def device_facts() -> dict:
     machine = platform.machine().lower()
     arch = {"amd64": "x64", "x86_64": "x64", "aarch64": "arm64"}.get(machine, machine or "unknown")
     release = f"{platform.system()} {platform.release()}".strip()
-    return {"platform": system, "os": release, "arch": arch, "form": "pc"}
+    facts = {"platform": system, "os": release, "arch": arch, "form": "pc"}
+    from .osinfo import distro
+    if name := distro():
+        facts["distro"] = name
+    return facts
 
 
 def managed(root: Path) -> bool:

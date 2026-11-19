@@ -32,6 +32,7 @@ from fastmcp.tools.base import ToolResult
 from jsonschema import Draft202012Validator
 
 from ..federation import RoutingError
+from .icons import RETRY_AFTER_S, IconError, IconFinder, IconStore, check_image
 from .oauth import ConnectorAuth, LoginRequired, OAuthManager, expand, resource_metadata_hint
 from .registry import (ConnectorError, Registry, SecretStore, export_view, fingerprint, normalize,
                        public_view, valid_name)
@@ -177,6 +178,9 @@ class ConnectorHost:
                  clock: Callable[[], float] = time.time):
         self.registry = Registry(store)
         self.secrets = SecretStore(Path(state_dir) / "connectors" if state_dir else None)
+        self.icons = IconStore(Path(state_dir) / "connector-icons" if state_dir else None)
+        self.icon_finder = IconFinder()
+        self._icon_busy: set[str] = set()
         self.public_url = (public_url or "").rstrip("/") or None
         self.origin_fallback: str | None = None
         self.clock = clock
@@ -336,6 +340,7 @@ class ConnectorHost:
             live.state, live.error = "ok", None
             live.latency_ms = int((time.monotonic() - started) * 1000)
             live.checked_at = self.clock()
+            self._icon_soon(entry)
             return client
 
     async def _list(self, entry: dict, live: Live, client: Client) -> None:
@@ -431,6 +436,70 @@ class ConnectorHost:
             refused = LoginRequired(name, f"连接器 {name} 的授权已失效：请在控制台重新登录")
         return refused
 
+    # -- icons (connectors/icons.py) ---------------------------------------------------
+    def icon_view(self, name: str) -> dict:
+        meta = self.icons.meta(name)
+        if not meta.get("type"):
+            return {"icon_url": None, "icon_source": None}
+        return {"icon_url": f"/api/connectors/{name}/icon?v={str(meta.get('sha256', ''))[:12]}",
+                "icon_source": meta.get("source")}
+
+    def _icon_soon(self, entry: dict, *, force: bool = False) -> None:
+        """Look for an icon in the background, unless one is uploaded or a search failed recently."""
+        name = entry["name"]
+        meta = self.icons.meta(name)
+        if name in self._icon_busy or meta.get("source") == "upload":
+            return
+        if not force and (meta.get("type") or (meta.get("tried_at") or 0) > time.time() - RETRY_AFTER_S):
+            return
+        self._icon_busy.add(name)
+
+        async def go():
+            try:
+                await self.find_icon(entry)
+            finally:
+                self._icon_busy.discard(name)
+        with contextlib.suppress(RuntimeError):
+            self._spawn(go())
+            return
+        self._icon_busy.discard(name)
+
+    async def find_icon(self, entry: dict) -> dict:
+        name = entry["name"]
+        live = self.live.get(name)
+        try:
+            found = await self.icon_finder.find(entry["url"], live.server if live else None)
+        except Exception as exc:  # never let an icon break a connector
+            log.info("connector %s: icon search failed (%s)", name, type(exc).__name__)
+            found = None
+        if self.icons.meta(name).get("source") == "upload" or self.registry.get(name) is None:
+            return self.icon_view(name)  # uploaded or deleted meanwhile
+        if found:
+            self.icons.save(name, found["data"], {"type": found["type"], "source": found["source"], "url": found["url"]})
+        else:
+            self.icons.save(name, None, {"tried_at": time.time()})
+        return self.icon_view(name)
+
+    def icon(self, name: str) -> tuple[bytes, dict] | None:
+        self._entry(name)
+        return self.icons.read(name)
+
+    def upload_icon(self, name: str, data: bytes) -> dict:
+        entry = self._entry(name)
+        try:
+            data, kind = check_image(data)
+        except IconError as exc:
+            raise ConnectorError(exc.code, exc.message, exc.status) from None
+        self.icons.save(name, data, {"type": kind, "source": "upload"})
+        return self.view(entry)
+
+    async def reset_icon(self, name: str) -> dict:
+        """Forget the uploaded (or found) icon and search again."""
+        entry = self._entry(name)
+        self.icons.remove(name)
+        await self.find_icon(entry)
+        return self.view(entry)
+
     # -- registry operations (console API and hub_call connector_registry) -----------
     def view(self, entry: dict) -> dict:
         live = self._live(entry["name"], entry)
@@ -439,7 +508,8 @@ class ConnectorHost:
         data.update(state=state, error=live.error if state in ("error", "needs_login") else None,
                     transport_detected=live.transport, tools_count=len(self._filtered(entry, live.tools)) if live.tools else (0 if live.listed_at else None),
                     server=live.server, latency_ms=live.latency_ms, checked_at=live.checked_at,
-                    created_at=entry.get("created_at"), updated_at=entry.get("updated_at"))
+                    created_at=entry.get("created_at"), updated_at=entry.get("updated_at"),
+                    **self.icon_view(entry["name"]))
         if (entry.get("auth") or {}).get("type") == "oauth":
             summary = self.oauth.summary(entry["name"])
             data["oauth"] = {**summary, "redirect_uri": self.oauth.redirect_uri(entry["name"])}
@@ -468,6 +538,7 @@ class ConnectorHost:
         config, secrets = normalize(body)
         self.registry.insert(config)
         self.secrets.remove(config["name"])
+        self.icons.remove(config["name"])
         self.secrets.apply(config["name"], secrets)
         self.oauth.forget(config["name"])
         self.live.pop(config["name"], None)
@@ -485,6 +556,8 @@ class ConnectorHost:
             if config["auth"].get("type") != "oauth" or old.get("url") != config["url"]:
                 self.secrets.remove(name, "oauth")
         self.secrets.apply(name, secrets)
+        if old.get("url") != config["url"] and self.icons.meta(name).get("source") != "upload":
+            self.icons.remove(name)  # a found icon belongs to the old address
         self.registry.update(config)
         live = self.live.pop(name, None)
         if live is not None:
@@ -503,6 +576,7 @@ class ConnectorHost:
             await self.oauth.logout(name, client_secret=self._client_secret(name))
         self.registry.delete(name)
         self.secrets.remove(name)
+        self.icons.remove(name)
         self.oauth.forget(name)
 
     async def probe(self, body: dict) -> dict:

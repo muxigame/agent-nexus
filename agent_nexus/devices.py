@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Any
 
 from .federation import Hub, Peer, RoutingError
+from .osinfo import family
 from .store import GatewayStore, clean_hostname
 
 
@@ -87,9 +88,12 @@ class Devices:
         runtimes = block.get("agent_runtimes") if isinstance(block.get("agent_runtimes"), dict) else {}
         workdirs = [{"name": name, "path": entry.get("path")}
                     for name, entry in (catalog.get("workspaces") or {}).items()]
+        nested = block.get("device") if isinstance(block.get("device"), dict) else {}
+        facts = {**nested, **{key: value for key, value in block.items() if value not in (None, "")}}
         return {"device_id": agent_id, "display_name": self._display(row), "hostname": row.get("hostname"),
                 "alias": row.get("alias"), "profile": block.get("profile"), "form": block.get("form"),
-                "platform": block.get("platform"), "online": peer is not None,
+                "platform": block.get("platform") or nested.get("platform"), "online": peer is not None,
+                "distro": facts.get("distro"), "os_family": family(facts),
                 "capabilities": capabilities, "agent_runtimes": runtimes, "workdirs": workdirs,
                 # Wake adapters arrive with M7; until then nothing is wakeable.
                 "wakeable_kinds": [],
@@ -119,6 +123,24 @@ class Devices:
         except ValueError as exc:
             raise RoutingError(str(exc)) from None
         return self.describe(agent_id)
+
+    def delete(self, value: Any) -> str:
+        """Remove an offline device from the list (the console's 删除); returns its agent_id.
+
+        A device that joined with an invite must be revoked first, or it would
+        come straight back. A device on a gateway.env token (agents_map or a
+        shared group token) can always be removed; it reappears if it connects again.
+        """
+        agent_id = self.resolve(value)
+        if agent_id in self.hub.peers:
+            raise RoutingError("device_online: 设备在线，不能删除；先吊销它")
+        if self.store.device(agent_id) is None:
+            raise RoutingError(f"unknown device {agent_id}")
+        active, _ = self.store.device_token_hashes(agent_id)
+        if active:
+            raise RoutingError("not_revoked: 这台设备的凭据仍然有效；先吊销再删除")
+        self.store.delete_device(agent_id)
+        return agent_id
 
     # -- the console's device table (docs/ui-spec.md §3.2) ------------------------
     #: ``devices.enrolled_via`` as the console shows it.

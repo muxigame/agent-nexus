@@ -4,6 +4,7 @@ import {
   skeletonRows, pill, relTime, setTheme, bytes,
 } from "/ui/ui.js";
 import { qrSVG } from "/ui/qr.js";
+import { osMark } from "/ui/os-icons.js";
 
 // ---------------------------------------------------------------- shared bits
 
@@ -15,6 +16,13 @@ function deviceIcon(device) {
   if (device.form === "laptop") return "laptop";
   if (device.platform === "linux") return "server";
   return "monitor";
+}
+
+/** The device's avatar: its operating-system mark, else a generic device glyph. */
+function deviceAvatar(device) {
+  const mark = osMark(device.os_family);
+  if (mark) return el("span", { class: "avatar os-mark", title: mark.label, "aria-label": mark.label, html: mark.svg });
+  return deviceAvatar(device);
 }
 
 function deviceState(device) {
@@ -114,7 +122,7 @@ export async function overviewPage(ctx) {
             el("div", { class: "card-head" }, el("h2", {}, "设备"),
               el("div", { class: "actions" }, el("a", { class: "btn btn-ghost btn-sm", href: "#/devices" }, "全部", icon("chevron-right", { size: 14 })))),
             devices.items.length ? el("div", { class: "list inset" }, devices.items.map((device) => el("a", { class: "list-item clickable", href: "#/devices" },
-              el("span", { class: "avatar" }, icon(deviceIcon(device), { size: 16 })),
+              deviceAvatar(device),
               el("div", { class: "stack grow", style: { gap: 0 } }, el("span", { class: "title truncate" }, device.display_name),
                 el("span", { class: "sub truncate" }, el("span", { class: "mono" }, device.device_id), device.os ? ` · ${device.os}` : "")),
               el("div", { class: "meta" }, !device.online && device.last_connected_at ? el("span", { class: "faint xs hide-sm" }, relTime(device.last_seen_at)) : null,
@@ -178,7 +186,7 @@ export async function devicesPage(ctx, route) {
       el("thead", {}, el("tr", {}, ["设备", "状态", "设备 ID", "版本", "入网方式", "最后在线", ""].map((h) => el("th", {}, h)))),
       el("tbody", {}, devices.map((device) => el("tr", { dataset: { device: device.device_id } },
         el("td", { class: "cell-first" }, el("div", { class: "cell-main" },
-          el("span", { class: "avatar" }, icon(deviceIcon(device), { size: 16 })),
+          deviceAvatar(device),
           el("div", { class: "stack", style: { gap: 0 } }, el("span", { class: "title" }, device.display_name),
             el("span", { class: "sub" }, device.hostname ? ["主机名 ", el("span", { class: "mono" }, device.hostname)] : "未上报主机名",
               device.os ? ` · ${device.os}` : "")))),
@@ -194,6 +202,7 @@ export async function devicesPage(ctx, route) {
               { label: "复制设备 ID", icon: "copy", onClick: () => copy(device.device_id) },
               { separator: true },
               { label: device.revoked ? "已吊销" : "吊销", icon: "circle-x", danger: true, onClick: () => revoke(device, reload) },
+              ...(device.online ? [] : [{ label: "删除", icon: "trash", danger: true, onClick: () => removeDevice(device, reload) }]),
             ]) })))))))));
   }
 
@@ -257,6 +266,28 @@ async function revoke(device, reload) {
     } else {
       toast(error.message, { type: "bad" });
     }
+  }
+  reload();
+}
+
+async function removeDevice(device, reload) {
+  if (device.enrolled_via === "invite" && !device.revoked) {
+    modal({ title: "先吊销再删除", size: "sm", body: el("p", { class: "muted" },
+      `${device.display_name} 的凭据仍然有效，删除后它还能重新连上来。先吊销，再删除。`),
+      actions: [{ label: "取消" }, { label: "吊销", variant: "danger", onClick: () => { revoke(device, reload); return true; } }] });
+    return;
+  }
+  const comesBack = device.enrolled_via && device.enrolled_via !== "invite";
+  const ok = await confirmDialog({ title: `删除 ${device.display_name}？`, danger: true, confirmLabel: "删除",
+    message: comesBack
+      ? "从设备列表中移除这条记录。它用 gateway.env 里的令牌入网，如果再次连接会重新出现。"
+      : "从设备列表中移除这条记录和它的备注名。删除后不能恢复；要重新接入需要新的邀请。" });
+  if (!ok) return;
+  try {
+    await fetchJSON(`/api/devices/${encodeURIComponent(device.device_id)}`, { method: "DELETE", quiet: true });
+    toast(`${device.display_name} 已删除`);
+  } catch (error) {
+    toast(error.message, { type: "bad" });
   }
   reload();
 }
@@ -636,7 +667,7 @@ export async function pluginsPage(ctx, route = { params: {}, query: new URLSearc
     else if (!plugins.length) body = el("p", { class: "muted small" }, "还没有启用插件。从插件库安装，或在这台设备的客户端“插件”页打开开关。");
     return el("section", { class: "card", dataset: { device: device.device_id } },
       el("div", { class: "card-head" },
-        el("span", { class: "avatar" }, icon(deviceIcon(device), { size: 16 })),
+        deviceAvatar(device),
         el("h2", {}, device.display_name),
         pill(deviceState(device)),
         el("div", { class: "actions" }, el("span", { class: "faint small" }, device.online ? `${plugins.length} 个插件` : ""))),

@@ -147,7 +147,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - run: node --test tests/test_console_ui.cjs tests/test_inbox_ui.cjs
+      - run: node --test tests/*.cjs
 
   desktop-check:
     runs-on: windows-latest

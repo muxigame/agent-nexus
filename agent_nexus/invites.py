@@ -250,7 +250,7 @@ class Enrollment:
         device = body.get("device") if isinstance(body.get("device"), dict) else None
         if device is not None:
             device = {key: str(value)[:100] for key, value in device.items()
-                      if key in ("platform", "os", "arch", "form") and isinstance(value, (str, int, float))}
+                      if key in ("platform", "os", "arch", "form", "distro") and isinstance(value, (str, int, float))}
         if invite.get("agent_id"):
             agent_id = invite["agent_id"]
             if agent_id in self.agents or agent_id in self.store.device_token_agents(active=True):

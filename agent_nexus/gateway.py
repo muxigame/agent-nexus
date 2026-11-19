@@ -624,6 +624,8 @@ class Gateway:
                 return {"devices": self.devices.list(include_offline=bool(args.get("include_offline", True)))}
             if action == "set_alias":
                 return {"device": self.devices.set_alias(args.get("device_id"), args.get("alias"))}
+            if action == "delete":
+                return {"deleted": self.devices.delete(args.get("device_id"))}
             if action in ("revoke", "invite_create", "invite_list", "invite_revoke") and self.enrollment is not None:
                 return await self.device_admin_enrollment(action, args)
             raise RoutingError(f"unsupported device_admin op {action!r}")

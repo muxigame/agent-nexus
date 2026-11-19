@@ -321,6 +321,9 @@ class LocalGateway:
             if info is None:
                 return None
         block.update(agent_version=__version__, mcp=self.resolve_mcp("device"))
+        from .osinfo import distro
+        if not block.get("distro") and (name := distro()):
+            block["distro"] = name  # the console's device icon (Ubuntu, Debian…)
         # `anx wake doctor` results (design §8.7): shown in mail_who's agent_runtimes.
         from .link.wake.doctor import load_results
         doctor = load_results(self.root)

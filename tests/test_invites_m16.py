@@ -470,3 +470,36 @@ def test_anx_join_cli_without_a_running_manager(tmp_path, monkeypatch, capsys):
     assert (root / "secrets" / "cloud" / "device-token").read_text(encoding="utf-8").strip() == "t" * 43
     assert cli.main(["--root", str(root), "leave"]) == 0
     assert not (root / "secrets" / "cloud" / "device-token").exists()
+
+
+async def test_offline_devices_can_be_deleted_only_after_revoking(tmp_path, monkeypatch):
+    """The console's 删除: offline only; an invite device must be revoked first; it stays revoked."""
+    from websockets.asyncio.client import connect
+    from websockets.exceptions import ConnectionClosed
+    async with gateway(tmp_path, monkeypatch) as gw:
+        root = fresh_root(tmp_path, "a")
+        await join_root(root, (await create_invite(gw))["code"], hostname=HOST_A)
+        status, task = await start_device(gw, root)
+        online = await gw["http"].delete(f"/api/devices/{HOST_A}")
+        assert online.status_code == 409 and online.json()["code"] == "device_online"
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        hub = gw["app"].state.hub
+        assert await eventually(lambda: HOST_A not in hub.peers)
+        active = await gw["http"].delete(f"/api/devices/{HOST_A}")
+        assert active.status_code == 409 and active.json()["code"] == "not_revoked"
+        assert (await gw["http"].post(f"/api/devices/{HOST_A}/revoke")).status_code == 200
+        deleted = await gw["http"].delete(f"/api/devices/{HOST_A}")
+        assert deleted.status_code == 200 and deleted.json() == {"deleted": HOST_A}
+        listed = [d["device_id"] for d in (await gw["http"].get("/api/devices")).json()["devices"]]
+        assert HOST_A not in listed
+        assert (await gw["http"].delete(f"/api/devices/{HOST_A}")).status_code == 404
+        # the deleted device's old token is still answered with "revoked" (4401)
+        token = (root / "secrets" / "cloud" / "device-token").read_text(encoding="utf-8").strip()
+        with pytest.raises(ConnectionClosed) as closed:
+            async with connect(f"ws://127.0.0.1:{gw['port']}/ingress/{HOST_A}",
+                               additional_headers={"Authorization": f"Bearer {token}"}, proxy=None) as ws:
+                await ws.send(json.dumps({"protocol": 1, "agent_id": HOST_A, "catalog": {"workspaces": {}, "mcps": {}}}))
+                await asyncio.wait_for(ws.recv(), 5)
+        assert closed.value.rcvd.code == 4401
+        assert HOST_A not in [d["device_id"] for d in (await gw["http"].get("/api/devices")).json()["devices"]]

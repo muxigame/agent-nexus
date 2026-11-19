@@ -21,9 +21,12 @@ from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Re
 from starlette.routing import Route
 
 from ..inbox_web import NO_STORE
+from .icons import MAX_ICON_BYTES
 from .registry import ConnectorError
 
 log = logging.getLogger(__name__)
+#: Icons are images only: an SVG opened directly cannot run script or load anything.
+ICON_CSP = "default-src 'none'; style-src 'unsafe-inline'; sandbox"
 CALLBACK_CSP = "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'"
 
 
@@ -84,6 +87,31 @@ class ConnectorsWeb:
         except ConnectorError as exc:
             return self._error(exc)
         return self._json({"error": "unknown action"}, 404)
+
+    async def icon(self, request: Request) -> Response:
+        """``GET`` the icon, ``PUT`` an upload (raw image body), ``DELETE`` = back to automatic."""
+        if (denied := await self._guard(request)) is not None:
+            return denied
+        name = request.path_params["name"]
+        try:
+            if request.method == "GET":
+                found = self.host.icon(name)
+                if found is None:
+                    return self._json({"error": "这个连接器还没有图标", "code": "no_icon"}, 404)
+                data, meta = found
+                return Response(data, media_type=meta["type"], headers={
+                    "Cache-Control": "private, max-age=86400", "X-Content-Type-Options": "nosniff",
+                    "Content-Security-Policy": ICON_CSP, "Content-Disposition": "inline"})
+            if request.method == "PUT":
+                body = bytearray()
+                async for chunk in request.stream():
+                    body += chunk
+                    if len(body) > MAX_ICON_BYTES:
+                        return self._json({"error": f"图标不能超过 {MAX_ICON_BYTES // 1024} KB", "code": "icon_too_large"}, 413)
+                return self._json({"connector": self.host.upload_icon(name, bytes(body))})
+            return self._json({"connector": await self.host.reset_icon(name)})
+        except ConnectorError as exc:
+            return self._error(exc)
 
     async def token(self, request: Request) -> Response:
         """``DELETE /api/connectors/<name>/token`` (design §7.3 step 7) = logout."""
@@ -169,6 +197,7 @@ class ConnectorsWeb:
             Route("/api/connectors/probe", self.probe, methods=["POST"]),
             Route("/api/connectors/{name}", self.item, methods=["GET", "PUT", "DELETE"]),
             Route("/api/connectors/{name}/token", self.token, methods=["DELETE"]),
+            Route("/api/connectors/{name}/icon", self.icon, methods=["GET", "PUT", "DELETE"]),
             Route("/api/connectors/{name}/{action}", self.action, methods=["POST"]),
             Route("/oauth/connectors/callback/{name}", self.callback, methods=["GET"]),
         ]

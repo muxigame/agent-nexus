@@ -38,6 +38,59 @@ function initial(connector) {
   return text.slice(0, 1).toUpperCase();
 }
 
+/** The connector's icon (found on its server or uploaded), else its initial. */
+function connectorAvatar(connector, size = "") {
+  const fallback = () => el("span", { class: `avatar accent ${size}` }, initial(connector));
+  if (!connector.icon_url) return fallback();
+  const holder = el("span", { class: `avatar icon-avatar ${size}` });
+  const img = el("img", { src: connector.icon_url, alt: "", loading: "lazy", decoding: "async" });
+  img.addEventListener("error", () => holder.replaceWith(fallback()), { once: true });
+  holder.append(img);
+  return holder;
+}
+
+const ICON_SOURCE = { upload: "手动上传", server: "MCP 服务声明", site: "网站图标" };
+const ICON_MAX_KB = 256;
+
+function iconDialog(connector, reload) {
+  const preview = el("div", { class: "row", style: { gap: "12px", alignItems: "center" } });
+  const fileInput = el("input", { type: "file", accept: "image/png,image/jpeg,image/gif,image/webp,image/svg+xml,image/x-icon,.ico,.svg", hidden: true });
+  let current = connector;
+  const show = () => mount(preview, connectorAvatar(current, "lg"),
+    el("div", { class: "stack", style: { gap: 0 } },
+      el("span", { class: "title" }, current.icon_url ? ICON_SOURCE[current.icon_source] || "已设置" : "还没有图标"),
+      el("span", { class: "faint xs" }, current.icon_url ? "" : "连接成功后会自动从 MCP 服务或它的网站获取；也可以手动上传。")));
+  show();
+  fileInput.addEventListener("change", async () => {
+    const file = fileInput.files?.[0];
+    fileInput.value = "";
+    if (!file) return;
+    if (file.size > ICON_MAX_KB * 1024) { toast(`图标不能超过 ${ICON_MAX_KB} KB`, { type: "bad" }); return; }
+    try {
+      const result = await fetchJSON(`/api/connectors/${encodeURIComponent(connector.name)}/icon`, { method: "PUT", body: file });
+      current = result.connector; show(); toast("图标已更新"); reload();
+    } catch { /* toasted */ }
+  });
+  modal({
+    title: `${connector.title || connector.name} 的图标`, size: "sm",
+    description: `PNG、JPEG、GIF、WebP、ICO 或 SVG，最大 ${ICON_MAX_KB} KB；建议正方形、至少 64×64。`,
+    body: el("div", { class: "stack" }, preview, fileInput),
+    actions: [
+      { label: "完成" },
+      { label: "恢复自动获取", variant: "ghost", icon: "refresh-cw", onClick: async () => {
+        try {
+          const result = await fetchJSON(`/api/connectors/${encodeURIComponent(connector.name)}/icon`, { method: "DELETE" });
+          current = result.connector; show();
+          toast(current.icon_url ? `已从${ICON_SOURCE[current.icon_source] || "服务"}获取图标` : "没有找到图标", { type: current.icon_url ? "ok" : "info" });
+          reload();
+        } catch { /* toasted */ }
+        return false;
+      } },
+      { label: "上传图片", variant: "primary", icon: "upload", onClick: () => { fileInput.click(); return false; } },
+    ],
+  });
+}
+
 /** A connector name guessed from a URL: mcp.cloudflare.com → cloudflare, openapi-mcp.cn-hangzhou.aliyuncs.com → aliyun. */
 export function guessName(url) {
   let host;
@@ -103,7 +156,7 @@ export async function connectorsPage(ctx, route) {
         busy ? el("span", { class: "spinner" }) : icon("activity", { size: 14 }), "测试");
     return el("tr", { dataset: { connector: connector.name } },
       el("td", { class: "cell-first" }, el("div", { class: "cell-main" },
-        el("span", { class: "avatar accent" }, initial(connector)),
+        connectorAvatar(connector),
         el("div", { class: "stack", style: { gap: 0, minWidth: 0 } },
           el("span", { class: "title" }, connector.title || connector.name, connector.title ? el("span", { class: "faint xs mono" }, ` hub/${connector.name}`) : null),
           el("span", { class: "sub mono truncate", title: connector.url }, connector.url),
@@ -118,6 +171,7 @@ export async function connectorsPage(ctx, route) {
         el("button", { class: "btn btn-ghost btn-sm btn-icon", type: "button", "aria-label": "更多操作", html: iconHTML("ellipsis", { size: 16 }),
           onclick: (event) => openMenu(event.currentTarget, [
             { label: "编辑", icon: "pencil", onClick: () => connectorDrawer(connector, reload) },
+            { label: "图标", icon: "image", onClick: () => iconDialog(connector, reload) },
             connector.auth?.type === "oauth" && !needsLogin ? { label: "重新登录", icon: "log-in", onClick: () => startLogin(connector.name) } : null,
             connector.auth?.type === "oauth" && connector.oauth?.logged_in ? { label: "退出登录", icon: "log-out", onClick: () => logout(connector) } : null,
             { label: connector.enabled ? "停用" : "启用", icon: "power", onClick: () => toggle(connector) },

@@ -511,6 +511,17 @@ class GatewayStore:
             db.execute("UPDATE devices SET revoked_at = ?, online = 0 WHERE agent_id = ?", (now, agent_id))
             return count
 
+    def delete_device(self, agent_id: str) -> bool:
+        """Forget an offline device's row (the console's 删除). Its token digests stay,
+        so a revoked client that comes back is still told it was revoked."""
+        now = self.clock()
+        with self._lock:
+            db = self._connect()
+            removed = db.execute("DELETE FROM devices WHERE agent_id = ?", (agent_id,)).rowcount > 0
+            db.execute("UPDATE addresses SET ended_at = ? WHERE agent_id = ? AND ended_at IS NULL AND kind != 'human'",
+                       (now, agent_id))
+            return removed
+
     def end_device_addresses(self, agent_id: str) -> int:
         """Mark the revoked device's mailbox addresses ended (design §11.5)."""
         with self._lock:

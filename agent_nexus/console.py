@@ -319,6 +319,14 @@ class Console:
             return self.unauthorized()
         if request.method == "GET":
             return self._json({"devices": self.facade.devices.console_list()})
+        if request.method == "DELETE":
+            try:
+                agent_id = self.facade.devices.delete(request.path_params["device_id"])
+            except RoutingError as exc:
+                message = str(exc)
+                code, _, text = message.partition(": ") if message.startswith(("device_online", "not_revoked")) else ("unknown_device", "", message)
+                return self._json({"error": text, "code": code}, 404 if code == "unknown_device" else 409)
+            return self._json({"deleted": agent_id})
         body = await self._body(request)
         if body is None or "alias" not in body:
             return self._json({"error": "body must be an object with an alias (string or null)"}, 400)
@@ -408,7 +416,7 @@ class Console:
             Route("/console/{name}", self.asset, methods=["GET", "HEAD"]),
             Route("/api/console/summary", self.summary, methods=["GET"]),
             Route("/api/devices", self.devices, methods=["GET"]),
-            Route("/api/devices/{device_id}", self.devices, methods=["PUT"]),
+            Route("/api/devices/{device_id}", self.devices, methods=["PUT", "DELETE"]),
             Route("/api/devices/{device_id}/revoke", self.revoke, methods=["POST"]),
             Route("/api/invites", self.invites, methods=["GET", "POST"]),
             Route("/api/invites/{invite_id}", self.invites, methods=["DELETE"]),

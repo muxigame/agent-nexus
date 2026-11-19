@@ -234,6 +234,9 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
     async def list_devices(_request: Request) -> JSONResponse:
         return await device_admin({"op": "list", "include_offline": True})
 
+    async def delete_device(request: Request) -> JSONResponse:
+        return await device_admin({"op": "delete", "device_id": request.path_params["device_id"]})
+
     async def revoke_device(request: Request) -> JSONResponse:
         return await device_admin({"op": "revoke", "device_id": request.path_params["device_id"]})
 
@@ -733,6 +736,7 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
         Route("/api/devices", list_devices),
         Route("/api/devices/{device_id}/alias", put_device_alias, methods=["PUT"]),
         Route("/api/devices/{device_id}/revoke", revoke_device, methods=["POST"]),
+        Route("/api/devices/{device_id}", delete_device, methods=["DELETE"]),
         Route("/api/invites", invites_api, methods=["GET", "POST"]),
         Route("/api/invites/{invite_id}", invites_api, methods=["DELETE"]),
         Route("/inbox.js", inbox_js),
