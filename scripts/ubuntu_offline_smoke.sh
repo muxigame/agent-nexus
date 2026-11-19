@@ -64,6 +64,7 @@ services = {s["name"]: s["status"] for s in json.load(sys.stdin)["services"]}
 print("services:", services)
 sys.exit(0 if services.get("device") == "running" else 1)'; then
         echo "ok: manager and device plugin are running with no network"
+        "$ANX_ROOT/.venv/bin/python" "$(dirname "$0")/check_runtime_imports.py" "$ANX_ROOT/agent_nexus"
         exit 0
     fi
     sleep 2

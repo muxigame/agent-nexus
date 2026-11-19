@@ -74,6 +74,8 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends xvfb
       - run: uv sync --frozen
+      - name: Runtime imports resolve without dev dependencies
+        run: uv run --frozen --no-dev --isolated python scripts/check_runtime_imports.py
       - name: pytest (includes tests/compat)
         if: runner.os == 'Windows'
         run: uv run pytest -q
