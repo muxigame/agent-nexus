@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Install an Agent Nexus .deb and start it with the network cut off: the manager and the
-# device plugin must come up from the bundled CPython and package cache alone.
+# device plugin must come up from the bundled CPython and package cache alone. The clock
+# runs two days ahead (libfaketime), so every cached index answer is stale, as on a
+# machine that installs the package long after it was built.
 #
 #   bash scripts/ubuntu_offline_smoke.sh path/to/agent-nexus_<version>_amd64.deb
 #
@@ -11,7 +13,10 @@ set -euo pipefail
 if [ "${1:-}" != "--offline-run" ]; then
     deb="$(readlink -f "$1")"
     sudo apt-get update -qq
-    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends "$deb"
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends "$deb" faketime
+    # libfaketime only reaches dynamically linked programs: make sure the bundled uv is one.
+    ldd /usr/lib/agent-nexus/runtime/tools/uv >/dev/null 2>&1 \
+        || { echo "error: the bundled uv is static; faketime cannot age its cache" >&2; exit 2; }
     work="$(mktemp -d)"
     chmod 755 "$work"
     # A fresh network namespace has only a loopback interface: no DNS, no PyPI, no GitHub.
@@ -27,7 +32,7 @@ if curl -fsS -m 5 -o /dev/null https://pypi.org/simple/ 2>/dev/null; then
     echo "error: the network is reachable; this check must run without it" >&2
     exit 2
 fi
-/usr/bin/agent-nexus --serve >"$log" 2>&1 &
+faketime -f '+2d' /usr/bin/agent-nexus --serve >"$log" 2>&1 &
 pid=$!
 cleanup() { pkill -TERM -P "$pid" 2>/dev/null || true; kill "$pid" 2>/dev/null || true; }
 # On failure: what uv decided about the bundled cache, so the cause is visible in the CI log.
@@ -38,7 +43,7 @@ diagnose() {
     ls -la "$cache"/wheels-v*/pypi/httpcore2 >&2 || true
     for mode in 0 1; do
         echo "--- UV_OFFLINE=$mode" >&2
-        (cd "$ANX_ROOT" && env UV_OFFLINE="$mode" UV_CACHE_DIR="$cache" UV_PYTHON_INSTALL_DIR="$ANX_ROOT/tools/python" \
+        (cd "$ANX_ROOT" && faketime -f '+2d' env UV_OFFLINE="$mode" UV_CACHE_DIR="$cache" UV_PYTHON_INSTALL_DIR="$ANX_ROOT/tools/python" \
             UV_PYTHON_PREFERENCE=managed "$ANX_ROOT/tools/uv" sync -v --frozen --no-dev --python 3.12 --project "$ANX_ROOT" 2>&1 \
             | grep -iE "httpcore2|fresh|stale|revalidat|cache (hit|miss)|error" | head -40) >&2 || true
     done

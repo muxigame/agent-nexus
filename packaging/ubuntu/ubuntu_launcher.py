@@ -99,7 +99,67 @@ def prepare():
                 target.parent.chmod(0o700)
                 target.chmod(0o600)
     (ROOT / "tools/uv").chmod(0o755)
+    presync()
     (ROOT / ".installed-version").write_text(version)
+
+
+#: Flags of `uv run` that also select what `uv sync` installs (as scripts/offline_runtime.py).
+VALUE_FLAGS = {"--extra", "--group", "--only-group", "--no-group"}
+SWITCH_FLAGS = {"--no-dev", "--all-extras", "--all-groups", "--no-default-groups"}
+
+
+def sync_flags(command):
+    """The install selection of a `uv run ...` service command, or None if it is not one."""
+    if len(command) < 2 or Path(command[0]).stem != "uv" or command[1] != "run":
+        return None
+    flags, rest = [], list(command[2:])
+    while rest and rest[0].startswith("--"):
+        flag = rest.pop(0)
+        if flag in VALUE_FLAGS and rest:
+            flags += [flag, rest.pop(0)]
+        elif flag in SWITCH_FLAGS:
+            flags.append(flag)
+        elif flag in {"--python", "--project", "--directory", "--with", "--package"} and rest:
+            rest.pop(0)
+    return flags
+
+
+def runtime_projects():
+    """(label, project, sync flags): the manager as serve() runs it, then each `uv run` builtin."""
+    found = [("agent-nexus", ROOT, ["--no-dev"])]
+    for spec in sorted((ROOT / "builtins").glob("*/mcp-service.json")):
+        try:
+            service = json.loads(spec.read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            continue
+        flags = sync_flags([str(part) for part in service.get("command", [])])
+        project = spec.parent / service.get("cwd", ".")
+        if flags is not None and (project / "pyproject.toml").is_file() and (project / "uv.lock").is_file():
+            found.append((spec.parent.name, project, flags))
+    return found
+
+
+def presync():
+    """Build every Python environment of the runtime from the bundled CPython and cache, offline.
+
+    The Windows installer does the same (desktop bootstrap ``--prepare-runtime``).
+    Afterwards ``uv run`` finds each environment complete and never builds:
+    building the packaged projects would resolve their build backend through the
+    package index, whose cached answer is only fresh for minutes, i.e. online.
+    """
+    if not (ROOT / "tools/uv-cache").is_dir():
+        return  # a package without the offline runtime installs online on first run
+    env = {**os.environ, **runtime_env(), "UV_OFFLINE": "1"}
+    for key in ("VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT"):
+        env.pop(key, None)
+    uv = str(ROOT / "tools/uv")
+    for label, project, flags in runtime_projects():
+        result = subprocess.run([uv, "sync", "--frozen", "--python", "3.12", "--project", str(project), *flags],
+                                cwd=str(project), env=env, stdin=subprocess.DEVNULL,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        if result.returncode:
+            tail = "\n".join(result.stderr.strip().splitlines()[-12:])
+            raise RuntimeError("%s 的依赖安装失败（%s）：\n%s" % (label, result.returncode, tail))
 
 
 def base_url():
@@ -148,7 +208,9 @@ def serve():
             os.dup2(output.fileno(), 1)
             os.dup2(output.fileno(), 2)
     uv = str(ROOT / "tools/uv")
-    os.execv(uv, [uv, "run", "--no-dev", "--python", "3.12", "--project", str(ROOT),
+    # The manager ships with the package; with the bundled cache it never needs the network.
+    offline = ["--offline"] if (ROOT / "tools/uv-cache").is_dir() else []
+    os.execv(uv, [uv, "run", *offline, "--no-dev", "--python", "3.12", "--project", str(ROOT),
                      "anx", "--root", str(ROOT), "serve"])
 
 
