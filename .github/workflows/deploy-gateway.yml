@@ -9,6 +9,7 @@
 # On the host, anx-upgrade verifies the zip, runs uv sync and --check-config, backs up,
 # switches the symlink, restarts and polls /healthz, and rolls back on any failure.
 # verify_cloud_host.py is deliberately not a gate (it expects a fixed set of devices online).
+# Run it with: gh workflow run deploy-gateway.yml -f tag=vX.Y.Z -f target=production
 name: deploy-gateway
 
 on:
