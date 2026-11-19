@@ -61,10 +61,14 @@ def prepare():
             target.mkdir(parents=True, exist_ok=True)
         elif relative.as_posix() not in CONFIG_NAMES or not _has_config(ROOT):
             target.parent.mkdir(parents=True, exist_ok=True)
+            mode = source.stat().st_mode & 0o777
             if target.is_file() and target.read_bytes() == source.read_bytes():
+                if target.stat().st_mode & 0o777 != mode:
+                    target.chmod(mode)
                 continue  # uv may already be executing.
             temporary = target.with_name(target.name + ".bundle.tmp")
             shutil.copyfile(source, temporary)
+            temporary.chmod(mode)  # the bundled CPython and cached packages keep their executables
             temporary.replace(target)
             if relative.parts[0] == ".private":
                 target.parent.chmod(0o700)
@@ -88,8 +92,25 @@ def api(path, method="GET"):
         return json.load(response)
 
 
+def runtime_env():
+    """Point uv at the CPython and package cache the package ships, so nothing is downloaded.
+
+    The same settings agent_nexus.logs.use_bundled_runtime gives managed services;
+    an explicit setting from the user wins.
+    """
+    env = {}
+    if (ROOT / "tools/python").is_dir():
+        env["UV_PYTHON_INSTALL_DIR"] = str(ROOT / "tools/python")
+        env["UV_PYTHON_PREFERENCE"] = "managed"
+    if (ROOT / "tools/uv-cache").is_dir():
+        env["UV_CACHE_DIR"] = str(ROOT / "tools/uv-cache")
+    return env
+
+
 def serve():
     prepare()
+    for key, value in runtime_env().items():
+        os.environ.setdefault(key, value)
     os.environ["ANX_ROOT"] = str(ROOT)
     os.environ.pop("MCPM_ROOT", None)
     os.environ["PATH"] = str(ROOT / "tools") + os.pathsep + os.environ.get("PATH", "")

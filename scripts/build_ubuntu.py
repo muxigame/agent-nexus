@@ -5,9 +5,10 @@ import io
 import json
 import re
 import tarfile
+import tempfile
 from pathlib import Path, PurePosixPath
 
-from build_release import CLIENT_CONFIG, ROOT, release_files, load_enrollment, private_entries
+from build_release import CLIENT_CONFIG, ROOT, offline_runtime, release_files, load_enrollment, private_entries
 
 
 def source_version(root=ROOT):
@@ -51,7 +52,9 @@ def ar_member(name, data):
     return header + data + (b"\n" if len(data) % 2 else b"")
 
 
-def build(uv, out, enrollment=None):
+def build(uv, out, enrollment=None, offline=False):
+    """``offline`` bundles CPython and every locked package (scripts/offline_runtime.py),
+    so the first start never downloads; it must run on Linux x86_64 with ``uv`` = that Linux uv."""
     binary = uv.read_bytes()
     if binary[:4] != b"\x7fELF" or binary[18:20] != b"\x3e\x00":
         raise ValueError("--uv must be a Linux x86_64 ELF executable")
@@ -60,10 +63,17 @@ def build(uv, out, enrollment=None):
     name = PRIVATE_PACKAGE if private else PACKAGE
     entries = {}
     manifest = {}
-    for source, relative in release_files("runtime", include_windows_uv=False):
+    files = list(release_files("runtime", include_windows_uv=False))
+    for source, relative in files:
         data = source.read_bytes()
         entries[LIB + "runtime/" + relative] = (data, 0o644)
         manifest[relative] = hashlib.sha256(data).hexdigest()
+    if offline:
+        with tempfile.TemporaryDirectory(prefix="anx-ubuntu-offline-") as scratch:
+            for source, relative in offline_runtime.bundle(files, str(uv), Path(scratch)):
+                data = source.read_bytes()
+                entries[LIB + "runtime/" + relative] = (data, 0o755 if source.stat().st_mode & 0o111 else 0o644)
+                manifest[relative] = hashlib.sha256(data).hexdigest()
     entries[LIB + "runtime/tools/uv"] = (binary, 0o755)
     manifest["tools/uv"] = hashlib.sha256(binary).hexdigest()
     config = json.loads((ROOT / "config/client.example.json").read_bytes())
@@ -119,5 +129,7 @@ if __name__ == "__main__":
     parser.add_argument("--uv", type=Path, required=True)
     parser.add_argument("--out", type=Path, default=ROOT / "artifacts/ubuntu")
     parser.add_argument("--enrollment-file", type=Path)
+    parser.add_argument("--online", action="store_true",
+                        help="skip the bundled Python and package cache (the first start then downloads them)")
     args = parser.parse_args()
-    build(args.uv, args.out, args.enrollment_file)
+    build(args.uv, args.out, args.enrollment_file, offline=not args.online)

@@ -1,4 +1,4 @@
-"""Bundle Python and every locked dependency so a Windows client starts offline.
+"""Bundle Python and every locked dependency so a client (Windows or Ubuntu) starts offline.
 
 A fresh machine used to download a CPython build (from GitHub) and roughly
 two hundred packages (from PyPI) on first start, which takes very long on a
@@ -8,6 +8,12 @@ exactly the way its service starts). agent-nexus and the desktop app point
 ``UV_PYTHON_INSTALL_DIR`` and ``UV_CACHE_DIR`` there, so ``uv run`` installs
 from disk. Optional extras that a service does not start with (the device plugin's
 multi-gigabyte ``vision``) are deliberately left out.
+
+On Unix uv links each cached wheel to its unpacked archive with an absolute
+symlink into the build machine's cache, which would dangle on a client. Those
+links are replaced by the directories they point to (uv canonicalizes the
+entry, so a real directory resolves the same way), and the offline proof runs
+against exactly that layout.
 """
 from __future__ import annotations
 
@@ -52,9 +58,13 @@ def projects(stage: Path) -> list[tuple[str, Path, list[str]]]:
     return found
 
 
+#: The uv-managed CPython build of the platform the package is built on (and for).
+PLATFORM = "windows-x86_64-none" if os.name == "nt" else "linux-x86_64-gnu"
+
+
 def managed_python(uv: str) -> Path:
     base = Path(subprocess.run([uv, "python", "dir"], check=True, capture_output=True, text=True).stdout.strip())
-    candidates = sorted(base.glob(f"cpython-{PYTHON}.*-windows-x86_64-none"),
+    candidates = sorted(base.glob(f"cpython-{PYTHON}.*-{PLATFORM}"),
                         key=lambda p: tuple(int(x) for x in p.name.split("-")[1].split(".")))
     if not candidates:
         subprocess.run([uv, "python", "install", PYTHON], check=True)
@@ -84,12 +94,36 @@ def prepare(stage: Path, uv: str) -> dict:
             _sync(uv, stage, project, flags, Path(scratch) / f"online-{label}", offline=False)
             report["projects"][label] = flags
         _drop_machine_specific(uv, stage / "tools" / "uv-cache")
+        _materialize_links(stage / "tools" / "uv-cache")
         # The proof: a cold environment for every project, with the network off.
         for label, project, flags in projects(stage):
             _sync(uv, stage, project, flags, Path(scratch) / f"offline-{label}", offline=True)
     # The proof rebuilt the packaged projects into the cache; drop them again.
     _drop_machine_specific(uv, stage / "tools" / "uv-cache")
+    _materialize_links(stage / "tools" / "uv-cache")
     return report
+
+
+def _materialize_links(cache: Path) -> None:
+    """Replace every symlink in the cache by a copy of its target (the last user moves it)."""
+    users: dict[Path, list[Path]] = {}
+    for link in sorted(path for path in cache.rglob("*") if path.is_symlink()):
+        target = link.resolve()
+        if not target.exists():
+            link.unlink()  # dangling: nothing can resolve through it anyway
+            continue
+        users.setdefault(target, []).append(link)
+    inside = cache.resolve()
+    for target, links in users.items():
+        for index, link in enumerate(links):
+            link.unlink()
+            last = index == len(links) - 1
+            if last and inside in target.parents:
+                shutil.move(str(target), str(link))
+            elif target.is_dir():
+                shutil.copytree(target, link)
+            else:
+                shutil.copy2(target, link)
 
 
 def _drop_machine_specific(uv: str, cache: Path) -> None:
@@ -118,6 +152,10 @@ def bundle(files: list[tuple[Path, str]], uv: str, scratch: Path) -> list[tuple[
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(path, destination)
     report = prepare(stage, uv)
+    links = [path for folder in (stage / "tools" / "python", stage / "tools" / "uv-cache")
+             for path in folder.rglob("*") if path.is_symlink()]
+    if links:
+        raise RuntimeError(f"offline runtime still has symlinks, e.g. {links[0]}")
     extra = [(path, path.relative_to(stage).as_posix())
              for folder in (stage / "tools" / "python", stage / "tools" / "uv-cache")
              for path in sorted(folder.rglob("*"))

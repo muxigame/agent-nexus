@@ -102,6 +102,8 @@ jobs:
           set -eu
           uv run python scripts/build_ubuntu.py --uv "$(command -v uv)" --out build/ubuntu
           cp build/ubuntu/agent-nexus_*_amd64.deb dist/
+      - name: Ubuntu package starts with no network
+        run: bash scripts/ubuntu_offline_smoke.sh dist/agent-nexus_*_amd64.deb
       - name: No private payload
         run: uv run --no-project python scripts/test_no_private_payload.py dist
       - uses: actions/upload-artifact@v4

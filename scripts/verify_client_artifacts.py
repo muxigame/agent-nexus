@@ -260,8 +260,10 @@ def verify_deb(data, root, enrollment, token, *, private, version):
         require(entries.get(name) == expected and modes.get(name) == mode,
                 "Debian integration file mismatch: " + name)
     for name in runtime:
-        require(modes[runtime_prefix + name] == (0o755 if name == "tools/uv" else 0o644),
-                "Debian runtime permissions mismatch: " + name)
+        # The bundled CPython and package cache keep their executables executable.
+        allowed = ({0o755} if name == "tools/uv" else {0o644, 0o755}
+                   if name.startswith(("tools/python/", "tools/uv-cache/")) else {0o644})
+        require(modes[runtime_prefix + name] in allowed, "Debian runtime permissions mismatch: " + name)
     return {name[len(prefix):]: (digest(data), modes[name]) for name, data in entries.items() if name.startswith(prefix)}
 
 
