@@ -408,7 +408,8 @@ def test_local_console_device_page_goes_through_hub_call(tmp_path):
     client = TestClient(app, base_url="http://127.0.0.1:8399")
     assert client.get("/api/devices").status_code == 409  # no gateway with hub_call/1 yet
     hub.attach(send, {"version": "0.2.0", "features": ["hub_call/1"], "display_name": HOST_A})
-    assert client.get("/api/devices").json() == {"devices": []}
+    listed = client.get("/api/devices").json()
+    assert listed["devices"] == [] and listed["lock"] == {"locked": False, "has_password": False} and listed["remote"] is False
     assert client.put(f"/api/devices/{AGENT_ID}/alias", json={"alias": "Office"}).status_code == 403  # no X-ANX
     response = client.put(f"/api/devices/{AGENT_ID}/alias", json={"alias": "Office"}, headers={"X-ANX": "1"})
     assert response.status_code == 200 and response.json()["device"]["display_name"] == "Office"

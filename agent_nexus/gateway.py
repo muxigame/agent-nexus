@@ -616,8 +616,15 @@ class Gateway:
         args = params.get("args") or {}
         if not isinstance(args, dict):
             raise RoutingError("hub_call args must be an object")
+        if op == "lock_report":
+            # The client's 锁定 (private-network model): a locked device can be operated on
+            # but may not operate on other devices. Reported on connect and on every change.
+            peer.locked = bool(args.get("locked"))
+            return {"locked": peer.locked}
         if op == "device_admin":
             action = args.get("op")
+            if action != "list" and getattr(peer, "locked", False):
+                raise RoutingError("locked: 这台设备已锁定，解锁后才能操作其他设备")
             if action == "list":
                 if self.enrollment is not None:
                     return {"devices": self.devices.console_list()}

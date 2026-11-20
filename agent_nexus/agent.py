@@ -139,6 +139,8 @@ class HubLink:
         #: plugin_repo_job and ``plugin_repo/1`` (design §6.12). A bare ``anx-agent`` has none.
         self.handlers: dict[str, Any] = {}
         self.extra_features: tuple[str, ...] = ()
+        #: Coroutine functions run after every (re)connect, e.g. the manager's lock report.
+        self.on_attach: list[Any] = []
 
     @property
     def available(self) -> bool:
@@ -150,6 +152,13 @@ class HubLink:
         name = anx.get("display_name") if isinstance(anx, dict) else None
         self.display_name = name if isinstance(name, str) and len(name) <= 255 else None
         self._send = send
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:  # attached outside a loop (tests); nothing to report from here
+            loop = None
+        for callback in self.on_attach if loop else ():
+            task = loop.create_task(callback())
+            task.add_done_callback(lambda done: done.cancelled() or done.exception())
 
     def detach(self) -> None:
         self._send = None

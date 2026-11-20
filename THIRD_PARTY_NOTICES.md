@@ -48,12 +48,12 @@ extracted from `lucide-react` v1.47.0, so the web consoles need no CDN at runtim
 
 ## xterm.js (vendored)
 
-`agent_nexus/static/console/xterm.js`, `xterm.css` and `addon-fit.js` are the unmodified browser builds of
-`@xterm/xterm` 5.5.0 and `@xterm/addon-fit` 0.10.0 (source-map comments removed), used by the console's
-remote terminal without a CDN.
+`agent_nexus/static/ui/xterm.js`, `xterm.css` and `addon-fit.js` are the unmodified browser builds of
+`@xterm/xterm` 5.5.0 and `@xterm/addon-fit` 0.10.0 (source-map comments removed), used by the remote
+terminal of the gateway console and the client without a CDN.
 
 - Project: https://xtermjs.org
-- License: MIT (copy: `agent_nexus/static/console/LICENSE-xterm.txt`)
+- License: MIT (copy: `agent_nexus/static/ui/LICENSE-xterm.txt`)
 
 ## pywinpty (Windows dependency)
 

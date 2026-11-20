@@ -623,3 +623,5 @@ kbd { display: inline-block; padding: 0 5px; border: 1px solid var(--border-stro
 .chip { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface-2); color: var(--text); font-size: 12px; cursor: pointer; }
 .chip:hover { border-color: var(--accent); }
 .chip .mono { font-size: 11px; }
+.menu-item:disabled { opacity: .45; cursor: not-allowed; }
+.btn.is-locked { color: var(--warn, #b7791f); }

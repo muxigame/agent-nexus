@@ -7,8 +7,9 @@ On the socket, binary frames are terminal bytes in both directions. Text frames 
 the browser sends ``{"type": "resize", "cols", "rows"}`` (input may also come as
 ``{"type": "input", "data": "..."}``); the gateway sends ``ready``, ``exit`` and ``error``.
 
-The owner signs in with the console cookie (same-origin only) or a bearer token -- the same
-credentials as every other owner API. Output is pulled with a long poll (``term_read``), and
+Who may open one: the owner (console cookie, same origin only, or an owner bearer token), or
+any joined device of the gateway's private network with its own credential (``Authorization:
+Bearer <device token>`` plus ``X-ANX-Device: <its id>``) while it is online and not locked. Output is pulled with a long poll (``term_read``), and
 input is written by one task in order, coalescing keystrokes that arrive together.
 """
 from __future__ import annotations
@@ -36,11 +37,31 @@ MAX_INPUT_FRAME = 64 * 1024
 MAX_WRITE_CHUNK = 32 * 1024
 CLOSE_UNAUTHORIZED = 4401
 CLOSE_UNAVAILABLE = 4404
+#: term_close calls still running after their viewer left (kept referenced until done)
+_CLOSERS: set = set()
 
 
 class TerminalBridge:
-    def __init__(self, console):
+    def __init__(self, console, *, device_credential=None):
         self.console = console
+        self.device_credential = device_credential
+
+    def _device_caller(self, connection) -> str | None:
+        """The device id when a device of the network calls with its own credential, else None.
+
+        Raises RoutingError("locked: ...") when that device is locked."""
+        agent_id = connection.headers.get("x-anx-device", "")
+        header = connection.headers.get("authorization", "")
+        if not agent_id or not header.startswith("Bearer ") or self.device_credential is None:
+            return None
+        if not self.device_credential(agent_id, header.removeprefix("Bearer ")):
+            return None
+        peer = self.console.hub.peers.get(agent_id)
+        if peer is None:
+            return None  # only a connected device: a revoked one is never connected
+        if getattr(peer, "locked", False):
+            raise RoutingError("locked: 这台设备已锁定，解锁后才能操作其他设备")
+        return agent_id
 
     # -- helpers -------------------------------------------------------------------
     def _peer(self, device_id: str):
@@ -54,6 +75,11 @@ class TerminalBridge:
     async def _ws_owner(self, socket: WebSocket) -> bool:
         inbox = self.console.inbox_web
         header = socket.headers.get("authorization", "")
+        if socket.headers.get("x-anx-device"):
+            try:
+                return self._device_caller(socket) is not None
+            except RoutingError:
+                return False
         if header.startswith("Bearer "):
             return bool(await inbox._verify(header.removeprefix("Bearer ")))
         cookie = socket.cookies.get(COOKIE, "")
@@ -73,7 +99,11 @@ class TerminalBridge:
 
     # -- GET info --------------------------------------------------------------------
     async def info(self, request: Request) -> Response:
-        if await self.console.owner(request) is None:
+        try:
+            device = self._device_caller(request) if request.headers.get("x-anx-device") else None
+        except RoutingError as exc:
+            return JSONResponse({"error": str(exc).removeprefix("locked: "), "code": "locked"}, status_code=423, headers=NO_STORE)
+        if device is None and await self.console.owner(request) is None:
             return self.console.unauthorized()
         try:
             peer = self._peer(request.path_params["device_id"])
@@ -86,7 +116,16 @@ class TerminalBridge:
 
     # -- WebSocket -------------------------------------------------------------------
     async def socket(self, socket: WebSocket) -> None:
-        if not await self._ws_owner(socket):
+        if socket.headers.get("x-anx-device"):
+            try:
+                allowed = self._device_caller(socket) is not None
+            except RoutingError as exc:
+                await socket.accept()
+                await self._fail(socket, str(exc).removeprefix("locked: "))
+                return
+        else:
+            allowed = await self._ws_owner(socket)
+        if not allowed:
             await socket.close(code=CLOSE_UNAUTHORIZED)
             return
         await socket.accept()
@@ -114,15 +153,24 @@ class TerminalBridge:
         try:
             await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         finally:
+            # Close the device's session in a task of its own, never in this handler: when the
+            # viewer goes away this handler may be cancelled, and a device call cancelled
+            # mid-flight retires the whole device link (Peer.call), taking the device offline.
+            closer = asyncio.ensure_future(self._close_session(peer, sid))
+            _CLOSERS.add(closer)
+            closer.add_done_callback(_CLOSERS.discard)
             for task in tasks:
                 task.cancel()
             for task in tasks:
                 with contextlib.suppress(BaseException):
                     await task
             with contextlib.suppress(Exception):
-                await asyncio.wait_for(peer.call("term_close", {"sid": sid}), 5)
-            with contextlib.suppress(Exception):
                 await socket.close()
+
+    @staticmethod
+    async def _close_session(peer, sid: str) -> None:
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(peer.call("term_close", {"sid": sid}), 10)
 
     @staticmethod
     async def _fail(socket: WebSocket, message: str) -> None:
@@ -190,6 +238,17 @@ class TerminalBridge:
                     with contextlib.suppress(RoutingError):
                         await peer.call("term_resize", {"sid": sid, "cols": cols, "rows": rows})
 
+    async def network_devices(self, request: Request) -> Response:
+        """``GET /api/network/devices``: the device list for a device of the network (``anx term``)."""
+        try:
+            device = self._device_caller(request) if request.headers.get("x-anx-device") else None
+        except RoutingError:
+            device = "locked"  # listing is allowed while locked
+        if device is None and await self.console.owner(request) is None:
+            return self.console.unauthorized()
+        return JSONResponse({"devices": self.console.facade.devices.console_list()}, headers=NO_STORE)
+
     def routes(self) -> list:
         return [Route("/api/devices/{device_id}/terminal", self.info, methods=["GET"]),
+                Route("/api/network/devices", self.network_devices, methods=["GET"]),
                 WebSocketRoute("/api/devices/{device_id}/terminal/ws", self.socket)]

@@ -6,6 +6,9 @@ import { overviewPage } from "/local/overview.js";
 import { pluginsPage } from "/local/plugins.js";
 import { cloudPage } from "/local/cloud.js";
 import { settingsPage } from "/local/settings.js";
+import { devicesPage, lockButton } from "/local/devices.js";
+import { terminalPage } from "/ui/terminal.js";
+import { CLIENT_TERMINAL_API } from "/ui/terminal-config.js";
 
 restoreTheme();
 
@@ -19,6 +22,7 @@ if (location.pathname === "/cloud") {
 const NAV = [
   { path: "/", label: "概览", icon: "layout-dashboard", primary: true },
   { path: "/plugins", label: "插件", icon: "puzzle", primary: true },
+  { path: "/devices", label: "设备", icon: "monitor", primary: true },
   { path: "/cloud", label: "连接云端", icon: "cloud", primary: true, short: "云端" },
   { path: "/inbox", label: "收件箱", icon: "inbox", primary: true },
   { section: "其他" },
@@ -32,7 +36,7 @@ function toggleTheme() {
 }
 
 const shell = renderShell(document.body, { sub: "本机", nav: NAV, status: { state: "connecting", label: "正在读取…" } });
-shell.setActions(el("button", { class: "btn btn-ghost btn-icon", type: "button", "aria-label": "切换主题", title: "切换主题", onclick: toggleTheme },
+shell.setActions(lockButton(), el("button", { class: "btn btn-ghost btn-icon", type: "button", "aria-label": "切换主题", title: "切换主题", onclick: toggleTheme },
   icon("sun", { size: 18 })));
 
 /** The Tauri shell hides the window without making the document hidden (WebView2); it tells us instead. */
@@ -117,6 +121,8 @@ const router = createRouter({
   "/": (route) => overviewPage(context("概览"), route),
   "/plugins/:name?": (route) => pluginsPage(context("插件"), route),
   "/cloud": (route) => cloudPage(context("连接云端"), route),
+  "/devices": (route) => devicesPage(context("设备"), route),
+  "/terminal/:device": (route) => terminalPage(context("终端", { wide: true }), route, CLIENT_TERMINAL_API),
   "/inbox/:thread?": inboxPage,
   "/settings": (route) => settingsPage(context("设置"), route),
 }, { fallback: "/" });

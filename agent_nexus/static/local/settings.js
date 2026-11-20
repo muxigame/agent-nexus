@@ -1,5 +1,6 @@
 // 本机 · 设置 (docs/ui-spec.md §4.5): autostart, updates, this machine, appearance, quit.
 import { el, mount, icon, fetchJSON, toast, confirmDialog, relTime, tokenField, setTheme, errorState } from "/ui/ui.js";
+import { lockPasswordCard } from "/local/devices.js";
 
 function card(title, ...rows) {
   return el("section", { class: "card" }, el("div", { class: "card-head" }, el("h2", {}, title)), el("div", { class: "card-body" }, rows));
@@ -79,6 +80,7 @@ export async function settingsPage(ctx) {
         el("div", { class: "field" }, el("label", {}, "配置文件"), tokenField(info.config)),
         el("div", { class: "field" }, el("label", {}, "控制台地址"), tokenField(info.url)),
         el("p", { class: "faint xs" }, "插件安装在数据目录的 plugins/ 下，插件数据在 plugin-data/，凭据在 secrets/。"))),
+    lockPasswordCard(),
     card("外观", setting("主题", "", themes)),
     card("高级",
       setting("旧版控制台", "原来的标签页式控制台，日志查看更细", el("a", { class: "btn", href: "/classic" }, "打开", icon("external-link", { size: 14 }))),

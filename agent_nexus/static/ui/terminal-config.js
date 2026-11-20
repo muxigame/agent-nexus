@@ -1,4 +1,5 @@
 // Pure settings and helpers of the remote terminal page (importable by node tests).
+
 // Close to Windows Terminal's default look: Cascadia, One Half Dark-ish colours.
 export const TERMINAL_THEME = {
   background: "#0c0c0c", foreground: "#d4d4d4", cursor: "#d4d4d4", cursorAccent: "#0c0c0c",
@@ -9,12 +10,28 @@ export const TERMINAL_THEME = {
 };
 export const TERMINAL_FONT = '"Cascadia Mono", "Cascadia Code", "JetBrains Mono", "Sarasa Mono SC", Consolas, Menlo, "Microsoft YaHei Mono", monospace';
 
-/** ws(s)://host/api/devices/<id>/terminal/ws?shell=…&cols=…&rows=… */
-export function terminalSocketURL(deviceId, { shell = "", cols = 120, rows = 32 } = {}, loc = location) {
+/** ws(s)://host<base>/<id>/terminal/ws?shell=…&cols=…&rows=… — base is /api/devices (gateway) or /api/remote/devices (client). */
+export function terminalSocketURL(deviceId, { shell = "", cols = 120, rows = 32 } = {}, loc = location, base = "/api/devices") {
   const scheme = loc.protocol === "https:" ? "wss" : "ws";
   const query = new URLSearchParams({ shell, cols: String(cols), rows: String(rows) });
-  return `${scheme}://${loc.host}/api/devices/${encodeURIComponent(deviceId)}/terminal/ws?${query}`;
+  return `${scheme}://${loc.host}${base}/${encodeURIComponent(deviceId)}/terminal/ws?${query}`;
 }
+
+/** Where the terminal page talks to: the gateway console (owner) or the local client (this device's credential). */
+export const GATEWAY_TERMINAL_API = {
+  devices: "/api/devices",
+  info: (id) => `/api/devices/${encodeURIComponent(id)}/terminal`,
+  socketBase: "/api/devices",
+  external: null,
+  back: { label: "设备", href: "#/devices" },
+};
+export const CLIENT_TERMINAL_API = {
+  devices: "/api/devices",
+  info: (id) => `/api/remote/devices/${encodeURIComponent(id)}/terminal`,
+  socketBase: "/api/remote/devices",
+  external: (id) => `/api/remote/devices/${encodeURIComponent(id)}/terminal/external`,
+  back: { label: "设备", href: "#/devices" },
+};
 
 /** Keys a phone keyboard lacks, as the bytes a terminal sends. */
 export const EXTRA_KEYS = [

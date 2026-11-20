@@ -346,27 +346,17 @@ make desktop                  # 先生成内嵌运行包，再构建 artifacts/a
 
 插件包是私有的：存放在 `<state_dir>/plugin-repo/`（只有 owner 可读），不会出现在 `/downloads`，只有 owner 和未吊销的设备能下载；**插件包永不提交到公开仓库，也不进入 CI 或 Release**。
 
-## 远程终端
+## 设备之间互相操作（私有网络）
 
-网关控制台“设备”列表里在线设备旁的 **终端** 按钮会打开一个真正的终端（xterm.js，Cascadia 字体、Windows Terminal 风格配色），连到那台设备上的 shell：
+加入同一个网关的设备组成一个私有网络：**任何一台客户端都可以打开其他设备的终端、吊销或删除它们**，不需要额外的密码（远程桌面在做）。
 
-- **Windows**：PowerShell 7 / Windows PowerShell / 命令提示符 / Git Bash / 每个 WSL 发行版（ConPTY，经 pywinpty）。
-- **Linux / macOS**：`$SHELL` 和 `/etc/shells` 里的 bash、zsh、fish 等（pty，login shell）。
-- 页面下方列出设备上自动检测到的命令行环境（Claude Code、Codex、Gemini CLI、git、gh、node、python、uv、go、cargo、dotnet、java、docker、kubectl、阿里云 CLI……及版本），点一下输入到终端。
-- 手机上有 Esc / Tab / Ctrl+C / 方向键一排按键；终端可全屏；shell 选择按设备记住。
+- **客户端 → 设备**：本机控制台（桌面应用窗口）左侧的 **设备** 页列出网关里的所有设备。点在线设备的 **终端**，在窗口里打开它的 shell（xterm.js，Windows Terminal 风格）；“⋯ → 在本机终端打开”用这台电脑的终端打开（装了 Windows Terminal 就用它）。
+- **对方的 shell**：Windows 上有 PowerShell 7 / Windows PowerShell / 命令提示符 / Git Bash / 每个 WSL 发行版（ConPTY）；Linux / macOS 上有 bash、zsh、fish 等（pty）。终端页下方列出对方装了哪些命令行环境（Claude Code、Codex、Gemini CLI、git、node、python、uv、go、docker、kubectl……及版本），点一下输入。
+- **没有桌面的机器**：`agent-nexus term [设备]`（Windows 上 `anx term`），用这台设备自己的凭据，`Ctrl+]` 再按 `q` 退出；`--shells` 列出对方的 shell 和命令行工具，`--list` 列出设备。
+- **锁定**：本机控制台右上角的锁。锁定后这台电脑**不能操作其他设备，但其他设备仍然可以操作它**；再点一次解锁。锁定密码可选（设置 → 锁定密码），设了之后解锁要输入；不设也不会提示。网关同样拒绝已锁定设备发起的操作。
+- 网关控制台（owner 登录）的“设备 → 终端”也能打开任意设备的终端。
 
-没有桌面的机器（或者更喜欢自己的终端，比如 Windows Terminal）用命令行：
-
-```text
-anx term [设备]            连到那台设备的默认 shell（不写设备就列出来选）；Ctrl+] 再按 q 退出
-anx term 设备 --shell pwsh  指定 shell
-anx term 设备 --shells      列出 shell 和命令行工具
-anx term --list            设备、在线状态、是否支持终端
-```
-
-Ubuntu 包里同样是 `agent-nexus term …`。第一次会问网关的 owner 密码，换到的令牌（30 天）存在 `<根目录>/.anx/owner-tokens.json`（只有本用户可读）；也可以设 `ANX_OWNER_TOKEN`。网关地址默认是本机加入的那个，另一个网关用 `--gateway https://…`。
-
-终端只经过设备已有的网关长连接（设备出站连接，不开端口），只有登录的 owner 能打开——和 MCP 工具里的 `exec_command` 是同一个权限。设备上 `agent-nexus.json` 里写 `"terminal": {"enabled": false}` 就关掉；设备需要 0.3.0 以上的客户端。
+终端流量走设备已有的网关长连接（设备都是出站连接，不用开端口）。设备上 `agent-nexus.json` 写 `"terminal": {"enabled": false}` 就不允许别人打开这台的终端。需要网关和双方客户端都在 0.4.0 以上（被打开终端的一方 0.3.0 以上即可）。
 
 ## 命令行
 
@@ -384,7 +374,7 @@ anx secrets restore --vault <保险库> [--apply]   按保险库清单把凭据�
 anx secrets set <name> --from-file <path>       从文件写入一个凭据（不回显内容）
 anx join <邀请码> [--agent-id <id>]               用邀请码加入网关（anx1.… 或 agentnexus://enroll?invite=…）
 anx leave                                       退出网关（删除本机设备凭据）
-anx term [设备] [--shell S] [--list|--shells]     打开网关里另一台设备的远程终端（owner 登录）
+anx term [设备] [--shell S] [--list|--shells]     打开网关里另一台设备的远程终端（用本机设备凭据；锁定时拒绝）
 anx integrate claude|codex [--dry-run] [--remove] [--hooks]
                                                 给 Claude Code / Codex 装会话 hook（anx hook）：上报会话 id 和标题，
                                                 邮箱地址据此匹配；先备份原文件，可重复运行；Codex 已有别的 notify 时不覆盖

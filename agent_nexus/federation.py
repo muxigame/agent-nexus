@@ -67,6 +67,8 @@ class Peer:
     #: reverse methods may only be sent when the matching feature is listed.
     features: frozenset = frozenset()
     anx_version: str | None = None
+    #: The client's 锁定 (``hub_call lock_report``): it may be operated on, not operate on others.
+    locked: bool = False
     _closed: bool = field(default=False, init=False, repr=False)
     _socket_close_task: asyncio.Task | None = field(default=None, init=False, repr=False)
 

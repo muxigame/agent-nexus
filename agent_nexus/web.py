@@ -55,6 +55,12 @@ class LocalOnly:
         self.hosts = {f"{name}:{port}" for name in ("127.0.0.1", "localhost", "[::1]", host)}
 
     async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
+        if scope["type"] == "websocket":
+            headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope["headers"]}
+            origin = headers.get("origin")
+            if headers.get("host") not in self.hosts or (origin and origin.split("://", 1)[-1] not in self.hosts):
+                await send({"type": "websocket.close", "code": 1008})
+                return
         if scope["type"] == "http":
             headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope["headers"]}
             reason = self._reject(scope["method"], headers)
@@ -218,9 +224,30 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
         cloud_status["state"] = "disabled"
         return JSONResponse({"state": "not_joined"})
 
+    from .lock import Lock, LockError
+    from . import remote
+
+    lock = Lock(sup.cfg.root)
+
+    async def report_lock() -> None:
+        from .features import REMOTE
+        if hub.available and REMOTE in hub.features:
+            with contextlib.suppress(Exception):
+                await hub.call("lock_report", {"locked": lock.locked}, timeout=10)
+
+    hub.on_attach.append(report_lock)
+
+    def lock_error(exc: LockError) -> JSONResponse:
+        return JSONResponse(exc.body(), status_code=exc.status)
+
     async def device_admin(args: dict) -> JSONResponse:
         """The console's device page, served by the gateway (``hub_call device_admin``)."""
         from .federation import RoutingError
+        if args.get("op") != "list":
+            try:
+                lock.require_unlocked()  # 锁定: this client may be operated on, not operate on others
+            except LockError as exc:
+                return lock_error(exc)
         if not hub.available:
             return JSONResponse({"error": "the gateway is not connected or does not support device administration"},
                                 status_code=409)
@@ -232,7 +259,78 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
             return JSONResponse({"error": "the gateway did not answer"}, status_code=504)
 
     async def list_devices(_request: Request) -> JSONResponse:
-        return await device_admin({"op": "list", "include_offline": True})
+        response = await device_admin({"op": "list", "include_offline": True})
+        if response.status_code != 200:
+            return response
+        body = json.loads(response.body)
+        me = joining.cloud_config(sup.cfg.root).get("agent_id")
+        for device in body.get("devices", []):
+            device["self"] = device.get("device_id") == me or device.get("agent_id") == me
+        body["lock"] = lock.state()
+        from .features import REMOTE
+        body["remote"] = REMOTE in hub.features
+        return JSONResponse(body)
+
+    # -- 锁定 and operating on other devices (private-network model, remote/1) --
+    async def lock_api(request: Request) -> JSONResponse:
+        if request.method == "GET":
+            return JSONResponse(lock.state())
+        body = await json_body(request) or {}
+        try:
+            if request.method == "PUT":  # /api/lock/password
+                state = await run_in_threadpool(lock.set_password, body.get("new") or None, body.get("current") or None)
+            elif body.get("action") == "lock":
+                state = await run_in_threadpool(lock.lock)
+            elif body.get("action") == "unlock":
+                state = await run_in_threadpool(lock.unlock, body.get("password") or None)
+            else:
+                return JSONResponse({"error": "action must be lock or unlock"}, status_code=400)
+        except LockError as exc:
+            return lock_error(exc)
+        await report_lock()
+        return JSONResponse(state)
+
+    async def remote_terminal_info(request: Request) -> JSONResponse:
+        try:
+            lock.require_unlocked()
+            return JSONResponse(await remote.terminal_info(sup.cfg.root, request.path_params["device_id"],
+                                                           refresh=request.query_params.get("refresh") == "1"))
+        except LockError as exc:
+            return lock_error(exc)
+        except remote.RemoteError as exc:
+            return JSONResponse(exc.body(), status_code=exc.status)
+
+    async def remote_terminal_socket(socket) -> None:
+        await socket.accept()
+        try:
+            lock.require_unlocked()
+        except LockError as exc:
+            await socket.send_text(json.dumps({"type": "error", "error": exc.message}, ensure_ascii=False))
+            await socket.close(code=4423)
+            return
+        try:
+            await remote.proxy_terminal(socket, sup.cfg.root, socket.path_params["device_id"], dict(socket.query_params))
+        except remote.RemoteError as exc:
+            with contextlib.suppress(Exception):
+                await socket.send_text(json.dumps({"type": "error", "error": exc.message}, ensure_ascii=False))
+                await socket.close(code=4404)
+
+    async def remote_terminal_external(request: Request) -> JSONResponse:
+        body = await json_body(request) or {}
+        try:
+            lock.require_unlocked()
+            remote.credentials(sup.cfg.root)  # joined, with a readable credential
+            shell = body.get("shell") if isinstance(body.get("shell"), str) and len(body.get("shell")) <= 64 else None
+            title = body.get("title") if isinstance(body.get("title"), str) else None
+            result = await run_in_threadpool(remote.open_external, sup.cfg.root, request.path_params["device_id"],
+                                             shell=shell, title=title)
+        except LockError as exc:
+            return lock_error(exc)
+        except remote.RemoteError as exc:
+            return JSONResponse(exc.body(), status_code=exc.status)
+        except OSError as exc:
+            return JSONResponse({"error": f"无法打开终端：{exc}"}, status_code=500)
+        return JSONResponse(result)
 
     async def delete_device(request: Request) -> JSONResponse:
         return await device_admin({"op": "delete", "device_id": request.path_params["device_id"]})
@@ -793,7 +891,16 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
         Route("/api/plugins/{name}/logs/stream", stream_logs),
         Route("/api/plugins/{name}/{action}", plugin_act, methods=["POST"]),
     ]
+    from starlette.routing import WebSocketRoute
+    routes += [
+        Route("/api/lock", lock_api, methods=["GET", "POST"]),
+        Route("/api/lock/password", lock_api, methods=["PUT"]),
+        Route("/api/remote/devices/{device_id}/terminal", remote_terminal_info),
+        Route("/api/remote/devices/{device_id}/terminal/external", remote_terminal_external, methods=["POST"]),
+        WebSocketRoute("/api/remote/devices/{device_id}/terminal/ws", remote_terminal_socket),
+    ]
     app = Starlette(routes=routes, lifespan=lifespan)
     app.state.sup = sup
     app.state.hub = hub
+    app.state.lock = lock
     return LocalOnly(app, sup.cfg.host, sup.cfg.port)

@@ -4,7 +4,7 @@ import { mountInbox } from "/ui/inbox.js";
 import { overviewPage, devicesPage, settingsPage, pluginsPage } from "/console/pages.js";
 import { renderDownloads } from "/console/downloads.js";
 import { connectorsPage } from "/console/connectors.js";
-import { terminalPage } from "/console/terminal.js";
+import { terminalPage } from "/ui/terminal.js";
 
 restoreTheme();
 const NAV = [

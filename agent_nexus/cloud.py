@@ -198,6 +198,26 @@ def build_cloud_app(config: dict, root: Path):
         server.auth = StaticBearer([env_secret(anx_env.resolve_token_env(config.get("token_env"), "SERVER_TOKEN"))],
                                    ["tools"], required_scopes=["tools"])
 
+    def device_credential(agent_id: str, token: str) -> bool:
+        """``token`` is ``agent_id``'s current, unrevoked credential (same rules as /ingress)."""
+        if not token:
+            return False
+        try:
+            valid_id(agent_id)
+        except RoutingError:
+            return False
+        digest = hashlib.sha256(token.encode()).digest()
+        expected = agents.get(agent_id)
+        if expected is None:
+            verdict = enrollment.check_token(agent_id, token)
+            if verdict == "ok":
+                return True
+            if verdict == "revoked":
+                return False
+            matches = [prefix for prefix in groups if agent_id.startswith(prefix) and len(agent_id) > len(prefix)]
+            expected = groups[max(matches, key=len)] if matches else None
+        return expected is not None and hmac.compare_digest(digest, expected)
+
     async def ingress(socket: WebSocket):
         # Credentials (design §11.5): the agents env map first, then per-device
         # tokens from invites (device_tokens), then the agent_groups prefixes.
@@ -382,7 +402,7 @@ def build_cloud_app(config: dict, root: Path):
     app.router.routes[0:0] = console.routes()
     # Remote terminal: GET /api/devices/{id}/terminal and its WebSocket (term/1 devices).
     from .terminal_bridge import TerminalBridge
-    app.router.routes[0:0] = TerminalBridge(console).routes()
+    app.router.routes[0:0] = TerminalBridge(console, device_credential=device_credential).routes()
     # Connectors: the console APIs and the OAuth callback (docs/ui-spec.md §3.4, design §7.3).
     app.router.routes[0:0] = ConnectorsWeb(connectors, console).routes()
     # 插件库: owner APIs, device downloads, and "安装到…" (design §6.12).

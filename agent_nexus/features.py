@@ -33,8 +33,11 @@ AGENT_FEATURES: tuple[str, ...] = ("device-contract/1", "mcp-alias/1", "hub_call
 #: ``plugin_repo/1``: the 插件库 (``/api/plugin-repo``, design §6.12). On a device it means the
 #: manager answers ``plugin_repo_install`` / ``plugin_repo_job``; only a device running inside
 #: the manager (``anx serve``, the desktop app) announces it, see :data:`AGENT_OPTIONAL_FEATURES`.
+#: ``remote/1``: devices may open each other's terminals with their own credential
+#: (``/api/devices/{id}/terminal[/ws]`` with ``X-ANX-Device``) and report ``hub_call lock_report``.
 GATEWAY_FEATURES: tuple[str, ...] = ("hub_call/1", "mcp-alias/1", "mail/1", "ask/1", "inbox/1", "wake/1", "invites/1",
-                                     "plugin_repo/1")
+                                     "plugin_repo/1", "remote/1")
+REMOTE = "remote/1"
 PLUGIN_REPO = "plugin_repo/1"
 #: ``term/1``: the device answers ``term_info/open/write/read/resize/close`` (remote terminal);
 #: announced by the manager when a pseudo-terminal is available and ``terminal.enabled`` is not false.

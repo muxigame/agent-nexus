@@ -1,8 +1,10 @@
 """``anx term [device]``: a remote terminal on another device, in this terminal.
 
-It talks to the gateway as the owner: ``ANX_OWNER_TOKEN`` if set, else a token saved by an
-earlier sign-in (``<state>/owner-tokens.json``, readable by this user only), else it asks for the
-owner password once and saves the token it gets (``POST /api/auth/token``, 30 days).
+On a device that joined a gateway it uses that device's own credential (the gateway is a
+private network: every joined device may open the others' terminals), and refuses while this
+client is locked (``anx`` 锁定). Elsewhere -- another gateway with ``--gateway`` -- it signs in
+as the owner: ``ANX_OWNER_TOKEN``, a token saved earlier (``<state>/owner-tokens.json``, this
+user only), or the owner password asked once (``POST /api/auth/token``, 30 days).
 
 Works in any VT terminal: Windows Terminal, the Windows console (VT mode), GNOME Terminal,
 an SSH session on a server without a desktop. ``Ctrl+]`` then ``q`` leaves without closing the
@@ -93,17 +95,27 @@ def sign_in(origin: str) -> str:
 
 
 class Gateway:
-    def __init__(self, root: Path, origin: str):
-        self.root, self.origin = root, origin
-        self.token = os.environ.get("ANX_OWNER_TOKEN") or _saved_tokens(root).get(origin)
+    def __init__(self, root: Path, origin: str, device: str | None = None, device_token: str | None = None):
+        self.root, self.origin, self.device = root, origin, device
+        self.token = device_token or os.environ.get("ANX_OWNER_TOKEN") or _saved_tokens(root).get(origin)
+
+    @property
+    def headers(self) -> dict:
+        headers = {"Authorization": f"Bearer {self.token}"}
+        if self.device:
+            headers["X-ANX-Device"] = self.device
+        return headers
 
     def get(self, path: str) -> dict:
         for attempt in range(2):
             if not self.token:
                 self.token = sign_in(self.origin)
                 _save_token(self.root, self.origin, self.token)
-            response = httpx.get(f"{self.origin}{path}", headers={"Authorization": f"Bearer {self.token}"},
-                                 timeout=30, trust_env=False)
+            response = httpx.get(f"{self.origin}{path}", headers=self.headers, timeout=60, trust_env=False)
+            if response.status_code == 401 and self.device:
+                raise TermCliError("网关不接受这台设备的凭据（网关需要 0.4.0 以上，或这台设备已被吊销）")
+            if response.status_code == 423:
+                raise TermCliError("这台设备已锁定，解锁后才能操作其他设备")
             if response.status_code == 401 and attempt == 0 and not os.environ.get("ANX_OWNER_TOKEN"):
                 _save_token(self.root, self.origin, None)
                 self.token = None
@@ -164,7 +176,7 @@ def _size() -> tuple[int, int]:
     return size.columns, size.lines
 
 
-async def run_session(origin: str, token: str, device_id: str, shell: str) -> int:
+async def run_session(origin: str, auth: dict, device_id: str, shell: str) -> int:
     from websockets.asyncio.client import connect
 
     cols, rows = _size()
@@ -186,7 +198,7 @@ async def run_session(origin: str, token: str, device_id: str, shell: str) -> in
             loop.call_soon_threadsafe(keys.put_nowait, data)
 
     exit_code = 0
-    async with connect(url, additional_headers={"Authorization": f"Bearer {token}"}, max_size=8 * 1024 * 1024,
+    async with connect(url, additional_headers=auth, max_size=8 * 1024 * 1024,
                        proxy=None, open_timeout=20) as socket:
         out = sys.stdout.buffer
 
@@ -280,9 +292,21 @@ def _pick_device(devices: list[dict], wanted: str | None) -> dict:
 
 def cmd_term(args, root: Path) -> int:
     try:
-        origin = gateway_origin(root, args.gateway)
-        gateway = Gateway(root, origin)
-        devices = gateway.get("/api/devices").get("devices", [])
+        from .join import joined
+        if not args.gateway and joined(root):
+            from .lock import Lock
+            from .remote import RemoteError, credentials
+            if Lock(root).locked:
+                raise TermCliError("这台设备已锁定，解锁后才能操作其他设备（本机控制台右上角的锁）")
+            try:
+                origin, agent_id, token = credentials(root)
+            except RemoteError as exc:
+                raise TermCliError(exc.message) from None
+            gateway = Gateway(root, origin, agent_id, token)
+        else:
+            origin = gateway_origin(root, args.gateway)
+            gateway = Gateway(root, origin)
+        devices = gateway.get("/api/network/devices" if gateway.device else "/api/devices").get("devices", [])
         if args.list:
             for device in devices:
                 state = "online" if device.get("online") else "offline"
@@ -306,7 +330,7 @@ def cmd_term(args, root: Path) -> int:
             raise TermCliError("anx term needs an interactive terminal")
         print(f"\x1b[90m→ {device.get('display_name')} ({device_id}) · Ctrl+] q 退出\x1b[0m", flush=True)
         with RawTerminal():
-            code = asyncio.run(run_session(origin, gateway.token, device_id, shell))
+            code = asyncio.run(run_session(origin, gateway.headers, device_id, shell))
         print(f"\r\n\x1b[90m[{device.get('display_name')}: 会话结束]\x1b[0m", flush=True)
         return code
     except TermCliError as exc:
