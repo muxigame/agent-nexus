@@ -57,6 +57,7 @@ export async function terminalPage(ctx, { params }, api = GATEWAY_TERMINAL_API) 
 
   const mark = osMark(device.os_family);
   const status = el("span", { class: "term-status" }, pill("connecting", "连接中"));
+  const routeTag = el("span", { class: "tag term-route", hidden: true });
   const select = el("select", { class: "select", "aria-label": "Shell", onchange: () => { shellId = select.value; rememberShell(deviceId, shellId); connect(); } },
     shells.map((s) => el("option", { value: s.id, selected: s.id === shellId, title: s.command }, s.name)));
   const frame = el("div", { class: "term-frame", tabindex: "-1" });
@@ -75,7 +76,7 @@ export async function terminalPage(ctx, { params }, api = GATEWAY_TERMINAL_API) 
       mark ? el("span", { class: "avatar os-mark", html: mark.svg, title: mark.label }) : el("span", { class: "avatar" }, icon("monitor", { size: 16 })),
       el("div", { class: "stack", style: { gap: 0, minWidth: 0 } }, el("span", { class: "title truncate" }, device.display_name),
         el("span", { class: "sub mono truncate" }, device.device_id)),
-      status),
+      status, routeTag),
     el("div", { class: "row", style: { gap: "6px" } }, select, openExternal,
       el("button", { class: "btn btn-sm", type: "button", title: "重新连接", onclick: () => connect() }, icon("refresh-cw", { size: 14 }), "重连"),
       el("button", { class: "btn btn-sm btn-icon", type: "button", title: "全屏", "aria-label": "全屏",
@@ -109,6 +110,7 @@ export async function terminalPage(ctx, { params }, api = GATEWAY_TERMINAL_API) 
     if (socket) { closedByUs = true; socket.close(); }
     closedByUs = false;
     term.reset();
+    routeTag.hidden = true;
     setStatus("connecting", "连接中");
     const ws = new WebSocket(terminalSocketURL(deviceId, { shell: shellId, cols: term.cols, rows: term.rows }, location, api.socketBase));
     ws.binaryType = "arraybuffer";
@@ -117,7 +119,12 @@ export async function terminalPage(ctx, { params }, api = GATEWAY_TERMINAL_API) 
       if (typeof event.data !== "string") { term.write(new Uint8Array(event.data)); return; }
       let message;
       try { message = JSON.parse(event.data); } catch { return; }
-      if (message.type === "ready") {
+      if (message.type === "route") {
+        routeTag.hidden = false;
+        routeTag.textContent = message.p2p ? `直连 · ${message.route}` : message.route;
+        routeTag.title = message.p2p ? "打洞直连：数据不经过网关" : "经网关转发；直连可用时会自动优先使用";
+        routeTag.classList.toggle("is-p2p", !!message.p2p);
+      } else if (message.type === "ready") {
         setStatus("online", message.shell?.name || "已连接");
         term.focus();
       } else if (message.type === "exit") {

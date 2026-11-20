@@ -7,6 +7,7 @@ import { pluginsPage } from "/local/plugins.js";
 import { cloudPage } from "/local/cloud.js";
 import { settingsPage } from "/local/settings.js";
 import { devicesPage, lockButton } from "/local/devices.js";
+import { desktopPage } from "/local/desktop.js";
 import { terminalPage } from "/ui/terminal.js";
 import { CLIENT_TERMINAL_API } from "/ui/terminal-config.js";
 
@@ -123,6 +124,7 @@ const router = createRouter({
   "/cloud": (route) => cloudPage(context("连接云端"), route),
   "/devices": (route) => devicesPage(context("设备"), route),
   "/terminal/:device": (route) => terminalPage(context("终端", { wide: true }), route, CLIENT_TERMINAL_API),
+  "/desktop/:device": (route) => desktopPage(context("远程桌面", { wide: true }), route),
   "/inbox/:thread?": inboxPage,
   "/settings": (route) => settingsPage(context("设置"), route),
 }, { fallback: "/" });

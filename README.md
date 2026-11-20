@@ -348,15 +348,18 @@ make desktop                  # 先生成内嵌运行包，再构建 artifacts/a
 
 ## 设备之间互相操作（私有网络）
 
-加入同一个网关的设备组成一个私有网络：**任何一台客户端都可以打开其他设备的终端、吊销或删除它们**，不需要额外的密码（远程桌面在做）。
+加入同一个网关的设备组成一个私有网络：**任何一台客户端都可以打开其他设备的终端和远程桌面、吊销或删除它们**，不需要额外的密码。
 
-- **客户端 → 设备**：本机控制台（桌面应用窗口）左侧的 **设备** 页列出网关里的所有设备。点在线设备的 **终端**，在窗口里打开它的 shell（xterm.js，Windows Terminal 风格）；“⋯ → 在本机终端打开”用这台电脑的终端打开（装了 Windows Terminal 就用它）。
-- **对方的 shell**：Windows 上有 PowerShell 7 / Windows PowerShell / 命令提示符 / Git Bash / 每个 WSL 发行版（ConPTY）；Linux / macOS 上有 bash、zsh、fish 等（pty）。终端页下方列出对方装了哪些命令行环境（Claude Code、Codex、Gemini CLI、git、node、python、uv、go、docker、kubectl……及版本），点一下输入。
-- **没有桌面的机器**：`agent-nexus term [设备]`（Windows 上 `anx term`），用这台设备自己的凭据，`Ctrl+]` 再按 `q` 退出；`--shells` 列出对方的 shell 和命令行工具，`--list` 列出设备。
-- **锁定**：本机控制台右上角的锁。锁定后这台电脑**不能操作其他设备，但其他设备仍然可以操作它**；再点一次解锁。锁定密码可选（设置 → 锁定密码），设了之后解锁要输入；不设也不会提示。网关同样拒绝已锁定设备发起的操作。
-- 网关控制台（owner 登录）的“设备 → 终端”也能打开任意设备的终端。
+- **客户端 → 设备**：本机控制台（桌面应用窗口）左侧的 **设备** 页列出网关里的所有设备。
+  - **远程桌面**：查看并控制对方桌面（内置 VNC + noVNC，画质可调、全屏、Ctrl+Alt+Del）。没有桌面的服务器不提供，只有终端。
+  - **终端**：在窗口里打开对方的 shell（xterm.js，Windows Terminal 风格）；“⋯ → 在本机终端打开”用这台电脑的终端（装了 Windows Terminal 就用它）。Windows 上有 PowerShell 7 / Windows PowerShell / 命令提示符 / Git Bash / WSL；Linux / macOS 上有 bash、zsh、fish 等。终端页下方列出对方的命令行环境（Claude Code、Codex、git、node、python、uv、docker……及版本）。
+- **打洞直连（muxi-p2p）**：终端和远程桌面优先走设备之间的直连——IPv6 / 局域网 / 路由器端口映射，其次 UDP+QUIC 和 TCP 打洞，数据不经过网关；页面上的标签写着实际走的路线。终端在直连失败时自动退回网关中转（标签会写原因）；远程桌面只走直连。
+- **没有桌面的机器**：`agent-nexus term [设备]`（Windows 上 `anx term`），`Ctrl+]` 再按 `q` 退出；`--shells` 列出对方的 shell 和命令行工具。
+- **锁定**：右上角的锁。锁定后这台电脑**不能操作其他设备，但其他设备仍然可以操作它**；锁定密码可选（设置 → 锁定密码）。网关同样拒绝已锁定设备发起的操作。
 
-终端流量走设备已有的网关长连接（设备都是出站连接，不用开端口）。设备上 `agent-nexus.json` 写 `"terminal": {"enabled": false}` 就不允许别人打开这台的终端。需要网关和双方客户端都在 0.4.0 以上（被打开终端的一方 0.3.0 以上即可）。
+每台设备的客户端带着 `tools/muxi-p2p-agent`（和 MsQuic），作为后台进程向网关的信令（`/p2p`）登记自己并响应打洞；对方每次连接都要先经网关向这台设备要一张一次性票据（60 秒，只能用一次）。网关在 UDP 45701–45703、TCP 45711–45712 上运行反射器（`gateway.json` 的 `p2p.reflector_hosts` 写网关自己的公网 IP，不要写 CDN 的域名），防火墙需要放行这些端口。Windows 第一次运行直连组件时可能弹出防火墙提示，允许即可（不允许也能打洞，只是少了局域网直连）。
+
+设备上 `agent-nexus.json` 写 `"terminal": {"enabled": false}` / `"desktop": {"enabled": false}` 就不让别人打开这台的终端 / 桌面。直连和远程桌面需要网关和双方客户端都在 0.5.0 以上。
 
 ## 命令行
 

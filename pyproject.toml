@@ -19,6 +19,11 @@ dependencies = [
     "httpx>=0.28.1",
     # remote terminal: ConPTY on Windows (agent_nexus/terminal.py)
     "pywinpty>=2.0.14; sys_platform == 'win32'",
+    # P2P signaling and reflector (gateway) from the muxi-p2p umbrella submodule
+    "muxi-p2p-signaling",
+    # remote desktop (agent_nexus/vnc.py): screen capture; X11 input on Linux
+    "mss>=9.0",
+    "python-xlib>=0.33; sys_platform == 'linux'",
 ]
 
 [project.scripts]
@@ -32,6 +37,7 @@ mcpm-server = "agent_nexus.cloud:deprecated_main"
 
 [tool.uv.sources]
 mcpkit = { path = "builtins/mcpkit", editable = true }
+muxi-p2p-signaling = { path = "third_party/muxi-p2p/signaling" }
 
 [dependency-groups]
 dev = [

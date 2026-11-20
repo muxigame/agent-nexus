@@ -220,6 +220,8 @@ class Gateway:
         self.toast_log: list[tuple[str, str, dict]] = []
         #: Invites and per-device credentials (M16, design §11.5); set by the cloud app.
         self.enrollment = None
+        #: P2PGateway (p2p/1), set by build_cloud_app.
+        self.p2p = None
 
     async def selection(self, workspace_id: str | None = None) -> dict | None:
         if workspace_id:
@@ -616,6 +618,16 @@ class Gateway:
         args = params.get("args") or {}
         if not isinstance(args, dict):
             raise RoutingError("hub_call args must be an object")
+        if op == "p2p_config":
+            # This device's tunnel agent: control plane, its own token, reflector addresses.
+            if self.p2p is None:
+                raise RoutingError("p2p is not available on this gateway")
+            return await self.p2p.device_config(peer.agent_id)
+        if op == "remote_ticket":
+            # A one-time ticket from another device's remote hub, for a stream over the tunnel.
+            if self.p2p is None:
+                raise RoutingError("p2p is not available on this gateway")
+            return await self.p2p.ticket(peer, args)
         if op == "lock_report":
             # The client's 锁定 (private-network model): a locked device can be operated on
             # but may not operate on other devices. Reported on connect and on every change.

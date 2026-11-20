@@ -26,6 +26,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: astral-sh/setup-uv@v6
       - name: tag must equal source version
         run: uv run --no-project python scripts/version.py check --tag "${GITHUB_REF_NAME}"
@@ -38,6 +40,8 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
@@ -49,8 +53,15 @@ jobs:
           cache-all-crates: true
       - name: Tauri CLI
         run: cargo install tauri-cli --version "${TAURI_CLI_VERSION}" --locked
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "9.0.x"
       - run: uv sync --frozen
+      - name: P2P tunnel tools (muxi-p2p-agent + MsQuic) for remote terminal and desktop
+        run: uv run --no-project python scripts/build_p2p_tools.py --rid win-x64 --out build/p2p
       - name: Runtime archive (bundled Python and packages)
+        env:
+          ANX_P2P_TOOLS: build/p2p
         run: uv run python scripts/build_release.py runtime --out artifacts
       - name: Desktop exe and signed NSIS installer
         env:
@@ -92,14 +103,23 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           enable-cache: true
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "9.0.x"
       - run: uv sync --frozen
       - name: Gateway zip (agent-nexus-gateway-<ver>.zip with SHA256.json and deploy/gateway)
         run: uv run python scripts/build_release.py gateway --out dist
+      - name: P2P tunnel tools (muxi-p2p-agent + libmsquic) for remote terminal and desktop
+        run: uv run --no-project python scripts/build_p2p_tools.py --rid linux-x64 --out build/p2p
       - name: Public Ubuntu package
+        env:
+          ANX_P2P_TOOLS: build/p2p
         run: |
           set -eu
           uv run python scripts/build_ubuntu.py --uv "$(command -v uv)" --out build/ubuntu
@@ -130,6 +150,8 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
@@ -169,6 +191,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       - uses: actions/download-artifact@v4
         with:
           path: release

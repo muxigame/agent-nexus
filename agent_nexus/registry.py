@@ -180,6 +180,8 @@ class ManagerConfig:
     builtins: bool = False
     #: ``terminal.enabled``: whether the gateway may open a remote terminal here (default on).
     terminal: bool = True
+    #: ``desktop.enabled``: whether other devices may view and control this desktop (default on).
+    desktop: bool = True
 
     @property
     def path(self) -> Path:
@@ -212,6 +214,8 @@ def load_manager_config(root: Path) -> ManagerConfig:
         cfg.builtins = bool(data.get("builtins", any((cfg.root / rel).is_dir() for rel in BUILTIN_DIRS)))
         terminal = data.get("terminal")
         cfg.terminal = not (isinstance(terminal, dict) and terminal.get("enabled") is False)
+        desktop = data.get("desktop")
+        cfg.desktop = not (isinstance(desktop, dict) and desktop.get("enabled") is False)
     return cfg
 
 

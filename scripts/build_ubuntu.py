@@ -76,7 +76,8 @@ def build(uv, out, enrollment=None, offline=False):
     files = list(release_files("runtime", include_windows_uv=False))
     for source, relative in files:
         data = source.read_bytes()
-        entries[LIB + "runtime/" + relative] = (data, 0o644)
+        executable = relative == "tools/muxi-p2p-agent"
+        entries[LIB + "runtime/" + relative] = (data, 0o755 if executable else 0o644)
         manifest[relative] = hashlib.sha256(data).hexdigest()
     if offline:
         with tempfile.TemporaryDirectory(prefix="anx-ubuntu-offline-") as scratch:
@@ -113,7 +114,7 @@ Version: {VERSION}
 Architecture: amd64
 Maintainer: agent-nexus maintainers
 Depends: python3 (>= 3.10), ca-certificates, systemd
-Recommends: python3-gi, gir1.2-gtk-3.0, gir1.2-webkit2-4.1, gir1.2-ayatanaappindicator3-0.1, xdg-utils, gnome-shell-extension-appindicator
+Recommends: python3-gi, gir1.2-gtk-3.0, gir1.2-webkit2-4.1, gir1.2-ayatanaappindicator3-0.1, xdg-utils, gnome-shell-extension-appindicator, libnuma1, libssl3
 Provides: agent-nexus-desktop
 Conflicts: {PACKAGE if private else PRIVATE_PACKAGE}
 Replaces: {PACKAGE if private else PRIVATE_PACKAGE}

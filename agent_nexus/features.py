@@ -36,14 +36,19 @@ AGENT_FEATURES: tuple[str, ...] = ("device-contract/1", "mcp-alias/1", "hub_call
 #: ``remote/1``: devices may open each other's terminals with their own credential
 #: (``/api/devices/{id}/terminal[/ws]`` with ``X-ANX-Device``) and report ``hub_call lock_report``.
 GATEWAY_FEATURES: tuple[str, ...] = ("hub_call/1", "mcp-alias/1", "mail/1", "ask/1", "inbox/1", "wake/1", "invites/1",
-                                     "plugin_repo/1", "remote/1")
+                                     "plugin_repo/1", "remote/1", "p2p/1")
 REMOTE = "remote/1"
+#: ``p2p/1``: muxi-p2p signaling under /p2p, the reflector, hub_call p2p_config / remote_ticket.
+P2P = "p2p/1"
+#: ``remote-hub/1`` (device): answers ``remote_ticket`` and runs a P2P tunnel agent to its remote hub.
+REMOTE_HUB = "remote-hub/1"
 PLUGIN_REPO = "plugin_repo/1"
 #: ``term/1``: the device answers ``term_info/open/write/read/resize/close`` (remote terminal);
 #: announced by the manager when a pseudo-terminal is available and ``terminal.enabled`` is not false.
 TERM = "term/1"
 #: Device features announced only when the process can serve them.
-AGENT_OPTIONAL_FEATURES: tuple[str, ...] = (PLUGIN_REPO, TERM)
+#: ``desktop/1``: the remote hub also serves the built-in VNC (a device with a desktop).
+AGENT_OPTIONAL_FEATURES: tuple[str, ...] = (PLUGIN_REPO, TERM, "remote-hub/1", "desktop/1")
 ASK = "ask/1"
 INBOX = "inbox/1"
 WAKE = "wake/1"

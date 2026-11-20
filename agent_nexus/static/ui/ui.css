@@ -625,3 +625,9 @@ kbd { display: inline-block; padding: 0 5px; border: 1px solid var(--border-stro
 .chip .mono { font-size: 11px; }
 .menu-item:disabled { opacity: .45; cursor: not-allowed; }
 .btn.is-locked { color: var(--warn, #b7791f); }
+.term-route { max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
+.term-route.is-p2p { color: var(--ok, #2f9e44); border-color: currentColor; }
+.desktop-shell { background: #111; }
+.desktop-screen { height: calc(100vh - 230px); min-height: 360px; background: #111; overflow: hidden; display: flex; align-items: center; justify-content: center; }
+.desktop-shell:fullscreen .desktop-screen { height: auto; flex: 1; }
+.desktop-message { color: #ddd; padding: 24px; text-align: center; max-width: 560px; }

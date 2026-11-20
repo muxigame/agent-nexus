@@ -80,7 +80,7 @@ def terminal_socket_url(origin: str, device_id: str, query: dict) -> str:
     return f"{ws}://{rest}/api/devices/{quote(device_id, safe='')}/terminal/ws?{urlencode(query)}"
 
 
-async def proxy_terminal(local, root: Path, device_id: str, query: dict) -> None:
+async def proxy_terminal(local, root: Path, device_id: str, query: dict, relay_note: str = "网关中转") -> None:
     """Pump a local console WebSocket (starlette) to the gateway's terminal socket and back."""
     from starlette.websockets import WebSocketDisconnect
     from websockets.asyncio.client import connect
@@ -115,6 +115,7 @@ async def proxy_terminal(local, root: Path, device_id: str, query: dict) -> None
             elif message.get("text") is not None:
                 await upstream.send(message["text"])
 
+    await local.send_text(json.dumps({"type": "route", "route": relay_note, "p2p": False}, ensure_ascii=False))
     tasks = [asyncio.create_task(down()), asyncio.create_task(up())]
     try:
         await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
@@ -127,6 +128,128 @@ async def proxy_terminal(local, root: Path, device_id: str, query: dict) -> None
         with contextlib.suppress(Exception):
             await upstream_cm.__aexit__(None, None, None)
         with contextlib.suppress(Exception, ConnectionClosed, WebSocketDisconnect):
+            await local.close()
+
+
+async def p2p_terminal(local, port: int, ticket: str, query: dict, route: str) -> None:
+    """Bridge a local console WebSocket to a terminal on the other device over the P2P tunnel.
+
+    The browser side speaks the same messages as the relay (binary output, JSON ready / exit /
+    error, JSON resize and input); the tunnel side speaks remote_hub frames."""
+    from starlette.websockets import WebSocketDisconnect
+
+    from . import remote_hub as rh
+
+    reader, writer = await asyncio.wait_for(asyncio.open_connection("127.0.0.1", port), 10)
+    try:
+        def number(name, default):
+            try:
+                return int(query.get(name) or default)
+            except (TypeError, ValueError):
+                return default
+        writer.write(rh.hello("terminal", ticket, shell=str(query.get("shell") or ""),
+                              cols=number("cols", 120), rows=number("rows", 32)))
+        await writer.drain()
+        await local.send_text(json.dumps({"type": "route", "route": route, "p2p": True}, ensure_ascii=False))
+
+        async def down():
+            while True:
+                kind, payload = await rh.read_frame(reader)
+                if kind == rh.DATA:
+                    await local.send_bytes(payload)
+                elif kind == rh.READY:
+                    await local.send_text(json.dumps({"type": "ready", **json.loads(payload)}, ensure_ascii=False))
+                elif kind == rh.EXIT:
+                    await local.send_text(json.dumps({"type": "exit", **json.loads(payload)}))
+                    return
+                elif kind == rh.ERROR:
+                    await local.send_text(json.dumps({"type": "error", **json.loads(payload)}, ensure_ascii=False))
+                    return
+
+        async def up():
+            while True:
+                message = await local.receive()
+                if message.get("type") == "websocket.disconnect":
+                    return
+                if message.get("bytes") is not None:
+                    writer.write(rh.frame(rh.DATA, message["bytes"]))
+                elif message.get("text") is not None:
+                    try:
+                        payload = json.loads(message["text"])
+                    except ValueError:
+                        continue
+                    if payload.get("type") == "resize":
+                        writer.write(rh.frame(rh.RESIZE, {"cols": payload.get("cols"), "rows": payload.get("rows")}))
+                    elif payload.get("type") == "input" and isinstance(payload.get("data"), str):
+                        writer.write(rh.frame(rh.DATA, payload["data"].encode("utf-8")))
+                await writer.drain()
+
+        tasks = [asyncio.create_task(down()), asyncio.create_task(up())]
+        try:
+            await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for task in tasks:
+                task.cancel()
+            for task in tasks:
+                with contextlib.suppress(BaseException):
+                    await task
+    except (asyncio.IncompleteReadError, ConnectionError) as exc:
+        with contextlib.suppress(Exception):
+            await local.send_text(json.dumps({"type": "error", "error": f"直连中断（{type(exc).__name__}）"}, ensure_ascii=False))
+    finally:
+        with contextlib.suppress(Exception):
+            writer.close()
+        with contextlib.suppress(Exception, WebSocketDisconnect):
+            await local.close()
+
+
+async def p2p_desktop(local, port: int, ticket: str) -> None:
+    """Bridge noVNC (a local WebSocket carrying raw RFB) to the other device's VNC over the tunnel."""
+    from starlette.websockets import WebSocketDisconnect
+
+    from . import remote_hub as rh
+
+    reader, writer = await asyncio.wait_for(asyncio.open_connection("127.0.0.1", port), 10)
+    try:
+        writer.write(rh.hello("desktop", ticket))
+        await writer.drain()
+        kind, payload = await asyncio.wait_for(rh.read_frame(reader), 20)
+        if kind != rh.READY:
+            reason = json.loads(payload).get("error", "remote desktop refused") if kind == rh.ERROR else "remote desktop refused"
+            await local.close(code=4404, reason=str(reason)[:120])
+            return
+
+        async def down():
+            while True:
+                data = await reader.read(256 * 1024)
+                if not data:
+                    return
+                await local.send_bytes(data)
+
+        async def up():
+            while True:
+                message = await local.receive()
+                if message.get("type") == "websocket.disconnect":
+                    return
+                if message.get("bytes") is not None:
+                    writer.write(message["bytes"])
+                    await writer.drain()
+
+        tasks = [asyncio.create_task(down()), asyncio.create_task(up())]
+        try:
+            await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for task in tasks:
+                task.cancel()
+            for task in tasks:
+                with contextlib.suppress(BaseException):
+                    await task
+    except (asyncio.IncompleteReadError, ConnectionError, asyncio.TimeoutError):
+        pass
+    finally:
+        with contextlib.suppress(Exception):
+            writer.close()
+        with contextlib.suppress(Exception, WebSocketDisconnect):
             await local.close()
 
 

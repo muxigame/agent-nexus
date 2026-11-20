@@ -48,6 +48,25 @@ def ui_route() -> Route:
     return Route("/ui/{name}", ui_asset, methods=["GET", "HEAD"])
 
 
+def vendor_route(name: str, directory: Path) -> Route:
+    """``/vendor/<name>/<path>``: an unmodified third-party web package with its own folders
+    (noVNC's ES modules import each other by relative path). JavaScript and text only."""
+    directory = Path(directory).resolve()
+    types = {".js": UI_TYPES[".js"], ".txt": UI_TYPES[".txt"]}
+
+    async def asset(request: Request) -> Response:
+        relative = request.path_params["path"]
+        parts = relative.split("/")
+        if not relative or any(not UI_NAME.fullmatch(part) or part.startswith(".") for part in parts):
+            return PlainTextResponse("Not found", status_code=404)
+        path = (directory / relative).resolve()
+        if directory not in path.parents or path.suffix.lower() not in types or not path.is_file():
+            return PlainTextResponse("Not found", status_code=404)
+        return FileResponse(path, media_type=types[path.suffix.lower()], headers=UI_HEADERS)
+
+    return Route(f"/vendor/{name}/{{path:path}}", asset, methods=["GET", "HEAD"])
+
+
 def static_dir_route(prefix: str, directory: Path) -> Route:
     """``/<prefix>/<name>`` for the files directly in ``directory`` (same rules as ``/ui/``)."""
     directory = Path(directory)

@@ -21,7 +21,7 @@ from starlette.routing import Route
 from . import __version__, desktop, logs
 from .registry import ICON_TYPES, OBSERVE_EDITABLE_FIELDS, RegistryError, save_override
 from .supervisor import Supervisor, SupervisorError
-from .ui_assets import static_dir_route, ui_route
+from .ui_assets import static_dir_route, ui_route, vendor_route
 
 STATIC_DIR = Path(__file__).parent / "static"
 ACTIONS = {"start", "stop", "restart"}
@@ -174,6 +174,15 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
             for task in tasks:
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
+            # No orphaned tunnel processes after the manager exits.
+            if p2p_state.get("sidecar") is not None:
+                with contextlib.suppress(Exception):
+                    await p2p_state["sidecar"].stop()
+            if p2p_state.get("connector") is not None:
+                p2p_state["connector"].close()
+            if p2p_state.get("hub") is not None:
+                with contextlib.suppress(Exception):
+                    await p2p_state["hub"].close()
 
     def cloud_view(info: dict) -> dict:
         """``GET /api/cloud`` (docs/ui-spec.md §4.3): the live link plus what is configured."""
@@ -308,12 +317,89 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
             await socket.send_text(json.dumps({"type": "error", "error": exc.message}, ensure_ascii=False))
             await socket.close(code=4423)
             return
+        device_id = socket.path_params["device_id"]
+        query = dict(socket.query_params)
+        relay_note = "网关中转"
+        connector = p2p_state["connector"]
+        if connector is not None and query.get("route") != "relay":
+            # Direct first: a ticket from the device, then the P2P tunnel to its remote hub.
+            try:
+                config = await p2p_config()
+                if config is None:
+                    raise RuntimeError("网关未开启直连")
+                ticket = await hub.call("remote_ticket", {"device_id": device_id, "service": "terminal"}, timeout=20)
+                _origin, agent_id, token = remote.credentials(sup.cfg.root)
+                port, route = await connector.port_for(config, ticket["server_id"], remote.headers(agent_id, token))
+                await remote.p2p_terminal(socket, port, ticket["ticket"], query, route)
+                return
+            except Exception as exc:  # any failure: the relay still works
+                log.info("p2p terminal to %s unavailable (%s); using the gateway relay", device_id, exc)
+                relay_note = f"网关中转（直连失败：{str(exc)[:80]}）"
+                connector.forget(device_id)
         try:
-            await remote.proxy_terminal(socket, sup.cfg.root, socket.path_params["device_id"], dict(socket.query_params))
+            await remote.proxy_terminal(socket, sup.cfg.root, device_id, query, relay_note)
         except remote.RemoteError as exc:
             with contextlib.suppress(Exception):
                 await socket.send_text(json.dumps({"type": "error", "error": exc.message}, ensure_ascii=False))
                 await socket.close(code=4404)
+
+    async def p2p_link(device_id: str, service: str) -> tuple[int, str, str]:
+        """(loopback port, route, ticket) for a stream to ``device_id``'s remote hub."""
+        connector = p2p_state["connector"]
+        if connector is None:
+            raise remote.RemoteError(409, "这台电脑缺少直连组件（muxi-p2p-agent）", "no_p2p")
+        config = await p2p_config()
+        if config is None:
+            raise remote.RemoteError(409, "网关未开启直连（需要 0.5.0 以上）", "no_p2p")
+        ticket = await hub.call("remote_ticket", {"device_id": device_id, "service": service}, timeout=20)
+        _origin, agent_id, token = remote.credentials(sup.cfg.root)
+        try:
+            port, route = await connector.port_for(config, ticket["server_id"], remote.headers(agent_id, token))
+        except (RuntimeError, OSError, asyncio.TimeoutError) as exc:
+            connector.forget(ticket["server_id"])
+            raise remote.RemoteError(502, f"无法直连：{exc}", "p2p_failed") from None
+        return port, route, ticket["ticket"]
+
+    async def remote_desktop_prepare(request: Request) -> JSONResponse:
+        """Build (or reuse) the tunnel first, so the page can say which route it got."""
+        from .federation import RoutingError
+        try:
+            lock.require_unlocked()
+            connector = p2p_state["connector"]
+            if connector is None:
+                raise remote.RemoteError(409, "这台电脑缺少直连组件（muxi-p2p-agent）", "no_p2p")
+            config = await p2p_config()
+            if config is None:
+                raise remote.RemoteError(409, "网关未开启直连（需要 0.5.0 以上）", "no_p2p")
+            _origin, agent_id, token = remote.credentials(sup.cfg.root)
+            device_id = request.path_params["device_id"]
+            try:
+                _port, route = await connector.port_for(config, device_id, remote.headers(agent_id, token))
+            except (RuntimeError, OSError, asyncio.TimeoutError) as exc:
+                connector.forget(device_id)
+                raise remote.RemoteError(502, f"无法直连：{exc}", "p2p_failed") from None
+            return JSONResponse({"route": route})
+        except LockError as exc:
+            return lock_error(exc)
+        except remote.RemoteError as exc:
+            return JSONResponse(exc.body(), status_code=exc.status)
+        except RoutingError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=409)
+
+    async def remote_desktop_socket(socket) -> None:
+        from .federation import RoutingError
+        protocols = socket.scope.get("subprotocols") or []
+        await socket.accept(subprotocol="binary" if "binary" in protocols else None)
+        try:
+            lock.require_unlocked()
+            port, _route, ticket = await p2p_link(socket.path_params["device_id"], "desktop")
+        except (LockError, remote.RemoteError) as exc:
+            await socket.close(code=4423 if isinstance(exc, LockError) else 4404, reason=exc.message[:120])
+            return
+        except RoutingError as exc:
+            await socket.close(code=4404, reason=str(exc)[:120])
+            return
+        await remote.p2p_desktop(socket, port, ticket)
 
     async def remote_terminal_external(request: Request) -> JSONResponse:
         body = await json_body(request) or {}
@@ -573,6 +659,53 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
         terminals = anx_terminal.Terminals()
         hub.handlers.update(terminals.handlers())
         hub.extra_features = (*hub.extra_features, anx_terminal.FEATURE)
+
+    # -- P2P tunnels (muxi-p2p): this device's remote hub + tunnel agent, and connect-side links --
+    from . import p2p as p2p_mod
+    from .features import P2P as P2P_FEATURE
+    from .remote_hub import FEATURE as REMOTE_HUB_FEATURE, RemoteHub
+
+    p2p_exe = p2p_mod.binary(sup.cfg.root)
+    p2p_state: dict[str, Any] = {"config": None, "sidecar": None, "connector": None, "hub": None}
+    if p2p_exe and getattr(sup.cfg, "terminal", True) and anx_terminal.available():
+        from . import vnc
+        desktop_ok, desktop_why = vnc.available()
+        desktop_service = vnc.DesktopService(joining.local_hostname()) if desktop_ok and getattr(sup.cfg, "desktop", True) else None
+        if desktop_service is None:
+            log.info("remote desktop not offered here: %s", desktop_why or "turned off")
+        remote_hub = RemoteHub(terminals, desktop=desktop_service)
+        if desktop_service is not None:
+            hub.extra_features = (*hub.extra_features, "desktop/1")
+        p2p_state["hub"] = remote_hub
+        hub.handlers.update(remote_hub.handlers())
+        hub.extra_features = (*hub.extra_features, REMOTE_HUB_FEATURE)
+        p2p_state["sidecar"] = p2p_mod.AgentSidecar(p2p_exe)
+    if p2p_exe:
+        p2p_state["connector"] = p2p_mod.Connector(p2p_exe)
+
+    async def p2p_config() -> dict | None:
+        if not (hub.available and P2P_FEATURE in hub.features):
+            return None
+        if p2p_state["config"] is None:
+            p2p_state["config"] = await hub.call("p2p_config", {}, timeout=20)
+        return p2p_state["config"]
+
+    async def start_tunnel_agent() -> None:
+        remote_hub, sidecar = p2p_state["hub"], p2p_state["sidecar"]
+        if remote_hub is None or sidecar is None:
+            return
+        p2p_state["config"] = None  # a reconnect may mean another gateway
+        try:
+            config = await p2p_config()
+            if config is None:
+                return
+            if not remote_hub.port:
+                await remote_hub.start()
+            sidecar.apply(config, remote_hub.port)
+        except Exception as exc:
+            log.warning("p2p tunnel agent not started: %s", exc)
+
+    hub.on_attach.append(start_tunnel_agent)
 
     async def repo_listing() -> tuple[dict | None, JSONResponse | None]:
         try:
@@ -898,9 +1031,13 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
         Route("/api/remote/devices/{device_id}/terminal", remote_terminal_info),
         Route("/api/remote/devices/{device_id}/terminal/external", remote_terminal_external, methods=["POST"]),
         WebSocketRoute("/api/remote/devices/{device_id}/terminal/ws", remote_terminal_socket),
+        Route("/api/remote/devices/{device_id}/desktop/prepare", remote_desktop_prepare, methods=["POST"]),
+        WebSocketRoute("/api/remote/devices/{device_id}/desktop/ws", remote_desktop_socket),
+        vendor_route("novnc", STATIC_DIR / "vendor" / "novnc"),
     ]
     app = Starlette(routes=routes, lifespan=lifespan)
     app.state.sup = sup
     app.state.hub = hub
     app.state.lock = lock
+    app.state.p2p = p2p_state
     return LocalOnly(app, sup.cfg.host, sup.cfg.port)

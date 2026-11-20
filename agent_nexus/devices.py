@@ -169,6 +169,9 @@ class Devices:
             # term/1: the device opens remote terminals (console 终端, `agent-nexus term`).
             terminal=bool(peer is not None and "term/1" in getattr(peer, "features", ())),
             locked=bool(peer is not None and getattr(peer, "locked", False)),
+            # remote-hub/1 + desktop/1: a P2P tunnel agent, and a desktop to share.
+            p2p=bool(peer is not None and "remote-hub/1" in getattr(peer, "features", ())),
+            desktop=bool(peer is not None and "desktop/1" in getattr(peer, "features", ())),
             # What the device publishes now (names, descriptions, tool counts; never URLs).
             plugins=[{"name": name, "description": str(mcp.get("description") or "")[:300],
                       "tools": len(mcp.get("tools") or []), "error": bool(mcp.get("error"))}

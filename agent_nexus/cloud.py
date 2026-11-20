@@ -52,7 +52,7 @@ LEGACY_HEALTH_SERVICE = "workspace-cloud"
 #: (design §4.3): an older or newer config must not block an upgrade.
 KNOWN_CONFIG_KEYS = frozenset({
     "host", "port", "path", "public_url", "stateless", "log_requests", "token_env", "agents", "agent_groups",
-    "default_workspace", "rpc_timeout_s", "auth", "media_cache_dir", "state_dir", "gateway", "mailbox",
+    "default_workspace", "rpc_timeout_s", "auth", "media_cache_dir", "state_dir", "gateway", "mailbox", "p2p",
     "migrated_from", "downloads", "invites", "plugin_repo"})
 KNOWN_INVITE_KEYS = frozenset({"default_ttl_s", "max_ttl_s"})
 KNOWN_GATEWAY_KEYS = frozenset({"legacy_tools"})
@@ -403,6 +403,19 @@ def build_cloud_app(config: dict, root: Path):
     # Remote terminal: GET /api/devices/{id}/terminal and its WebSocket (term/1 devices).
     from .terminal_bridge import TerminalBridge
     app.router.routes[0:0] = TerminalBridge(console, device_credential=device_credential).routes()
+    # P2P tunnels between devices (muxi-p2p): signaling under /p2p, the reflector, tunnel tokens.
+    from .p2p_gateway import P2PGateway
+    p2p = P2PGateway(config, state_db_path(config, root).parent, hub=hub, store=store,
+                     device_credential=device_credential, owner=console.owner)
+    facade.p2p = p2p
+    app.state.p2p = p2p
+    if p2p.enabled:
+        try:
+            from starlette.routing import Mount
+            app.router.routes.insert(0, Mount("/p2p", app=p2p.app()))
+        except ImportError as exc:  # muxi-p2p-signaling missing: devices fall back to the relay
+            log.warning("p2p signaling unavailable (%s)", exc)
+            p2p.enabled = False
     # Connectors: the console APIs and the OAuth callback (docs/ui-spec.md §3.4, design §7.3).
     app.router.routes[0:0] = ConnectorsWeb(connectors, console).routes()
     # 插件库: owner APIs, device downloads, and "安装到…" (design §6.12).

@@ -154,6 +154,14 @@ def release_files(kind, desktop=None, uv=None, include_windows_uv=True, rg=None)
     for name in ("LICENSE", "THIRD_PARTY_NOTICES.md"):
         if (ROOT / name).is_file():
             yield ROOT / name, name
+    # muxi-p2p-signaling: a path dependency (pyproject [tool.uv.sources]) from the submodule.
+    signaling = ROOT / "third_party/muxi-p2p/signaling"
+    if not (signaling / "pyproject.toml").is_file():
+        # uv sync fails on the target without it; say so here, where it can still be fixed.
+        print("warning: third_party/muxi-p2p is missing (git submodule update --init --recursive)", file=sys.stderr)
+    for path in [signaling / "pyproject.toml", signaling / "LICENSE", *sorted(signaling.glob("muxi_p2p_signaling/*.py"))]:
+        if path.is_file():
+            yield path, path.relative_to(ROOT).as_posix()
     for path in (ROOT / "config").glob("*.json"):
         yield path, path.relative_to(ROOT).as_posix()
     for path in sorted((ROOT / "schemas").glob("*.json")):
@@ -161,6 +169,12 @@ def release_files(kind, desktop=None, uv=None, include_windows_uv=True, rg=None)
     if kind in ("client", "runtime"):
         for path, relative in bundle.builtin_files(ROOT):
             yield path, "builtins/" + relative.as_posix()
+        # The P2P tunnel tools (scripts/build_p2p_tools.py) for remote terminal and desktop.
+        p2p_tools = os.environ.get("ANX_P2P_TOOLS")
+        if p2p_tools:
+            for path in sorted(Path(p2p_tools).iterdir()):
+                if path.is_file():
+                    yield path, "tools/" + path.name
         if kind == "client":
             desktop = Path(desktop) if desktop is not None else ROOT / "artifacts" / DESKTOP_EXE
             if not desktop.is_file():

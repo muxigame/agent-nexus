@@ -18,8 +18,11 @@ PLATFORM_ONLY = {"winreg", "msvcrt", "_winapi", "winsound", "pywintypes", "win32
 # Third-party packages installed only on Windows (sys_platform markers in pyproject.toml);
 # required there, skipped elsewhere.
 WINDOWS_PACKAGES = {"winpty"}
+LINUX_PACKAGES = {"Xlib"}
 if sys.platform != "win32":
     PLATFORM_ONLY = PLATFORM_ONLY | WINDOWS_PACKAGES
+if not sys.platform.startswith("linux"):
+    PLATFORM_ONLY = PLATFORM_ONLY | LINUX_PACKAGES
 
 
 def imported(package: Path) -> dict[str, str]:

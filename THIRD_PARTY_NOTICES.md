@@ -55,6 +55,31 @@ terminal of the gateway console and the client without a CDN.
 - Project: https://xtermjs.org
 - License: MIT (copy: `agent_nexus/static/ui/LICENSE-xterm.txt`)
 
+## noVNC (vendored)
+
+`agent_nexus/static/vendor/novnc/` holds the unmodified `core/` and `vendor/` folders of `@novnc/novnc`
+1.7.0, the remote desktop viewer of the client. noVNC is MPL-2.0 (its bundled pako is MIT); the license
+texts are `agent_nexus/static/vendor/novnc/LICENSE.txt` and `vendor/pako/LICENSE`.
+
+- Project: https://novnc.com
+
+## MsQuic (bundled with the P2P tools)
+
+The client packages carry `msquic.dll` (Windows, NuGet Microsoft.Native.Quic.MsQuic.Schannel) or
+`libmsquic.so.2` (Ubuntu, Microsoft's libmsquic package) next to `muxi-p2p-agent`, so QUIC hole
+punching works where the system has none. MIT, copy: `tools/LICENSE-msquic.txt`.
+
+- Project: https://github.com/microsoft/msquic
+
+## muxi-p2p (submodule)
+
+`third_party/muxi-p2p` (agent and signaling) is Apache-2.0: https://github.com/muxigame/muxi-p2p
+
+## mss, python-xlib (dependencies)
+
+Screen capture for the remote desktop uses `mss` (MIT); X11 input on Linux uses `python-xlib` (LGPL-2.1+,
+used as an unmodified library).
+
 ## pywinpty (Windows dependency)
 
 The remote terminal uses `pywinpty` (MIT) for Windows ConPTY sessions.
