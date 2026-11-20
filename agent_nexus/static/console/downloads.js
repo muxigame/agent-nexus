@@ -1,5 +1,7 @@
 // The downloads page (docs/ui-spec.md §3.7), shared by the console (#/downloads) and the public /downloads.
 import { el, mount, icon, fetchJSON, tokenField, emptyState, errorState, bytes, skeletonRows } from "/ui/ui.js";
+import { ubuntuInstallCommand } from "/console/install-commands.js";
+
 
 const PLATFORM_ICON = { windows: "monitor", linux: "terminal", macos: "laptop", any: "package" };
 
@@ -40,10 +42,20 @@ export async function renderDownloads(target, { inviteHref = "/#/devices?invite=
       download("btn-block only-sm"),
       el("div", { class: "field" }, el("span", { class: "field-label" }, "SHA-256"), tokenField(main.sha256)))));
   }
+  if (items.some((item) => item.latest && item.filename.endsWith("_amd64.deb"))) {
+    sections.push(el("section", { class: "card", id: "ubuntu-install" }, el("div", { class: "card-head" }, el("h2", {}, "Ubuntu 一键下载并安装")),
+      el("div", { class: "card-body stack" },
+        el("span", { class: "field-label" }, "有桌面（22.04+）"),
+        tokenField(ubuntuInstallCommand(), { multiline: true, copyLabel: "复制命令" }),
+        el("span", { class: "field-label" }, "服务器（无桌面，不装 GTK/WebKit）"),
+        tokenField(ubuntuInstallCommand({ server: true }), { multiline: true, copyLabel: "复制命令" }),
+        el("span", { class: "hint" }, "命令总是下载最新版本。服务器装好后，用邀请码加入并作为服务运行：",
+          el("span", { class: "mono" }, "agent-nexus join <邀请码> && agent-nexus service enable"),
+          "（邀请对话框里有带邀请码的完整命令）。"))));
+  }
   const steps = el("section", { class: "card" }, el("div", { class: "card-head" }, el("h2", {}, "安装之后")),
     el("div", { class: "card-body" }, el("div", { class: "steps" },
-      step("运行安装包", el("span", {}, "Windows：运行 setup.exe，SmartScreen 提示时选择“更多信息 → 仍要运行”。Ubuntu 22.04+：",
-        el("span", { class: "mono" }, "sudo apt install ./agent-nexus_<版本>_amd64.deb"), "，然后从应用菜单启动。安装后托盘出现 Agent Nexus 图标。")),
+      step("运行安装包", el("span", {}, "Windows：运行 setup.exe，SmartScreen 提示时选择“更多信息 → 仍要运行”。Ubuntu：用上面的一键命令，然后从应用菜单启动（服务器见上面的无桌面命令）。安装后托盘出现 Agent Nexus 图标。")),
       step("用邀请码加入网关", el("span", {}, "在 ", el("a", { href: inviteHref }, "设备 → 邀请新设备"), " 生成邀请码，粘贴到客户端的“连接云端”页（或命令行 ", el("span", { class: "mono" }, "anx join <邀请码>"), "）。")),
       step("安装和启用插件", "在客户端“插件”页：标着“未安装”的插件点“安装”，选它的文件夹、Git 地址或压缩包；已安装的打开开关即可启动，需要配置的会提示你填写。"))));
   const otherCard = el("section", { class: "card" }, el("div", { class: "card-head" }, el("h2", {}, "其他平台与链接")),

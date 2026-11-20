@@ -395,6 +395,20 @@ class Console:
         return FileResponse(path, media_type="application/octet-stream", filename=name,
                             headers={"Cache-Control": "no-cache", "X-Content-Type-Options": "nosniff"})
 
+    #: ``/downloads/latest/<asset>``: a link that always names the newest installer,
+    #: for copy-paste install commands (download page, invite dialog).
+    LATEST_ASSETS = {"amd64.deb": "_amd64.deb", "x64-setup.exe": "_x64-setup.exe"}
+
+    async def download_latest(self, request: Request) -> Response:
+        suffix = self.LATEST_ASSETS.get(request.path_params["asset"])
+        if suffix is None:
+            return HTMLResponse("Not found", status_code=404)
+        items = (await run_in_threadpool(self.downloads.items))["items"]
+        for item in items:  # newest first
+            if item["filename"].endswith(suffix) and item["filename"].startswith("agent-nexus_"):
+                return RedirectResponse(item["url"], status_code=302, headers={"Cache-Control": "no-cache"})
+        return HTMLResponse("Not found", status_code=404)
+
     async def enroll(self, request: Request) -> Response:
         try:
             body = await request.json()
@@ -423,6 +437,7 @@ class Console:
             Route("/api/settings", self.settings, methods=["GET"]),
             Route("/api/downloads", self.downloads_api, methods=["GET"]),
             Route("/downloads", self.downloads_page, methods=["GET", "HEAD"]),
+            Route("/downloads/latest/{asset}", self.download_latest, methods=["GET", "HEAD"]),
             Route("/downloads/{filename}", self.download_file, methods=["GET", "HEAD"]),
             Route("/enroll", self.enroll, methods=["POST"]),
         ]

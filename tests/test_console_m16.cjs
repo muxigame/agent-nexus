@@ -95,7 +95,7 @@ test("every os_family the gateway reports has a mark, and the device page offers
 test("deviceAvatar falls back to a generic glyph for a device with no os_family", async () => {
   const { osMark } = await load("ui/os-icons.js");
   const pages = fs.readFileSync(path.join(STATIC, "console/pages.js"), "utf8");
-  const pick = (name) => { const start = pages.indexOf(`function ${name}(device) {`); return pages.slice(start, pages.indexOf("}" + String.fromCharCode(10), pages.indexOf(String.fromCharCode(10) + "}", start)) + 1); };
+  const pick = (name) => { const start = pages.indexOf(`function ${name}(device) {`); return pages.slice(start, pages.indexOf(String.fromCharCode(10) + "}", start) + 2); };
   const el = (tag, attrs, ...children) => ({ tag, attrs, children });
   const icon = (name) => ({ icon: name });
   const make = new Function("el", "icon", "osMark", `${pick("deviceIcon")}
@@ -108,4 +108,14 @@ return deviceAvatar;`);
     assert.equal(node.attrs.class, "avatar");
     assert.ok(node.children[0].icon, JSON.stringify(device));
   }
+});
+
+test("Ubuntu install commands download the newest package from this gateway", async () => {
+  globalThis.location = { origin: "https://hub.example.test" };
+  const { ubuntuInstallCommand, ubuntuServerJoinCommand } = await load("console/install-commands.js");
+  const desktop = ubuntuInstallCommand();
+  assert.ok(desktop.includes("https://hub.example.test/downloads/latest/amd64.deb") && desktop.includes("sudo apt install -y ./agent-nexus.deb"));
+  assert.ok(!desktop.includes("--no-install-recommends"));
+  const server = ubuntuServerJoinCommand("anx1.CODE");
+  assert.ok(server.includes("--no-install-recommends") && server.endsWith("agent-nexus join anx1.CODE && agent-nexus service enable"));
 });

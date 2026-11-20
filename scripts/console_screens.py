@@ -104,6 +104,7 @@ async def build_world(work: Path, downloads_dir: Path | None):
     else:
         (downloads / "agent-nexus_0.2.0_x64-setup.exe").write_bytes(b"MZ" + os.urandom(4096))
         (downloads / "agent-nexus-gateway-0.2.0.zip").write_bytes(b"PK" + os.urandom(2048))
+        (downloads / "agent-nexus_0.2.0_amd64.deb").write_bytes(b"!<arch>" + os.urandom(4096))
     config = {"agents": {"pc-main": "ANX_SHOT_AGENT_TOKEN"}, "public_url": origin, "state_dir": str(state),
               "auth": {"mode": "oauth", "password_secret": "workspace/oauth-password", "scopes": ["tools"],
                        "required_scopes": ["tools"], "store": str(state / "oauth.sqlite3"), "title": "Agent Nexus"},

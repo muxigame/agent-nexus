@@ -5,6 +5,7 @@ import {
 } from "/ui/ui.js";
 import { qrSVG } from "/ui/qr.js";
 import { osMark } from "/ui/os-icons.js";
+import { ubuntuServerJoinCommand } from "/console/install-commands.js";
 
 // ---------------------------------------------------------------- shared bits
 
@@ -331,6 +332,9 @@ function showInvite(created) {
           el("span", { class: "field-label" }, "或者打开邀请链接"),
           tokenField(created.link, { copyLabel: "复制链接" }),
           el("span", { class: "hint" }, "已装好客户端的电脑上点击链接会自动填入；手机扫码可把链接带到电脑上。"))),
+      el("div", { class: "field" }, el("span", { class: "field-label" }, "Ubuntu 服务器：下载、安装、加入并作为服务运行"),
+        tokenField(ubuntuServerJoinCommand(created.code), { multiline: true, copyLabel: "复制命令" }),
+        el("span", { class: "hint" }, "在服务器上以要运行它的用户（直接 SSH 登录，不要 su）粘贴执行；命令里含邀请码，同样只能用一次。")),
       el("dl", { class: "kv" },
         el("dt", {}, "备注"), el("dd", {}, created.invite.label || "—"),
         el("dt", {}, "过期时间"), el("dd", {}, expires.toLocaleString("zh-CN", { hour12: false })),

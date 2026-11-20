@@ -185,6 +185,12 @@ def test_downloads_are_public_listed_hashed_and_streamed(tmp_path, monkeypatch):
         assert "attachment" in streamed.headers["content-disposition"]
         for bad in ("notes.txt", "..%2Fgateway.json", "missing.exe", "SHA256SUMS"):
             assert client.get(f"/downloads/{bad}").status_code == 404
+        # stable "newest" links for copy-paste install commands
+        newest = client.get("/downloads/latest/amd64.deb", follow_redirects=False)
+        assert newest.status_code == 302 and newest.headers["location"] == f"/downloads/{deb.name}"
+        assert client.get("/downloads/latest/x64-setup.exe", follow_redirects=False).headers["location"] == f"/downloads/{setup.name}"
+        assert client.get("/downloads/latest/amd64.deb").content == b"deb"
+        assert client.get("/downloads/latest/gateway.json").status_code == 404
         page = client.get("/downloads")
         assert page.status_code == 200 and "/console/downloads.js" in page.text
         assert client.get("/console/downloads.js").status_code == 200
