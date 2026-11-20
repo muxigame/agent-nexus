@@ -1,6 +1,6 @@
 [package]
 name = "agent-nexus-desktop"
-version = "0.3.0"
+version = "0.3.1"
 description = "Agent Nexus desktop shell (window and tray for the local console)"
 edition = "2021"
 rust-version = "1.89"

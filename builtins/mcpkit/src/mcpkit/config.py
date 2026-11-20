@@ -422,12 +422,74 @@ def write_secret(config: ServiceConfig, name: str, value: str | None = None) -> 
     return path
 
 
+_SID = re.compile(r"S-1-[0-9]+(?:-[0-9]+)+")
+
+
+def _token_user_sid() -> str | None:
+    """The SID of the account this process runs as, from its own access token."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        advapi, kernel = ctypes.WinDLL("advapi32", use_last_error=True), ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.GetCurrentProcess.restype = wintypes.HANDLE
+        advapi.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
+        advapi.GetTokenInformation.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
+                                               ctypes.POINTER(wintypes.DWORD)]
+        advapi.ConvertSidToStringSidW.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.LPWSTR)]
+        token = wintypes.HANDLE()
+        if not advapi.OpenProcessToken(kernel.GetCurrentProcess(), 0x0008, ctypes.byref(token)):  # TOKEN_QUERY
+            return None
+        try:
+            size = wintypes.DWORD()
+            advapi.GetTokenInformation(token, 1, None, 0, ctypes.byref(size))  # TokenUser
+            buffer = ctypes.create_string_buffer(size.value)
+            if not advapi.GetTokenInformation(token, 1, buffer, size, ctypes.byref(size)):
+                return None
+            sid_pointer = ctypes.cast(buffer, ctypes.POINTER(ctypes.c_void_p))[0]  # TOKEN_USER.User.Sid
+            text = wintypes.LPWSTR()
+            if not advapi.ConvertSidToStringSidW(sid_pointer, ctypes.byref(text)):
+                return None
+            try:
+                value = text.value
+            finally:
+                kernel.LocalFree(text)
+        finally:
+            kernel.CloseHandle(token)
+        return value if value and _SID.fullmatch(value) else None
+    except (OSError, AttributeError, ValueError):
+        return None
+
+
+def _whoami_sid() -> str | None:
+    try:
+        result = subprocess.run(["whoami", "/user", "/fo", "csv", "/nh"], capture_output=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    found = _SID.findall((result.stdout or b"").decode("ascii", errors="ignore"))
+    return found[-1] if result.returncode == 0 and found else None
+
+
+def current_user_principal() -> str:
+    """Who to grant in an ACL: ``*<SID>`` of this process's account.
+
+    Granting by name (``USERDOMAIN\\USERNAME``) failed with "No mapping between account names
+    and security IDs" whenever those variables do not name the account the process really runs
+    as -- a service or scheduled task, SYSTEM, a renamed or domain account, or a launcher that
+    passes a reduced environment -- and joining a gateway then failed after the invite was used.
+    """
+    sid = _token_user_sid() or _whoami_sid()
+    if sid:
+        return f"*{sid}"
+    return f"{os.environ.get('USERDOMAIN', '.')}\\{os.environ.get('USERNAME', '')}"
+
+
 def protect(path: Path) -> None:
     """Owner-only access: the account running the servers and SYSTEM."""
     if sys.platform != "win32":
         os.chmod(path, 0o700 if path.is_dir() else 0o600)
         return
-    user = f"{os.environ.get('USERDOMAIN', '.')}\\{os.environ.get('USERNAME', '')}"
+    user = current_user_principal()
     grant = "(OI)(CI)F" if path.is_dir() else "F"
     result = subprocess.run(
         ["icacls", str(path), "/inheritance:r", "/grant:r", f"{user}:{grant}", f"*S-1-5-18:{grant}"],

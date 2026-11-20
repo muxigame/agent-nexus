@@ -21,7 +21,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from mcpkit.config import ConfigError, ServiceConfig, secret_path, write_secret
+from mcpkit.config import ConfigError, ServiceConfig, protect, secret_path, write_secret
 
 from . import paths
 from .invites import EnrollError, decode_invite
@@ -119,6 +119,38 @@ def join(root: Path, invite: Any, *, agent_id: str | None = None, hostname: str 
         raise JoinError(409, "managed", "这台设备由私有入网配置管理，不能用邀请码更换网关")
     if joined(root) and not replace:
         raise JoinError(409, "already_joined", "这台设备已经加入了网关；先退出再用新的邀请码加入")
+    # Check that this root can keep the token *before* the invite is used up: a failure after
+    # /enroll leaves the device registered on the gateway and the invite spent.
+    config = ServiceConfig(name="manager", root=root, dir=root)
+    token_dir = secret_path(config, TOKEN_SECRET).parent
+    # Directories this check creates go again if the join does not complete: a refused
+    # invite leaves the root as it was.
+    created = [d for d in (config.secrets_dir, token_dir) if not d.exists()]
+    try:
+        token_dir.mkdir(parents=True, exist_ok=True)
+        protect(config.secrets_dir)
+        probe = paths.write_path(root).with_suffix(".json.join-check")
+        probe.write_text("{}", encoding="utf-8")
+        probe.unlink()
+    except (OSError, ConfigError) as exc:
+        _remove_created(created)
+        raise JoinError(500, "write_failed", f"无法写入本机配置（邀请码未使用，可以修好后重试）：{_describe(exc)}") from None
+    try:
+        return _redeem(root, decoded, config, created, agent_id=agent_id, hostname=hostname, http=http, timeout=timeout)
+    except JoinError as exc:
+        if exc.code != "write_failed":
+            _remove_created(created)
+        raise
+
+
+def _remove_created(directories: list[Path]) -> None:
+    import shutil
+    for directory in directories:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+def _redeem(root: Path, decoded: dict, config: ServiceConfig, created: list[Path], *, agent_id, hostname,
+            http, timeout) -> dict:
     name = (hostname or local_hostname()).strip()[:255] or "device"
     body = {"invite_id": decoded["id"], "secret": decoded["secret"], "hostname": name, "device": device_facts()}
     if agent_id:
@@ -147,7 +179,6 @@ def join(root: Path, invite: Any, *, agent_id: str | None = None, hostname: str 
     token, new_id = result.get("token"), result.get("agent_id")
     if not isinstance(token, str) or len(token) < 32 or not isinstance(new_id, str):
         raise JoinError(502, "hub_error", "网关的响应不完整")
-    config = ServiceConfig(name="manager", root=root, dir=root)
     try:
         write_secret(config, TOKEN_SECRET, token)
         data = paths.read_config(root)
@@ -159,9 +190,19 @@ def join(root: Path, invite: Any, *, agent_id: str | None = None, hostname: str 
         data["cloud"] = cloud
         _write_config(root, data)
     except (OSError, ConfigError) as exc:
-        raise JoinError(500, "write_failed", f"写入本机配置失败：{type(exc).__name__}") from None
+        raise JoinError(500, "write_failed", f"写入本机配置失败：{_describe(exc)}") from None
     return {"state": "joined", "hub": decoded["hub"], "agent_id": new_id,
             "display_name": result.get("display_name") or name}
+
+
+def _describe(exc: Exception) -> str:
+    """What went wrong, for the person joining: the message names files, never secret values."""
+    if isinstance(exc, ConfigError):
+        return str(exc)[:400]
+    if isinstance(exc, OSError):
+        where = f"（{exc.filename}）" if getattr(exc, "filename", None) else ""
+        return f"{type(exc).__name__}: {exc.strerror or exc}{where}"[:400]
+    return type(exc).__name__
 
 
 def leave(root: Path) -> dict:
