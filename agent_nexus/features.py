@@ -36,8 +36,11 @@ AGENT_FEATURES: tuple[str, ...] = ("device-contract/1", "mcp-alias/1", "hub_call
 GATEWAY_FEATURES: tuple[str, ...] = ("hub_call/1", "mcp-alias/1", "mail/1", "ask/1", "inbox/1", "wake/1", "invites/1",
                                      "plugin_repo/1")
 PLUGIN_REPO = "plugin_repo/1"
+#: ``term/1``: the device answers ``term_info/open/write/read/resize/close`` (remote terminal);
+#: announced by the manager when a pseudo-terminal is available and ``terminal.enabled`` is not false.
+TERM = "term/1"
 #: Device features announced only when the process can serve them.
-AGENT_OPTIONAL_FEATURES: tuple[str, ...] = (PLUGIN_REPO,)
+AGENT_OPTIONAL_FEATURES: tuple[str, ...] = (PLUGIN_REPO, TERM)
 ASK = "ask/1"
 INBOX = "inbox/1"
 WAKE = "wake/1"

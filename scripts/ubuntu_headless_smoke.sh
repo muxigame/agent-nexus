@@ -9,6 +9,7 @@
 # 2. On the runner (real systemd): a gateway from this checkout makes an invite,
 #    `agent-nexus join` redeems it, `agent-nexus service enable` starts the systemd user
 #    service, and the gateway lists the device online with os_family ubuntu.
+# 3. The console's remote terminal reaches a real shell on that device (scripts/terminal_smoke.py).
 #
 # Needs docker, passwordless sudo and `uv` with this checkout synced (GitHub's runners).
 set -euo pipefail
@@ -81,6 +82,8 @@ sys.exit(0 if online and online[0].get("os_family") == "ubuntu" else 1)'; then
         agent-nexus service status | tee "$work/status"
         grep -q "connected" "$work/status"
         echo "ok: joined, running as a systemd user service, online as an Ubuntu device"
+        echo "--- 3. a remote terminal through the gateway (real pty on the installed device)"
+        (cd "$here" && uv run --frozen python scripts/terminal_smoke.py --gateway "http://127.0.0.1:$port" --token "$SERVER_TOKEN")
         exit 0
     fi
     sleep 2

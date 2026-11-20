@@ -604,3 +604,22 @@ kbd { display: inline-block; padding: 0 5px; border: 1px solid var(--border-stro
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 1ms !important; animation-iteration-count: 1 !important; transition-duration: 1ms !important; }
 }
+
+/* ---------------------------------------------------------------- remote terminal */
+.term-shell { display: flex; flex-direction: column; border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; background: #0c0c0c; margin-bottom: 16px; }
+.term-shell:fullscreen { border-radius: 0; border: 0; }
+.term-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 8px 10px; background: var(--surface); border-bottom: 1px solid var(--border); }
+.term-toolbar .title { font-weight: 600; }
+.term-toolbar .sub { font-size: 11px; color: var(--text-3); }
+.term-toolbar .select { height: 30px; min-width: 160px; }
+.term-frame { height: calc(100vh - 280px); min-height: 320px; padding: 6px 0 0 8px; background: #0c0c0c; }
+.term-shell:fullscreen .term-frame { height: auto; flex: 1; }
+.term-frame .xterm { height: 100%; }
+.term-frame.skeleton-block { border-radius: var(--radius); background: var(--surface-2); }
+.term-keys { display: none; gap: 6px; padding: 6px 8px; overflow-x: auto; background: var(--surface); border-top: 1px solid var(--border); }
+.term-keys .btn { flex: none; font-family: var(--font-mono); }
+@media (max-width: 720px), (pointer: coarse) { .term-keys { display: flex; } .term-frame { height: calc(100vh - 300px); padding-left: 4px; } }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface-2); color: var(--text); font-size: 12px; cursor: pointer; }
+.chip:hover { border-color: var(--accent); }
+.chip .mono { font-size: 11px; }

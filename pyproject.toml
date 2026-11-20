@@ -17,6 +17,8 @@ dependencies = [
     "websockets>=14,<17",
     # join, plugin hub, OAuth connectors and agent tools call HTTP at runtime.
     "httpx>=0.28.1",
+    # remote terminal: ConPTY on Windows (agent_nexus/terminal.py)
+    "pywinpty>=2.0.14; sys_platform == 'win32'",
 ]
 
 [project.scripts]

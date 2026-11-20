@@ -15,6 +15,11 @@ from pathlib import Path
 PLATFORM_ONLY = {"winreg", "msvcrt", "_winapi", "winsound", "pywintypes", "win32api", "win32con",
                  "win32gui", "win32process", "win32job", "pythoncom", "fcntl", "termios", "pwd", "grp",
                  "resource", "gi", "AppKit", "Foundation", "Quartz", "objc"}
+# Third-party packages installed only on Windows (sys_platform markers in pyproject.toml);
+# required there, skipped elsewhere.
+WINDOWS_PACKAGES = {"winpty"}
+if sys.platform != "win32":
+    PLATFORM_ONLY = PLATFORM_ONLY | WINDOWS_PACKAGES
 
 
 def imported(package: Path) -> dict[str, str]:

@@ -166,6 +166,8 @@ class Devices:
             last_seen_at=stored.get("last_seen_at"), last_connected_at=stored.get("last_connected_at"),
             revoked=bool(stored.get("revoked_at")) and peer is None, revoked_at=stored.get("revoked_at"),
             plugins_count=len(catalog.get("mcps") or {}) if peer else None,
+            # term/1: the device opens remote terminals (console 终端, `agent-nexus term`).
+            terminal=bool(peer is not None and "term/1" in getattr(peer, "features", ())),
             # What the device publishes now (names, descriptions, tool counts; never URLs).
             plugins=[{"name": name, "description": str(mcp.get("description") or "")[:300],
                       "tools": len(mcp.get("tools") or []), "error": bool(mcp.get("error"))}

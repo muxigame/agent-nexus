@@ -8,6 +8,7 @@ headless commands instead of failing:
     agent-nexus join <invite>          join a gateway with an invite code
     agent-nexus service enable         run as a systemd user service, at boot
     agent-nexus service status|logs|disable
+    agent-nexus term [device]          remote terminal on another device of the gateway
     agent-nexus anx <args>             any `anx` command (status, leave, plugin...)
     agent-nexus --serve                run the manager in the foreground
 """
@@ -268,6 +269,7 @@ HEADLESS_HELP = """Agent Nexus（无桌面模式）
   agent-nexus service logs [-f]    最近的日志（-f 持续输出）
   agent-nexus service restart      重启服务
   agent-nexus service disable      停止并取消自启
+  agent-nexus term [设备]          打开网关里另一台设备的远程终端（--list 列出设备，--shells 列出 shell 和命令行工具）
   agent-nexus anx <参数>           其他 anx 命令，例如 anx status、anx leave、anx plugin list
   agent-nexus --serve              在前台运行管理器（调试用）
 
@@ -418,6 +420,8 @@ def main(argv):
             if code == 0 and _systemctl("is-active", UNIT, check=False).stdout.strip() != "active":
                 print("下一步：agent-nexus service enable（作为服务运行并连接网关）")
             return code
+        if args.command == "term":
+            return anx(["term", *args.rest])
         if args.command == "service":
             return service(args.rest[0] if args.rest else "status", args.rest[1:])
         if args.command is not None:

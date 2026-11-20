@@ -197,6 +197,8 @@ export async function devicesPage(ctx, route) {
         el("td", { "data-label": "入网方式" }, el("span", { class: "tag" }, ENROLLED[device.enrolled_via] || device.enrolled_via || "—")),
         el("td", { "data-label": "最后在线", class: "muted" }, device.online ? "现在" : device.last_connected_at ? relTime(device.last_seen_at) : "从未连接"),
         el("td", { class: "actions" }, el("div", { class: "btn-group" },
+          device.online && device.terminal ? el("a", { class: "btn btn-sm", href: `#/terminal/${encodeURIComponent(device.device_id)}`, title: "打开远程终端" },
+            icon("terminal", { size: 14 }), "终端") : null,
           el("button", { class: "btn btn-sm", type: "button", onclick: () => renameDialog(device, reload) }, icon("pencil", { size: 14 }), "备注名"),
           el("button", { class: "btn btn-ghost btn-sm btn-icon", type: "button", "aria-label": "更多操作", html: iconHTML("ellipsis", { size: 16 }),
             onclick: (event) => openMenu(event.currentTarget, [

@@ -468,6 +468,14 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
     hub.handlers.update(plugin_repo_install=repo_install_rpc, plugin_repo_job=repo_job_rpc)
     hub.extra_features = ("plugin_repo/1",)
 
+    # -- remote terminal (term/1): the gateway console's 终端 and `agent-nexus term` --
+    from . import terminal as anx_terminal
+
+    if getattr(sup.cfg, "terminal", True) and anx_terminal.available():
+        terminals = anx_terminal.Terminals()
+        hub.handlers.update(terminals.handlers())
+        hub.extra_features = (*hub.extra_features, anx_terminal.FEATURE)
+
     async def repo_listing() -> tuple[dict | None, JSONResponse | None]:
         try:
             hub_source.link(sup.cfg.root)

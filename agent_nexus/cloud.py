@@ -380,6 +380,9 @@ def build_cloud_app(config: dict, root: Path):
     console = Console(config=config, facade=facade, hub=hub, store=store, server=server, inbox_web=inbox_web,
                       enrollment=enrollment, downloads=downloads)
     app.router.routes[0:0] = console.routes()
+    # Remote terminal: GET /api/devices/{id}/terminal and its WebSocket (term/1 devices).
+    from .terminal_bridge import TerminalBridge
+    app.router.routes[0:0] = TerminalBridge(console).routes()
     # Connectors: the console APIs and the OAuth callback (docs/ui-spec.md §3.4, design §7.3).
     app.router.routes[0:0] = ConnectorsWeb(connectors, console).routes()
     # 插件库: owner APIs, device downloads, and "安装到…" (design §6.12).

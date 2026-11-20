@@ -684,8 +684,13 @@ def cmd_leave(args: argparse.Namespace, cfg: ManagerConfig) -> int:
 
 
 #: Commands that work on roots and files themselves, not on a loaded configuration.
+def cmd_term(args: argparse.Namespace, root: Path) -> int:
+    from .term_cli import cmd_term as run
+    return run(args, root)
+
+
 ROOT_COMMANDS = {"migrate": cmd_migrate, "secrets": cmd_secrets, "device": cmd_device, "wake": cmd_wake,
-                 "hook": cmd_hook, "integrate": cmd_integrate}
+                 "hook": cmd_hook, "integrate": cmd_integrate, "term": cmd_term}
 
 COMMANDS = {
     "serve": cmd_serve, "status": cmd_status, "start": cmd_lifecycle, "stop": cmd_lifecycle,
@@ -797,6 +802,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--agent-id", help="request this device id (default: from the hostname)")
     p.add_argument("--force", action="store_true", help="replace an existing gateway configuration")
     sub.add_parser("leave", help="leave the gateway (remove this device's token)")
+    from .term_cli import add_parser as add_term_parser
+    add_term_parser(sub)
 
     p = sub.add_parser("plugin", help="install, remove, enable and list plugins (design §6.5)")
     plugin_sub = p.add_subparsers(dest="plugin_cmd", required=True)

@@ -4,6 +4,7 @@ import { mountInbox } from "/ui/inbox.js";
 import { overviewPage, devicesPage, settingsPage, pluginsPage } from "/console/pages.js";
 import { renderDownloads } from "/console/downloads.js";
 import { connectorsPage } from "/console/connectors.js";
+import { terminalPage } from "/console/terminal.js";
 
 restoreTheme();
 const NAV = [
@@ -102,6 +103,7 @@ const router = createRouter({
   "/devices": (route) => devicesPage(context("设备"), route),
   "/connectors": (route) => connectorsPage(context("连接器"), route),
   "/plugins/:device?": (route) => pluginsPage(context("插件"), route),
+  "/terminal/:device": (route) => terminalPage(context("终端", { wide: true }), route),
   "/inbox/:thread?": inboxPage,
   "/downloads": downloadsPage,
   "/settings": (route) => settingsPage(context("设置"), route),

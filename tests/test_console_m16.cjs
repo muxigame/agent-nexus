@@ -119,3 +119,23 @@ test("Ubuntu install commands download the newest package from this gateway", as
   const server = ubuntuServerJoinCommand("anx1.CODE");
   assert.ok(server.includes("--no-install-recommends") && server.endsWith("agent-nexus join anx1.CODE && agent-nexus service enable"));
 });
+
+test("the terminal page builds its socket URL and keeps phone keys", async () => {
+  const { terminalSocketURL, EXTRA_KEYS, TERMINAL_THEME } = await load("console/terminal-config.js");
+  const https = { protocol: "https:", host: "hub.example.test" };
+  assert.equal(terminalSocketURL("pc main/1", { shell: "git-bash", cols: 90, rows: 20 }, https),
+    "wss://hub.example.test/api/devices/pc%20main%2F1/terminal/ws?shell=git-bash&cols=90&rows=20");
+  assert.ok(terminalSocketURL("a", {}, { protocol: "http:", host: "127.0.0.1:8443" }).startsWith("ws://127.0.0.1:8443/"));
+  const keys = Object.fromEntries(EXTRA_KEYS);
+  assert.equal(keys["Ctrl+C"], "\x03");
+  assert.equal(keys["Esc"], "\x1b");
+  assert.match(TERMINAL_THEME.background, /^#[0-9a-f]{6}$/);
+});
+
+test("the console page routes to the terminal and loads xterm from /console/ only", () => {
+  const app = fs.readFileSync(path.join(STATIC, "console/app.js"), "utf8");
+  assert.match(app, /"\/terminal\/:device"/);
+  const page = fs.readFileSync(path.join(STATIC, "console/terminal.js"), "utf8");
+  for (const asset of ["/console/xterm.js", "/console/addon-fit.js", "/console/xterm.css"]) assert.ok(page.includes(asset), asset);
+  assert.ok(fs.statSync(path.join(STATIC, "console/xterm.js")).size > 100000);
+});

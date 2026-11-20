@@ -197,6 +197,39 @@ class Console:
                             httponly=True, samesite="strict")
         return response
 
+    async def token(self, request: Request) -> Response:
+        """``POST /api/auth/token`` {password, remember}: an owner bearer token for ``anx term``.
+
+        Same password, same per-IP attempt limit and same token kind as the login page; JSON
+        only, so a browser page elsewhere cannot post it without a CORS preflight we never allow.
+        """
+        if request.headers.get("sec-fetch-site") == "cross-site":
+            return self._json({"error": "forbidden"}, 403)
+        if not request.headers.get("content-type", "").startswith("application/json"):
+            return self._json({"error": "send JSON"}, 415)
+        body = await self._body(request) or {}
+        ip = request.client.host if request.client else "unknown"
+        now = time.time()
+        self.attempts = {key: [t for t in values if t > now - 300] for key, values in self.attempts.items()
+                         if any(t > now - 300 for t in values)}
+        if len(self.attempts.get(ip, [])) >= MAX_LOGIN_ATTEMPTS_PER_IP:
+            return self._json({"error": "尝试过于频繁，请 5 分钟后再试"}, 429)
+        ttl = REMEMBER_TTL_S if body.get("remember") else SESSION_TTL_S
+        if self.provider is not None:
+            from mcpkit.oauth import digest
+            candidate = str(body.get("password") or "")
+            if not candidate or not hmac.compare_digest(self.provider.password_hash, digest(candidate)):
+                self.attempts.setdefault(ip, []).append(now)
+                return self._json({"error": "密码不正确"}, 401)
+            token = self._issue(ttl)
+        else:
+            token = str(body.get("password") or body.get("token") or "")
+            if not await self.inbox_web._verify(token):
+                self.attempts.setdefault(ip, []).append(now)
+                return self._json({"error": "令牌不正确"}, 401)
+        self.attempts.pop(ip, None)
+        return self._json({"access_token": token, "token_type": "Bearer", "expires_in": ttl})
+
     async def logout(self, request: Request) -> Response:
         if request.headers.get("x-anx") != "1":
             return JSONResponse({"error": "missing X-ANX header"}, status_code=403)
@@ -427,6 +460,7 @@ class Console:
             Route("/", self.index, methods=["GET", "HEAD"]),
             Route("/auth/login", self.login, methods=["GET", "POST"]),
             Route("/auth/logout", self.logout, methods=["POST"]),
+            Route("/api/auth/token", self.token, methods=["POST"]),
             Route("/console/{name}", self.asset, methods=["GET", "HEAD"]),
             Route("/api/console/summary", self.summary, methods=["GET"]),
             Route("/api/devices", self.devices, methods=["GET"]),

@@ -178,6 +178,8 @@ class ManagerConfig:
     scan: list[str] = field(default_factory=lambda: ["."])
     overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
     builtins: bool = False
+    #: ``terminal.enabled``: whether the gateway may open a remote terminal here (default on).
+    terminal: bool = True
 
     @property
     def path(self) -> Path:
@@ -208,6 +210,8 @@ def load_manager_config(root: Path) -> ManagerConfig:
         cfg.scan = sections.plugin_paths(data) or cfg.scan
         cfg.overrides = sections.plugin_entries(data)
         cfg.builtins = bool(data.get("builtins", any((cfg.root / rel).is_dir() for rel in BUILTIN_DIRS)))
+        terminal = data.get("terminal")
+        cfg.terminal = not (isinstance(terminal, dict) and terminal.get("enabled") is False)
     return cfg
 
 
