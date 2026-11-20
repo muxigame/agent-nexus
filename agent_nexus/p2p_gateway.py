@@ -35,6 +35,8 @@ class P2PGateway:
         hosts = settings.get("reflector_hosts")
         self.reflector_hosts = [str(h) for h in hosts] if isinstance(hosts, list) and hosts else \
             ([public.hostname] if public.hostname else [])
+        #: explicitly configured reflector addresses: start the reflector with the first device
+        self.eager = isinstance(hosts, list) and bool(hosts)
         self.bind = str(settings.get("reflector_bind") or "0.0.0.0")
         self.udp_ports = [int(p) for p in settings.get("udp_ports") or (45701, 45702, 45703)]
         self.tcp_ports = [int(p) for p in settings.get("tcp_ports") or (45711, 45712)]

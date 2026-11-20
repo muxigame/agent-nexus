@@ -146,26 +146,39 @@ class TerminalBridge:
             return
         sid = opened["sid"]
         await socket.send_text(json.dumps({"type": "ready", "shell": opened.get("shell"), "cwd": opened.get("cwd")}))
-        inputs: asyncio.Queue[bytes] = asyncio.Queue(maxsize=256)
+        inputs: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=256)
         tasks = [asyncio.create_task(self._pump_output(socket, peer, sid)),
                  asyncio.create_task(self._pump_input(peer, sid, inputs)),
                  asyncio.create_task(self._receive(socket, peer, sid, inputs))]
         try:
             await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         finally:
-            # Close the device's session in a task of its own, never in this handler: when the
-            # viewer goes away this handler may be cancelled, and a device call cancelled
-            # mid-flight retires the whole device link (Peer.call), taking the device offline.
-            closer = asyncio.ensure_future(self._close_session(peer, sid))
-            _CLOSERS.add(closer)
-            closer.add_done_callback(_CLOSERS.discard)
-            for task in tasks:
-                task.cancel()
-            for task in tasks:
-                with contextlib.suppress(BaseException):
-                    await task
+            # Never cancel a device call in flight: Peer.call retires the whole device link when
+            # the cancel notice cannot go out within a second, which took the device offline
+            # whenever a viewer left during a long poll. Instead close the session (in a task of
+            # its own -- this handler may itself be cancelled), which ends the pending term_read
+            # on the device, and let the pumps finish by themselves.
+            output, writer, receiver = tasks
+            receiver.cancel()  # waits on the browser socket only
+            inputs.put_nowait(None)  # the writer stops after the write in flight
+            for task in (self._close_session(peer, sid), self._settle(output, writer)):
+                background = asyncio.ensure_future(task)
+                _CLOSERS.add(background)
+                background.add_done_callback(_CLOSERS.discard)
+            with contextlib.suppress(BaseException):
+                await receiver
             with contextlib.suppress(Exception):
                 await socket.close()
+
+    @staticmethod
+    async def _settle(*tasks) -> None:
+        """Wait for the pumps to end on their own (the session is closing); give up after a while."""
+        done, pending = await asyncio.wait(tasks, timeout=READ_WAIT_S + 15)
+        for task in done:
+            with contextlib.suppress(BaseException):
+                task.result()
+        for task in pending:
+            task.cancel()
 
     @staticmethod
     async def _close_session(peer, sid: str) -> None:
@@ -200,11 +213,18 @@ class TerminalBridge:
     async def _pump_input(peer, sid: str, inputs: asyncio.Queue) -> None:
         while True:
             chunk = await inputs.get()
+            if chunk is None:
+                return
             # Keystrokes that queued up while the last write was in flight go in one call.
+            stop = False
             while len(chunk) < MAX_WRITE_CHUNK and not inputs.empty():
-                chunk += inputs.get_nowait()
+                more = inputs.get_nowait()
+                if more is None:
+                    stop = True
+                    break
+                chunk += more
             result = await peer.call("term_write", {"sid": sid, "data": base64.b64encode(chunk).decode("ascii")})
-            if isinstance(result, dict) and (result.get("exited") or "error" in result):
+            if stop or (isinstance(result, dict) and (result.get("exited") or "error" in result)):
                 return
 
     @staticmethod

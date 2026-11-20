@@ -269,6 +269,13 @@ def build_cloud_app(config: dict, root: Path):
                 "agent_id": agent_id, "anx": anx_features.gateway_anx(facade.devices.display_name(agent_id))}})
             # on_device_online (design §8.7): its queued wakes go out now, after "ready".
             facade.wake.device_online(agent_id)
+            # With p2p.reflector_hosts configured the reflector starts with the first device
+            # (otherwise on the first p2p_config).
+            p2p = getattr(facade, "p2p", None)
+            if p2p is not None and p2p.enabled and p2p.eager and p2p._reflector is None:
+                starting = asyncio.ensure_future(p2p.ensure_reflector())
+                starting.add_done_callback(lambda task: task.cancelled() or (task.exception() and log.warning(
+                    "p2p reflector did not start: %s", task.exception())))
             while True:
                 message = await socket.receive_json()
                 method = message.get("method")
