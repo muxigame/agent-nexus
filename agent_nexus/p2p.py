@@ -78,6 +78,7 @@ class AgentSidecar:
 
     async def _run(self) -> None:
         delay = 2.0
+        warned: dict[str, float] = {}
         config = self.config or {}
         args = [self.exe, "--port", str(_free_port(int(config.get("tunnel_port") or 0) or 45740)),
                 "--target", f"127.0.0.1:{self.target_port}",
@@ -100,6 +101,13 @@ class AgentSidecar:
                         log.debug("p2p agent: %s", line)
                         self.status["last"] = line[-200:]
                         tail = (tail + [line[-300:]])[-12:]
+                        # Failures to register make the device unreachable directly: say so in
+                        # the manager log (once per 10 minutes per kind), not only in debug output.
+                        if "上报失败" in line or "Unhandled exception" in line:
+                            kind = line.split("：", 1)[-1][:60]
+                            if time.monotonic() - warned.get(kind, -1e9) > 600:
+                                warned[kind] = time.monotonic()
+                                log.warning("p2p agent: %s", line[-300:])
                 code = await self.process.wait()
                 log.warning("p2p agent exited (%s); last output:\n  %s", code, "\n  ".join(tail))
                 self.status = {"state": "exited", "code": code, "last": self.status.get("last")}

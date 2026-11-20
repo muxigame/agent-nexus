@@ -2,9 +2,16 @@
 
 It serves one viewer per stream that :class:`~agent_nexus.remote_hub.RemoteHub` hands it after
 the ticket check, so it needs no VNC password ("None" security). The screen is captured with
-``mss`` (Windows, X11); changed areas are found with Pillow and sent as Tight/JPEG (noVNC and
-most viewers), or Raw for a viewer without Tight. Input goes in with ``SendInput`` on Windows
-and XTEST on X11 (``python-xlib``); without an input backend the session is view-only.
+``mss`` (Windows, X11). The pointer is never drawn into the picture -- the viewer shows its
+own, local pointer at once, and the server only sends the pointer's *shape* (RFB Cursor
+pseudo-encoding) when it changes on this machine (arrow, I-beam, hand...).
+
+Video: H.264 (RFB encoding 50, noVNC decodes it with WebCodecs -- in hardware) from the first
+encoder that works here: NVENC, Quick Sync, AMF, Media Foundation (Windows), VAAPI (Linux),
+then libx264 -- all low latency (no B-frames, zero-latency tuning), a frame only when the
+screen or the pointer changed. A viewer without H.264 gets Tight/JPEG of the changed area, or
+Raw. Input goes in with ``SendInput`` on Windows and XTEST on X11 (``python-xlib``); without
+an input backend the session is view-only.
 """
 from __future__ import annotations
 
@@ -18,13 +25,20 @@ import sys
 import time
 
 log = logging.getLogger(__name__)
-RAW, TIGHT = 0, 7
+RAW, TIGHT, H264 = 0, 7, 50
 DESKTOP_SIZE = -223
+CURSOR = -239
+#: ContinuousUpdates: the server pushes frames instead of waiting for each request (one fewer
+#: round trip per frame -- the frame rate no longer depends on the network latency)
+CONTINUOUS_UPDATES = -313
 JPEG_QUALITY = {0: 30, 1: 40, 2: 50, 3: 60, 4: 65, 5: 70, 6: 75, 7: 80, 8: 85, 9: 92}
 #: noVNC's quality levels (-32 .. -23 => 0 .. 9)
 QUALITY_BASE = -32
-FRAME_INTERVAL = 1 / 30
-IDLE_POLL = 0.05
+FRAME_INTERVAL = 1 / 60
+IDLE_POLL = 0.016
+#: H.264 bitrate (bits/s) per noVNC quality level 0..9
+H264_BITRATE = {0: 1_500_000, 1: 2_000_000, 2: 3_000_000, 3: 4_000_000, 4: 5_000_000, 5: 6_000_000,
+                6: 8_000_000, 7: 10_000_000, 8: 14_000_000, 9: 20_000_000}
 
 
 def available() -> tuple[bool, str]:
@@ -62,6 +76,213 @@ class Screen:
         from PIL import Image
         shot = self.mss.grab(self.monitor)
         return Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
+
+    def grab_raw(self):
+        """(BGRA bytes, (w, h)) -- comparing bytes is far cheaper than comparing images."""
+        shot = self.mss.grab(self.monitor)
+        return shot.bgra, shot.size
+
+    def cursor(self, known=None):
+        """(key, (hot_x, hot_y), RGBA image) of the pointer's current shape, or None.
+
+        ``key`` changes when the shape does; when it equals ``known`` the image is not read
+        (it costs ~10 ms) and (key, None, None) comes back."""
+        try:
+            if sys.platform == "win32":
+                return _windows_cursor(known)
+            return _x11_cursor(self)
+        except Exception:
+            return None
+
+
+def _windows_cursor(known=None):
+    import ctypes
+    from ctypes import wintypes
+    from PIL import Image
+
+    user32, gdi32 = ctypes.WinDLL("user32"), ctypes.WinDLL("gdi32")
+    # 64-bit handles: every function needs its types declared
+    H = wintypes.HANDLE
+    user32.GetCursorInfo.argtypes = [ctypes.c_void_p]
+    user32.GetIconInfo.argtypes = [H, ctypes.c_void_p]
+    user32.GetDC.argtypes, user32.GetDC.restype = [H], H
+    user32.ReleaseDC.argtypes = [H, H]
+    user32.DrawIconEx.argtypes = [H, ctypes.c_int, ctypes.c_int, H, ctypes.c_int, ctypes.c_int, wintypes.UINT, H, wintypes.UINT]
+    gdi32.GetObjectW.argtypes = [H, ctypes.c_int, ctypes.c_void_p]
+    gdi32.DeleteObject.argtypes = [H]
+    gdi32.CreateCompatibleDC.argtypes, gdi32.CreateCompatibleDC.restype = [H], H
+    gdi32.CreateDIBSection.argtypes = [H, ctypes.c_void_p, wintypes.UINT, ctypes.c_void_p, H, wintypes.DWORD]
+    gdi32.CreateDIBSection.restype = H
+    gdi32.SelectObject.argtypes, gdi32.SelectObject.restype = [H, H], H
+    gdi32.DeleteDC.argtypes = [H]
+
+    class CURSORINFO(ctypes.Structure):
+        _fields_ = [("cbSize", wintypes.DWORD), ("flags", wintypes.DWORD),
+                    ("hCursor", wintypes.HANDLE), ("ptScreenPos", wintypes.POINT)]
+
+    class ICONINFO(ctypes.Structure):
+        _fields_ = [("fIcon", wintypes.BOOL), ("xHotspot", wintypes.DWORD), ("yHotspot", wintypes.DWORD),
+                    ("hbmMask", wintypes.HBITMAP), ("hbmColor", wintypes.HBITMAP)]
+
+    class BITMAP(ctypes.Structure):
+        _fields_ = [("bmType", wintypes.LONG), ("bmWidth", wintypes.LONG), ("bmHeight", wintypes.LONG),
+                    ("bmWidthBytes", wintypes.LONG), ("bmPlanes", wintypes.WORD), ("bmBitsPixel", wintypes.WORD),
+                    ("bmBits", ctypes.c_void_p)]
+
+    class BITMAPINFOHEADER(ctypes.Structure):
+        _fields_ = [("biSize", wintypes.DWORD), ("biWidth", wintypes.LONG), ("biHeight", wintypes.LONG),
+                    ("biPlanes", wintypes.WORD), ("biBitCount", wintypes.WORD), ("biCompression", wintypes.DWORD),
+                    ("biSizeImage", wintypes.DWORD), ("biXPelsPerMeter", wintypes.LONG),
+                    ("biYPelsPerMeter", wintypes.LONG), ("biClrUsed", wintypes.DWORD), ("biClrImportant", wintypes.DWORD)]
+
+    info = CURSORINFO(cbSize=ctypes.sizeof(CURSORINFO))
+    if not user32.GetCursorInfo(ctypes.byref(info)) or not info.flags & 1 or not info.hCursor:
+        return None
+    handle = info.hCursor
+    key = int(handle)
+    if key == known:
+        return key, None, None
+    icon = ICONINFO()
+    if not user32.GetIconInfo(handle, ctypes.byref(icon)):
+        return None
+    try:
+        bitmap = BITMAP()
+        gdi32.GetObjectW(icon.hbmColor or icon.hbmMask, ctypes.sizeof(BITMAP), ctypes.byref(bitmap))
+        width = bitmap.bmWidth
+        height = bitmap.bmHeight if icon.hbmColor else bitmap.bmHeight // 2  # mask-only: AND + XOR halves
+        width, height = max(1, min(width, 256)), max(1, min(height, 256))
+        hot = (int(icon.xHotspot), int(icon.yHotspot))
+    finally:
+        for bm in (icon.hbmMask, icon.hbmColor):
+            if bm:
+                gdi32.DeleteObject(bm)
+
+    # Draw the cursor on black and on white; the difference gives alpha, whatever its format.
+    screen_dc = user32.GetDC(None)
+    dc = gdi32.CreateCompatibleDC(screen_dc)
+    header = BITMAPINFOHEADER(biSize=ctypes.sizeof(BITMAPINFOHEADER), biWidth=width, biHeight=-height,
+                              biPlanes=1, biBitCount=32, biCompression=0)
+    bits = ctypes.c_void_p()
+    dib = gdi32.CreateDIBSection(dc, ctypes.byref(header), 0, ctypes.byref(bits), None, 0)
+    old = gdi32.SelectObject(dc, dib)
+    size = width * height * 4
+    try:
+        planes = []
+        for fill in (0x00, 0xFF):
+            ctypes.memset(bits, fill, size)
+            user32.DrawIconEx(dc, 0, 0, handle, width, height, 0, None, 0x0003)  # DI_NORMAL
+            planes.append(ctypes.string_at(bits, size))
+    finally:
+        gdi32.SelectObject(dc, old)
+        gdi32.DeleteObject(dib)
+        gdi32.DeleteDC(dc)
+        user32.ReleaseDC(None, screen_dc)
+    on_black, on_white = planes
+    rgba = bytearray(size)
+    for i in range(0, size, 4):
+        b0, g0, r0 = on_black[i], on_black[i + 1], on_black[i + 2]
+        alpha = 255 - min(255, max(0, on_white[i + 1] - g0))
+        rgba[i:i + 4] = bytes((r0, g0, b0, alpha))
+    return key, hot, Image.frombytes("RGBA", (width, height), bytes(rgba))
+
+
+def _x11_cursor(screen):
+    from PIL import Image
+    if not hasattr(screen, "_xdisplay"):
+        from Xlib import display
+        screen._xdisplay = display.Display()
+        screen._xdisplay.xfixes_query_version()
+    image = screen._xdisplay.xfixes_get_cursor_image(screen._xdisplay.screen().root)
+    width, height = image.width, image.height
+    data = bytearray()
+    for argb in image.cursor_image[: width * height]:
+        data += bytes(((argb >> 16) & 255, (argb >> 8) & 255, argb & 255, (argb >> 24) & 255))
+    return image.cursor_serial, (image.xhot, image.yhot), Image.frombytes("RGBA", (width, height), bytes(data))
+
+
+class H264Encoder:
+    """PyAV (FFmpeg) H.264, the first encoder that opens here; Annex B access units out."""
+
+    CANDIDATES = {
+        "win32": ("h264_nvenc", "h264_qsv", "h264_amf", "h264_mf", "libx264"),
+        "linux": ("h264_nvenc", "h264_vaapi", "h264_qsv", "libx264"),
+    }
+    OPTIONS = {
+        "h264_nvenc": {"preset": "p1", "tune": "ull", "zerolatency": "1", "rc": "cbr", "delay": "0", "forced-idr": "1"},
+        "h264_qsv": {"preset": "veryfast", "async_depth": "1", "look_ahead": "0", "forced_idr": "1"},
+        "h264_amf": {"usage": "ultralowlatency", "quality": "speed", "rc": "cbr", "forced_idr": "1"},
+        "h264_mf": {"scenario": "display_remoting", "rate_control": "cbr", "hw_encoding": "1"},
+        "h264_vaapi": {"rc_mode": "CBR"},
+        "libx264": {"preset": "ultrafast", "tune": "zerolatency"},
+    }
+
+    def __init__(self, width: int, height: int, bitrate: int):
+        import av
+        self.av = av
+        self.width, self.height = width - width % 2, height - height % 2
+        self.bitrate = bitrate
+        self.context = None
+        self.name = None
+        platform = "win32" if sys.platform == "win32" else "linux"
+        errors = []
+        for name in self.CANDIDATES[platform]:
+            try:
+                self.context = self._open(name)
+                self._probe()
+                # The probe used up the stream's first IDR frame: start the real stream fresh,
+                # so the viewer's decoder gets a key frame first.
+                self.context = self._open(name)
+                self.name = name
+                break
+            except Exception as exc:  # no such GPU / driver: try the next one
+                errors.append(f"{name}: {type(exc).__name__}")
+                self.context = None
+        if self.context is None:
+            raise RuntimeError("no H.264 encoder: " + ", ".join(errors))
+        self.pts = 0
+
+    def _open(self, name: str):
+        context = self.av.CodecContext.create(name, "w")
+        context.width, context.height = self.width, self.height
+        context.pix_fmt = "yuv420p" if name == "libx264" else "nv12"
+        context.time_base = __import__("fractions").Fraction(1, 1000)
+        context.framerate = 60
+        context.bit_rate = self.bitrate
+        context.gop_size = 600
+        context.max_b_frames = 0
+        context.options = dict(self.OPTIONS.get(name, {}))
+        context.open()
+        return context
+
+    def _probe(self) -> None:
+        from PIL import Image
+        frame = self.av.VideoFrame.from_image(Image.new("RGB", (self.width, self.height)))
+        frame = frame.reformat(format=self.context.pix_fmt)
+        frame.pts = 0
+        list(self.context.encode(frame))
+
+    def encode(self, image, keyframe: bool = False) -> bytes:
+        if image.size != (self.width, self.height):
+            image = image.crop((0, 0, self.width, self.height))
+        frame = self.av.VideoFrame.from_image(image).reformat(format=self.context.pix_fmt)
+        self.pts += 16
+        frame.pts = self.pts
+        if keyframe:
+            frame.pict_type = self.av.video.frame.PictureType.I
+        data = b"".join(bytes(packet) for packet in self.context.encode(frame))
+        return data
+
+    def close(self) -> None:
+        with contextlib.suppress(Exception):
+            self.context.close()
+
+
+def h264_available() -> tuple[bool, str]:
+    try:
+        import av  # noqa: F401
+    except ImportError:
+        return False, "PyAV not installed"
+    return True, ""
 
     def close(self):
         with contextlib.suppress(Exception):
@@ -245,6 +466,10 @@ class PixelFormat:
         return Image.merge("RGBA", planes).tobytes()
 
 
+class _NoH264(Exception):
+    pass
+
+
 class Session:
     def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, name: str):
         self.reader, self.writer, self.name = reader, writer, name
@@ -259,6 +484,13 @@ class Session:
         self.pending: asyncio.Event = asyncio.Event()
         self.full = True
         self.previous = None
+        self.encoder: H264Encoder | None = None
+        self.encoder_failed = False
+        self.encoder_quality = None
+        self.last_raw = None
+        self.cursor_key = None
+        self.announced = set()
+        self.continuous = False
 
     async def run(self) -> None:
         loop = asyncio.get_running_loop()
@@ -274,6 +506,8 @@ class Session:
                 with contextlib.suppress(BaseException):
                     await sender
         finally:
+            if self.encoder is not None:
+                self.encoder.close()
             with contextlib.suppress(Exception):
                 await loop.run_in_executor(self.capture, self.screen.close)
             self.capture.shutdown(wait=False)
@@ -315,6 +549,10 @@ class Session:
                 levels = [v for v in values if QUALITY_BASE <= v <= QUALITY_BASE + 9]
                 if levels:
                     self.quality = levels[0] - QUALITY_BASE
+                if CONTINUOUS_UPDATES in values and "continuous" not in self.announced:
+                    self.announced.add("continuous")
+                    self.writer.write(b"\x96")  # EndOfContinuousUpdates: "this server can push"
+                    await self.writer.drain()
             elif kind == 3:  # FramebufferUpdateRequest
                 incremental, *_ = struct.unpack(">BHHHH", await r.readexactly(9))
                 if not incremental:
@@ -328,6 +566,11 @@ class Session:
                 mask, x, y = struct.unpack(">BHH", await r.readexactly(5))
                 if self.input is not None:
                     await asyncio.to_thread(self.input.pointer, mask, x, y)
+            elif kind == 150:  # EnableContinuousUpdates
+                enable, *_ = struct.unpack(">BHHHH", await r.readexactly(9))
+                self.continuous = bool(enable)
+                self.full = self.full or self.continuous
+                self.pending.set()
             elif kind == 6:  # ClientCutText
                 head = await r.readexactly(7)
                 length = struct.unpack(">I", head[3:7])[0]
@@ -337,11 +580,22 @@ class Session:
             else:
                 raise ValueError(f"unknown RFB message {kind}")
 
+    def _want_h264(self) -> bool:
+        return H264 in self.encodings and not self.encoder_failed and h264_available()[0]
+
     async def _updates(self) -> None:
         from PIL import ImageChops
 
         last_sent = 0.0
         while True:
+            # Decide only once the viewer asked: its SetEncodings comes before its first request.
+            await self.pending.wait()
+            if self._want_h264():
+                try:
+                    last_sent = await self._h264_update(last_sent)
+                    continue
+                except _NoH264:
+                    pass
             await self.pending.wait()
             wait = FRAME_INTERVAL - (time.monotonic() - last_sent)
             if wait > 0:
@@ -359,9 +613,89 @@ class Session:
             self.full = False
             self.previous = image
             payload = await asyncio.to_thread(self._rect, image, box)
-            self.writer.write(struct.pack(">BxH", 0, 1) + payload)
+            cursor = await self._cursor_rect()
+            if "jpeg" not in self.announced:
+                self.announced.add("jpeg")
+                log.info("remote desktop: %s (the viewer offered no H.264)", "Tight/JPEG" if TIGHT in self.encodings else "Raw")
+            self.writer.write(struct.pack(">BxH", 0, 2 if cursor else 1) + payload + (cursor or b""))
+            if self.continuous:
+                self.pending.set()
             await self.writer.drain()
             last_sent = time.monotonic()
+
+    async def _h264_update(self, last_sent: float) -> float:
+        """One H.264 access unit for the whole screen, once something changed."""
+        from PIL import Image
+        loop = asyncio.get_running_loop()
+        await self.pending.wait()
+        wait = FRAME_INTERVAL - (time.monotonic() - last_sent)
+        if wait > 0:
+            await asyncio.sleep(wait)
+        if self.encoder is None or self.encoder_quality != self.quality:
+            if self.encoder is not None:
+                self.encoder.close()
+            try:
+                self.encoder = await loop.run_in_executor(
+                    None, H264Encoder, self.screen.width, self.screen.height, H264_BITRATE.get(self.quality, 8_000_000))
+                self.encoder_quality = self.quality
+                self.full = True
+                log.info("remote desktop: H.264 with %s", self.encoder.name)
+            except Exception as exc:
+                log.warning("remote desktop: H.264 unavailable (%s); using JPEG", exc)
+                self.encoder_failed = True
+                self.encoder = None
+                raise _NoH264() from None
+        while True:
+            raw, size = await loop.run_in_executor(self.capture, self.screen.grab_raw)
+            cursor = await self._cursor_rect()
+            if self.full or raw != self.last_raw:
+                break
+            if cursor:  # only the pointer's shape changed
+                if not self.continuous:
+                    self.pending.clear()
+                self.writer.write(struct.pack(">BxH", 0, 1) + cursor)
+                await self.writer.drain()
+                return time.monotonic()
+            await asyncio.sleep(IDLE_POLL)
+        keyframe = self.full
+        self.pending.clear()
+        self.full = False
+        self.last_raw = raw
+
+        def encode():
+            return self.encoder.encode(Image.frombytes("RGB", size, raw, "raw", "BGRX"), keyframe=keyframe)
+
+        data = await loop.run_in_executor(None, encode)
+        flags = 1 if keyframe else 0  # bit 0: reset the decoder context
+        header = struct.pack(">HHHHi", 0, 0, self.encoder.width, self.encoder.height, H264)
+        rects = [header + struct.pack(">II", len(data), flags) + data]
+        if cursor:
+            rects.append(cursor)
+        self.writer.write(struct.pack(">BxH", 0, len(rects)) + b"".join(rects))
+        await self.writer.drain()
+        if self.continuous:
+            self.pending.set()
+        return time.monotonic()
+
+    async def _cursor_rect(self) -> bytes | None:
+        """A Cursor pseudo-rectangle when the pointer's shape changed (and the viewer wants them)."""
+        if CURSOR not in self.encodings:
+            return None
+        shape = await asyncio.get_running_loop().run_in_executor(self.capture, self.screen.cursor, self.cursor_key)
+        if shape is None or shape[0] == self.cursor_key:
+            return None
+        self.cursor_key, (hot_x, hot_y), image = shape
+        width, height = image.size
+        pixels = self.format.raw(image.convert("RGB"))
+        alpha = image.getchannel("A").point(lambda a: 255 if a >= 128 else 0).convert("1")
+        row = (width + 7) // 8
+        mask = bytearray(row * height)
+        data = alpha.load()
+        for y in range(height):
+            for x in range(width):
+                if data[x, y]:
+                    mask[y * row + x // 8] |= 0x80 >> (x % 8)
+        return struct.pack(">HHHHi", hot_x, hot_y, width, height, CURSOR) + pixels + bytes(mask)
 
     def _rect(self, image, box) -> bytes:
         x0, y0, x1, y1 = box

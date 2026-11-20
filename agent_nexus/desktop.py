@@ -135,7 +135,10 @@ def update_status(root: Path) -> dict:
     except (OSError, ValueError):
         config = {}
     mode, warning = update_mode(config if isinstance(config, dict) else {})
-    return {**read_update(root), "mode": mode, "warning": warning, "desktop_app": desktop_app() is not None}
+    from . import linux_update
+    updater = "tauri" if desktop_app() is not None else "deb" if linux_update.supported() else None
+    return {**read_update(root), "mode": mode, "warning": warning, "desktop_app": desktop_app() is not None,
+            "updater": updater}
 
 
 def autostart_enabled() -> bool | None:

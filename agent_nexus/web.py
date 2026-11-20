@@ -591,6 +591,16 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
 
     async def app_update_verb(request: Request) -> JSONResponse:
         verb = "--apply-update" if request.url.path.endswith("/apply") else "--check-update"
+        from . import linux_update
+        if desktop.desktop_app() is None and linux_update.supported():
+            # The Ubuntu package: check through the gateway, install with pkexec apt-get.
+            try:
+                if verb == "--check-update":
+                    return JSONResponse({"started": "check-update",
+                                         **await run_in_threadpool(linux_update.check, sup.cfg.root)})
+                return JSONResponse(await run_in_threadpool(linux_update.apply, sup.cfg.root))
+            except linux_update.UpdateError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=409)
         if verb == "--apply-update" and not desktop.read_update(sup.cfg.root).get("available"):
             return JSONResponse({"error": "no update is known; check for updates first"}, status_code=409)
         if not await run_in_threadpool(desktop.run_verb, verb):

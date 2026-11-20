@@ -75,6 +75,13 @@ punching works where the system has none. MIT, copy: `tools/LICENSE-msquic.txt`.
 
 `third_party/muxi-p2p` (agent and signaling) is Apache-2.0: https://github.com/muxigame/muxi-p2p
 
+## PyAV and FFmpeg (dependency)
+
+The remote desktop encodes H.264 with PyAV (`av`, BSD-3-Clause), whose binary wheels bundle FFmpeg
+(LGPL-2.1+, built with libx264, GPL-2.0+). The hardware encoders (NVENC, Quick Sync, AMF, Media
+Foundation, VAAPI) are used first; FFmpeg's sources are available from https://ffmpeg.org and PyAV's
+wheel build from https://github.com/PyAV-Org/pyav-ffmpeg.
+
 ## mss, python-xlib (dependencies)
 
 Screen capture for the remote desktop uses `mss` (MIT); X11 input on Linux uses `python-xlib` (LGPL-2.1+,

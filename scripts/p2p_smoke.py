@@ -154,20 +154,29 @@ async def browser_check(port: int, beta_id: str, out: Path | None) -> None:
 
     errors: list[str] = []
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(channel="msedge" if sys.platform == "win32" else None, headless=True)
+        # "new" headless is the full browser (WebCodecs H.264 included) without a window
+        browser = await playwright.chromium.launch(channel="msedge" if sys.platform == "win32" else None, headless=False,
+                                                   args=["--headless=new"])
         page = await browser.new_page(viewport={"width": 1280, "height": 800}, color_scheme="dark")
-        page.on("pageerror", lambda exc: errors.append(str(exc)))
-        page.on("console", lambda msg: errors.append(msg.text) if msg.type == "error" else None)
+        page.on("pageerror", lambda exc: (print("pageerror:", str(exc)[:200]), errors.append(str(exc))))
+        page.on("console", lambda msg: (print("console:", msg.type, msg.text[:200]), errors.append(msg.text) if msg.type == "error" else None))
         await page.goto(f"http://127.0.0.1:{port}/#/devices")
         await page.wait_for_selector(f'[data-device="{beta_id}"] a[href="#/desktop/{beta_id}"]', timeout=20000)
         if out:
             out.mkdir(parents=True, exist_ok=True)
             await page.screenshot(path=str(out / "p2p-devices.png"))
+        print("H.264 decode here:", await page.evaluate("import('/local/desktop.js').then(m => m.canDecodeH264())"))
         await page.click(f'[data-device="{beta_id}"] a[href="#/desktop/{beta_id}"]')
         await page.wait_for_selector('.term-status .pill[data-state="online"]', timeout=30000)
         await page.wait_for_timeout(2500)
         size = await page.evaluate("() => { const c = document.querySelector('.desktop-screen canvas'); return c ? [c.width, c.height] : null; }")
         route = await page.inner_text(".term-route")
+        codec = await page.inner_text(".term-toolbar .tag:not(.term-route)")
+        lit = await page.evaluate("""() => { const c = document.querySelector('.desktop-screen canvas');
+            const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data; let n = 0;
+            for (let i = 0; i < d.length; i += 4 * 997) if (d[i] + d[i + 1] + d[i + 2] > 30) n++; return n; }""")
+        print("codec:", codec, "| lit samples:", lit)
+        assert lit > 50, "the desktop picture is blank"
         print("desktop connected:", size, "|", route)
         assert size and size[0] > 100, size
         if out:

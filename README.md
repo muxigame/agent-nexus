@@ -351,13 +351,15 @@ make desktop                  # 先生成内嵌运行包，再构建 artifacts/a
 加入同一个网关的设备组成一个私有网络：**任何一台客户端都可以打开其他设备的终端和远程桌面、吊销或删除它们**，不需要额外的密码。
 
 - **客户端 → 设备**：本机控制台（桌面应用窗口）左侧的 **设备** 页列出网关里的所有设备。
-  - **远程桌面**：查看并控制对方桌面（内置 VNC + noVNC，画质可调、全屏、Ctrl+Alt+Del）。没有桌面的服务器不提供，只有终端。
+  - **远程桌面**：查看并控制对方桌面（内置 VNC + noVNC，画质可调、全屏、Ctrl+Alt+Del）。画面是 H.264：对方用显卡硬件编码（NVENC / Quick Sync / AMF / Media Foundation / VAAPI，都没有时 libx264），这边用 WebCodecs 硬件解码，对方主动推帧（不等每帧往返）；不支持 H.264 的查看端自动改用 JPEG。鼠标是本地的、零延迟，对方的指针形状（箭头、输入光标、手形……）同步过来。没有桌面的服务器不提供，只有终端。
   - **终端**：在窗口里打开对方的 shell（xterm.js，Windows Terminal 风格）；“⋯ → 在本机终端打开”用这台电脑的终端（装了 Windows Terminal 就用它）。Windows 上有 PowerShell 7 / Windows PowerShell / 命令提示符 / Git Bash / WSL；Linux / macOS 上有 bash、zsh、fish 等。终端页下方列出对方的命令行环境（Claude Code、Codex、git、node、python、uv、docker……及版本）。
 - **打洞直连（muxi-p2p）**：终端和远程桌面优先走设备之间的直连——IPv6 / 局域网 / 路由器端口映射，其次 UDP+QUIC 和 TCP 打洞，数据不经过网关；页面上的标签写着实际走的路线。终端在直连失败时自动退回网关中转（标签会写原因）；远程桌面只走直连。
 - **没有桌面的机器**：`agent-nexus term [设备]`（Windows 上 `anx term`），`Ctrl+]` 再按 `q` 退出；`--shells` 列出对方的 shell 和命令行工具。
 - **锁定**：右上角的锁。锁定后这台电脑**不能操作其他设备，但其他设备仍然可以操作它**；锁定密码可选（设置 → 锁定密码）。网关同样拒绝已锁定设备发起的操作。
 
 每台设备的客户端带着 `tools/muxi-p2p-agent`（和 MsQuic），作为后台进程向网关的信令（`/p2p`）登记自己并响应打洞；对方每次连接都要先经网关向这台设备要一张一次性票据（60 秒，只能用一次）。网关在 UDP 45701–45703、TCP 45711–45712 上运行反射器（`gateway.json` 的 `p2p.reflector_hosts` 写网关自己的公网 IP，不要写 CDN 的域名），防火墙需要放行这些端口。Windows 第一次运行直连组件时可能弹出防火墙提示，允许即可（不允许也能打洞，只是少了局域网直连）。
+
+Ubuntu 包在“设置 → 更新”里检查更新（从加入的网关取最新的 `.deb` 和 SHA-256），点更新后用系统的授权窗口（pkexec）安装并自动重启；没有图形界面时给出要在终端里运行的命令。
 
 设备上 `agent-nexus.json` 写 `"terminal": {"enabled": false}` / `"desktop": {"enabled": false}` 就不让别人打开这台的终端 / 桌面。直连和远程桌面需要网关和双方客户端都在 0.5.0 以上。
 

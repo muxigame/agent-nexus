@@ -2,6 +2,39 @@
 import { el, mount, icon, fetchJSON, toast, errorState, pill } from "/ui/ui.js";
 import { osMark } from "/ui/os-icons.js";
 
+export const ENCODING_H264 = 50;
+
+/** WebCodecs can decode H.264 here (hardware where the GPU allows). noVNC's own probe also
+ *  decodes a tiny test frame, which Windows' hardware decoders often refuse -- and then every
+ *  session fell back to JPEG -- so the configuration check is what decides. */
+export async function canDecodeH264() {
+  if (!("VideoDecoder" in window)) return false;
+  for (const hardwareAcceleration of ["prefer-hardware", "no-preference"]) {
+    try {
+      const result = await VideoDecoder.isConfigSupported({ codec: "avc1.42401f", codedWidth: 1920, codedHeight: 1080,
+        optimizeForLatency: true, hardwareAcceleration });
+      if (result.supported) return true;
+    } catch { /* try the next */ }
+  }
+  return false;
+}
+
+/** noVNC with H.264 offered whenever this client can decode it. */
+function withH264(RFB) {
+  return class extends RFB {
+    _sendEncodings() {
+      const original = RFB.messages.clientEncodings;
+      const offer = this.anxH264;
+      RFB.messages.clientEncodings = (sock, encodings) => {
+        if (offer && !encodings.includes(ENCODING_H264)) encodings.splice(1, 0, ENCODING_H264);
+        if (!offer) encodings = encodings.filter((e) => e !== ENCODING_H264);
+        return original.call(RFB.messages, sock, encodings);
+      };
+      try { super._sendEncodings(); } finally { RFB.messages.clientEncodings = original; }
+    }
+  };
+}
+
 export function desktopSocketURL(deviceId, loc = location) {
   const scheme = loc.protocol === "https:" ? "wss" : "ws";
   return `${scheme}://${loc.host}/api/remote/devices/${encodeURIComponent(deviceId)}/desktop/ws`;
@@ -24,12 +57,15 @@ export async function desktopPage(ctx, { params }) {
     if (!device.online) throw new Error(`${device.display_name} 现在不在线`);
     if (!device.desktop) throw new Error(`${device.display_name} 没有可共享的桌面（无桌面的服务器只能用终端），或客户端低于 0.5.0`);
     ({ default: RFB } = await import("/vendor/novnc/core/rfb.js"));
+    RFB = withH264(RFB);
   } catch (error) {
     mount(page, el("div", { class: "page-head" }, el("div", { class: "titles" }, el("h1", {}, "远程桌面"))),
       errorState(error, () => desktopPage(ctx, { params })));
     return;
   }
 
+  let h264 = await canDecodeH264();
+  const codecTag = el("span", { class: "tag", title: "画面编码" });
   const mark = osMark(device.os_family);
   const status = el("span", { class: "term-status" }, pill("connecting", "正在直连"));
   const routeTag = el("span", { class: "tag term-route is-p2p", hidden: true });
@@ -42,7 +78,7 @@ export async function desktopPage(ctx, { params }) {
       mark ? el("span", { class: "avatar os-mark", html: mark.svg, title: mark.label }) : el("span", { class: "avatar" }, icon("monitor", { size: 16 })),
       el("div", { class: "stack", style: { gap: 0, minWidth: 0 } }, el("span", { class: "title truncate" }, device.display_name),
         el("span", { class: "sub mono truncate" }, device.device_id)),
-      status, routeTag),
+      status, routeTag, codecTag),
     el("div", { class: "row", style: { gap: "6px" } }, quality,
       el("button", { class: "btn btn-sm", type: "button", title: "发送 Ctrl+Alt+Del", onclick: () => rfb?.sendCtrlAltDel() }, "Ctrl+Alt+Del"),
       el("button", { class: "btn btn-sm", type: "button", title: "重新连接", onclick: () => connect() }, icon("refresh-cw", { size: 14 }), "重连"),
@@ -70,14 +106,24 @@ export async function desktopPage(ctx, { params }) {
       return;
     }
     rfb = new RFB(screen, desktopSocketURL(deviceId), { wsProtocols: ["binary"] });
+    rfb.anxH264 = h264;
+    codecTag.textContent = h264 ? "H.264 硬件解码" : "JPEG";
+    const connectedAt = { time: 0 };
     rfb.scaleViewport = true;
     rfb.resizeSession = false;
     rfb.qualityLevel = Number(quality.value);
     rfb.compressionLevel = 2;
     rfb.focusOnClick = true;
-    rfb.addEventListener("connect", () => { setStatus("online", "已连接"); rfb.focus(); });
+    rfb.addEventListener("connect", () => { connectedAt.time = Date.now(); setStatus("online", "已连接"); rfb.focus(); });
     rfb.addEventListener("disconnect", (event) => {
       if (leaving) return;
+      // A decoder that cannot handle the stream fails right away: retry once with JPEG.
+      if (h264 && !event.detail?.clean && connectedAt.time && Date.now() - connectedAt.time < 8000) {
+        h264 = false;
+        toast("这台电脑解不了 H.264 画面，已改用 JPEG", { type: "warn" });
+        connect();
+        return;
+      }
       setStatus("offline", event.detail?.clean ? "已断开" : "连接中断");
     });
     rfb.addEventListener("securityfailure", (event) => toast(`远程桌面被拒绝：${event.detail?.reason || ""}`, { type: "bad" }));

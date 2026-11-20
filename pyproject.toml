@@ -23,6 +23,8 @@ dependencies = [
     "muxi-p2p-signaling",
     # remote desktop (agent_nexus/vnc.py): screen capture; X11 input on Linux
     "mss>=9.0",
+    # remote desktop video: H.264 with NVENC / Quick Sync / AMF / Media Foundation / VAAPI / libx264
+    "av>=14",
     "python-xlib>=0.33; sys_platform == 'linux'",
 ]
 

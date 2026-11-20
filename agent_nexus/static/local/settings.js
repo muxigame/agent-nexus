@@ -1,5 +1,5 @@
 // 本机 · 设置 (docs/ui-spec.md §4.5): autostart, updates, this machine, appearance, quit.
-import { el, mount, icon, fetchJSON, toast, confirmDialog, relTime, tokenField, setTheme, errorState } from "/ui/ui.js";
+import { el, mount, icon, fetchJSON, toast, confirmDialog, relTime, tokenField, setTheme, errorState, modal } from "/ui/ui.js";
 import { lockPasswordCard } from "/local/devices.js";
 
 function card(title, ...rows) {
@@ -35,7 +35,7 @@ export async function settingsPage(ctx) {
 
   const updateArea = el("div", { class: "row wrap" });
   function renderUpdate(data) {
-    const check = el("button", { class: "btn", type: "button", disabled: !data.desktop_app, onclick: async () => {
+    const check = el("button", { class: "btn", type: "button", disabled: !(data.desktop_app || data.updater), onclick: async () => {
       check.disabled = true;
       mount(check, el("span", { class: "spinner" }), "正在检查…");
       try {
@@ -52,11 +52,22 @@ export async function settingsPage(ctx) {
     } }, icon("refresh-cw", { size: 16 }), "检查更新");
     mount(updateArea,
       data.available ? el("button", { class: "btn btn-primary", type: "button", onclick: async () => {
-        try { await fetchJSON("/api/app/update/apply", { method: "POST" }); toast("正在安装更新，完成后会自动重启"); } catch { /* toasted */ }
+        try {
+          const result = await fetchJSON("/api/app/update/apply", { method: "POST" });
+          if (result.manual) {
+            modal({ title: result.cancelled ? "没有授权安装" : "请在终端里安装", size: "sm",
+              body: el("div", { class: "stack" },
+                el("p", { class: "muted small" }, result.cancelled ? "安装需要管理员授权。也可以在终端里运行：" : "这台电脑没有图形授权窗口，请在终端里运行："),
+                tokenField(result.manual)),
+              actions: [{ label: "知道了", variant: "primary" }] });
+          } else {
+            toast(data.updater === "deb" ? "更新已安装，正在重启 Agent Nexus" : "正在安装更新，完成后会自动重启");
+          }
+        } catch { /* toasted */ }
       } }, icon("download", { size: 16 }), `更新到 v${data.version}`) : null,
       check);
     updateText.textContent = data.available ? `v${data.version} 可用（当前 v${data.current}）` :
-      `当前 v${data.current} · ${data.checked_at ? `上次检查 ${relTime(data.checked_at)}` : "还没有检查过"}${data.desktop_app ? "" : " · 不是从桌面应用启动的，无法在这里更新"}`;
+      `当前 v${data.current} · ${data.checked_at ? `上次检查 ${relTime(data.checked_at)}` : "还没有检查过"}${data.desktop_app || data.updater ? "" : " · 不是从桌面应用启动的，无法在这里更新"}${data.error ? ` · ${data.error}` : ""}`;
   }
   const updateText = el("span");
 
