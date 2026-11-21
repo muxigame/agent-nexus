@@ -41,7 +41,9 @@ docker run --rm -v "$(dirname "$deb"):/pkg:ro" -e DEB="/pkg/$(basename "$deb")" 
 
 echo "--- 2. the system service: set up by postinst, join a gateway"
 sudo apt-get update -qq
-sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends "$deb" >/dev/null
+# --reinstall: the offline check may have installed this version already (without the setup),
+# and only a real configure runs postinst.
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --reinstall --no-install-recommends "$deb" >/dev/null
 for _ in $(seq 1 300); do
     [ -f /var/lib/agent-nexus/.system ] && [ "$(systemctl is-active agent-nexus.service)" = "active" ] && break
     sleep 1
