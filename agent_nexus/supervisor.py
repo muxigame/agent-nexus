@@ -257,10 +257,11 @@ def resolve_executable(command: str, env: dict[str, str], root: Path) -> str:
     return shutil.which(command, path=env.get("PATH")) or command
 
 
-def _spawn(argv: list[str], cwd: Path, env: dict[str, str], log) -> subprocess.Popen:
+def _spawn(argv: list[str], cwd: Path, env: dict[str, str], log, run_as: dict | None = None) -> subprocess.Popen:
     common = dict(cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
     if os.name != "nt":
-        return subprocess.Popen(argv, start_new_session=True, **common)
+        # run_as: the 执行账户 (accounts.mcp) when the core runs as root.
+        return subprocess.Popen(argv, start_new_session=True, **common, **(run_as or {}))
     flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
     holder = winspawn.holder_pid()
     if holder is not None:
@@ -382,6 +383,15 @@ class Supervisor:
                 except Exception as exc:  # OSError, ValueError, mcpkit ConfigError from protect()
                     raise SupervisorError(f"{name}: cannot prepare the legacy config root: {exc}") from None
                 env["MCPM_ROOT"] = str(shadow)
+            # 执行账户: as root, plugins run as accounts.mcp (agent_nexus/accounts.py).
+            from . import accounts
+            account = accounts.effective(self.cfg.root, "mcp")
+            if account is not None:
+                argv = accounts.direct_command(argv, cwd)
+                env = account.env(env)
+                accounts.hand_over(account, self.cfg.root / "plugin-data" / name, Path(spec.dir) / "logs",
+                                   self.cfg.root / "secrets" / name)
+                accounts.traversable(self.cfg.root / "secrets")
             exe = resolve_executable(argv[0], env, self.cfg.root)
             if not Path(exe).exists():
                 raise SupervisorError(f"command not found: {argv[0]}")
@@ -394,7 +404,8 @@ class Supervisor:
                 stamp = time.strftime("%Y-%m-%d %H:%M:%S")
                 log.write(f"\n===== mcpm start {stamp} :: {' '.join(argv)}  (cwd {cwd})\n".encode("utf-8"))
                 log.flush()
-                proc = _spawn([exe, *argv[1:]], cwd, env, log)
+                switch = {"run_as": account.popen_args()} if account is not None else {}
+                proc = _spawn([exe, *argv[1:]], cwd, env, log, **switch)
 
             try:
                 create_time = psutil.Process(proc.pid).create_time()

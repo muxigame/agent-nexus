@@ -81,7 +81,15 @@ def _git_bash() -> str | None:
     return next((str(path) for path in candidates if path.is_file()), None)
 
 
-def detect_shells() -> list[Shell]:
+def _current_user() -> str:
+    import getpass
+    try:
+        return getpass.getuser()
+    except Exception:
+        return ""
+
+
+def detect_shells(preferred: str | None = None) -> list[Shell]:
     shells: list[Shell] = []
     if WINDOWS:
         pwsh = shutil.which("pwsh")
@@ -99,7 +107,7 @@ def detect_shells() -> list[Shell]:
                 shells.append(Shell(f"wsl-{distro}", f"WSL · {distro}", ["wsl.exe", "-d", distro]))
     else:
         seen = set()
-        preferred = os.environ.get("SHELL") or ""
+        preferred = preferred or os.environ.get("SHELL") or ""
         paths = [preferred] if preferred else []
         try:
             paths += [line.strip() for line in Path("/etc/shells").read_text().splitlines()
@@ -208,7 +216,8 @@ def detect_clis() -> list[dict]:
 class _Pty:
     """One pseudo-terminal running ``argv``. ``on_data`` gets output bytes on the event loop."""
 
-    def __init__(self, argv: list[str], cols: int, rows: int, cwd: str | None, env: dict, loop, on_data, on_exit):
+    def __init__(self, argv: list[str], cols: int, rows: int, cwd: str | None, env: dict, loop, on_data, on_exit,
+                 run_as: dict | None = None):
         self.loop, self.on_data, self.on_exit = loop, on_data, on_exit
         self.exit_code: int | None = None
         if WINDOWS:
@@ -227,8 +236,11 @@ class _Pty:
             def controlling_tty():  # runs after setsid (start_new_session)
                 fcntl.ioctl(0, termios.TIOCSCTTY, 0)
 
+            if run_as:  # the account must own its terminal, or the shell cannot set its modes
+                os.fchown(slave, run_as["user"], -1)
             self.proc = subprocess.Popen(argv, stdin=slave, stdout=slave, stderr=slave, cwd=cwd, env=env,
-                                         start_new_session=True, preexec_fn=controlling_tty, close_fds=True)
+                                         start_new_session=True, preexec_fn=controlling_tty, close_fds=True,
+                                         **(run_as or {}))
             os.close(slave)
             self.fd = master
             os.set_blocking(master, False)
@@ -364,16 +376,21 @@ def _dimension(value: Any, default: int, low: int, high: int) -> int:
 
 
 class Terminals:
-    def __init__(self, *, home: str | None = None):
+    def __init__(self, *, home: str | None = None, account=None):
         self.sessions: dict[str, _Session] = {}
         self.home = home or str(Path.home())
+        #: () -> accounts.Account | None: the 执行账户 for terminals (as root on Linux)
+        self.account = account or (lambda: None)
         self._shells: list[Shell] | None = None
         self._clis: tuple[float, list[dict]] | None = None
 
     # -- discovery
     async def shells(self) -> list[Shell]:
-        if self._shells is None:
-            self._shells = await asyncio.to_thread(detect_shells)
+        account = self.account()
+        key = account.name if account is not None else None
+        if self._shells is None or getattr(self, "_shells_for", None) != key:
+            self._shells = await asyncio.to_thread(detect_shells, account.shell if account is not None else None)
+            self._shells_for = key
         return self._shells
 
     async def info(self, params: dict) -> dict:
@@ -383,8 +400,10 @@ class Terminals:
         shells = await self.shells()
         if refresh or self._clis is None or time.monotonic() - self._clis[0] > 600:
             self._clis = (time.monotonic(), await asyncio.to_thread(detect_clis))
+        account = self.account()
         return {"shells": [shell.view() for shell in shells], "clis": self._clis[1],
-                "platform": sys.platform, "sessions": len(self.sessions), "max_sessions": MAX_SESSIONS}
+                "platform": sys.platform, "sessions": len(self.sessions), "max_sessions": MAX_SESSIONS,
+                "account": account.name if account is not None else _current_user()}
 
     # -- lifecycle
     def _reap(self) -> None:
@@ -420,11 +439,15 @@ class Terminals:
             raise TermError(f"unknown shell {wanted!r}")
         cols = _dimension(params.get("cols"), 120, 20, 500)
         rows = _dimension(params.get("rows"), 32, 5, 200)
+        account = self.account()
+        home = account.home if account is not None else self.home
         cwd = params.get("cwd")
-        cwd = cwd if isinstance(cwd, str) and cwd and os.path.isdir(cwd) else self.home
-        env = dict(os.environ)
+        cwd = cwd if isinstance(cwd, str) and cwd and os.path.isdir(cwd) else home
+        env = account.env() if account is not None else dict(os.environ)
         env.update(TERM="xterm-256color", COLORTERM="truecolor", AGENT_NEXUS_TERMINAL="1")
-        env.pop("VIRTUAL_ENV", None)
+        for key in ("VIRTUAL_ENV", "ANX_ROOT", "MCPM_ROOT", "UV_CACHE_DIR", "UV_PYTHON_INSTALL_DIR", "UV_PYTHON_PREFERENCE"):
+            env.pop(key, None)
+        run_as = account.popen_args() if account is not None else None
         session = _Session(sid=uuid4().hex, shell=shell)
         loop = asyncio.get_running_loop()
 
@@ -443,7 +466,7 @@ class Terminals:
 
         try:
             session.pty = await asyncio.to_thread(_Pty, shell.argv, cols, rows, cwd, env, loop, on_data, on_exit) \
-                if WINDOWS else _Pty(shell.argv, cols, rows, cwd, env, loop, on_data, on_exit)
+                if WINDOWS else _Pty(shell.argv, cols, rows, cwd, env, loop, on_data, on_exit, run_as)
         except (OSError, ImportError) as exc:
             raise TermError(f"could not start {shell.name}: {exc}") from exc
         self.sessions[session.sid] = session

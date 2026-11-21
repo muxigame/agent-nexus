@@ -1,0 +1,29 @@
+#!/bin/sh
+# Set up (or update) the system service once apt is done: the launcher waits for dpkg's lock,
+# moves a per-user root to /var/lib/agent-nexus the first time, and restarts agent-nexus.service.
+set -e
+if [ "$1" = "configure" ]; then
+    if [ -n "${ANX_NO_SYSTEM_SETUP:-}" ]; then
+        echo "agent-nexus: ANX_NO_SYSTEM_SETUP is set; the system service was not set up"
+    elif [ -d /run/systemd/system ] && command -v systemd-run >/dev/null 2>&1; then
+        user="${SUDO_USER:-}"
+        if [ -z "$user" ] && [ -n "${PKEXEC_UID:-}" ]; then
+            user="$(getent passwd "$PKEXEC_UID" | cut -d: -f1 || true)"
+        fi
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        if [ -n "$user" ] && [ "$user" != "root" ]; then
+            set -- --user "$user"
+        else
+            set --
+        fi
+        if systemd-run --quiet --unit="agent-nexus-setup-$(date +%s)" --on-active=5 \
+                /usr/bin/python3 /usr/lib/agent-nexus/ubuntu_launcher.py --setup-system "$@" >/dev/null 2>&1; then
+            echo "agent-nexus: the system service agent-nexus.service starts in a few seconds"
+        else
+            echo "agent-nexus: run 'sudo agent-nexus --setup-system' to start the system service"
+        fi
+    else
+        echo "agent-nexus: no systemd here; run 'agent-nexus --serve' to start the manager"
+    fi
+fi
+exit 0

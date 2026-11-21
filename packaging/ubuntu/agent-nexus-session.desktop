@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Agent Nexus session helper
+Name[zh_CN]=Agent Nexus 会话助手
+Comment=Lets the Agent Nexus service share this desktop for remote control
+Exec=/usr/bin/agent-nexus session
+Icon=agent-nexus
+NoDisplay=true
+Terminal=false
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=3

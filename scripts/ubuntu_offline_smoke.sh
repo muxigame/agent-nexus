@@ -13,7 +13,8 @@ set -euo pipefail
 if [ "${1:-}" != "--offline-run" ]; then
     deb="$(readlink -f "$1")"
     sudo apt-get update -qq
-    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends "$deb" faketime
+    # The check runs its own manager on 8399: keep the package's system service out of the way.
+    sudo ANX_NO_SYSTEM_SETUP=1 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends "$deb" faketime
     # libfaketime only reaches dynamically linked programs: make sure the bundled uv is one.
     ldd /usr/lib/agent-nexus/runtime/tools/uv >/dev/null 2>&1 \
         || { echo "error: the bundled uv is static; faketime cannot age its cache" >&2; exit 2; }

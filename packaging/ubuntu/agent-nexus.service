@@ -1,0 +1,20 @@
+[Unit]
+Description=Agent Nexus core: gateway link, updates, P2P and the MCP plugins
+Documentation=https://github.com/muxigame/agent-nexus
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/lib/agent-nexus/ubuntu_launcher.py --serve
+Environment=ANX_ROOT=/var/lib/agent-nexus
+Environment=ANX_LOG_STDIO=1
+StandardOutput=journal
+StandardError=journal
+KillMode=mixed
+TimeoutStopSec=30
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

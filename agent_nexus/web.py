@@ -167,6 +167,11 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
         tasks.append(asyncio.create_task(auto_update.loop(sup.cfg.root)))
         if lifecycle is not None:
             tasks.append(asyncio.create_task(lifecycle.beat_loop()))
+        if p2p_state.get("sessions") is not None:
+            try:
+                await p2p_state["sessions"].start()
+            except OSError as exc:
+                log.warning("session helpers unavailable: %s", exc)
         try:
             yield
         finally:
@@ -186,6 +191,9 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
             if p2p_state.get("hub") is not None:
                 with contextlib.suppress(Exception):
                     await p2p_state["hub"].close()
+            if p2p_state.get("sessions") is not None:
+                with contextlib.suppress(Exception):
+                    await p2p_state["sessions"].stop()
 
     def cloud_view(info: dict) -> dict:
         """``GET /api/cloud`` (docs/ui-spec.md §4.3): the live link plus what is configured."""
@@ -301,6 +309,33 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
             return lock_error(exc)
         await report_lock()
         return JSONResponse(state)
+
+    # -- 执行账户: who plugins and remote terminals run as, when the core is root (accounts.py) --
+    async def accounts_api(request: Request) -> JSONResponse:
+        from . import accounts as anx_accounts
+        if request.method == "PUT":
+            if not anx_accounts.switching_supported():
+                return JSONResponse({"error": "只有以系统服务（root）运行的 Linux 核心可以切换执行账户"}, status_code=409)
+            body = await json_body(request) or {}
+            changes = {key: body[key] for key in ("default", *anx_accounts.PURPOSES) if key in body}
+            try:
+                before = anx_accounts.configured(sup.cfg.root)
+                after = await run_in_threadpool(anx_accounts.save, sup.cfg.root, changes)
+            except ValueError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=400)
+            if before.get("mcp") != after.get("mcp"):
+                # Running plugins move to the new account now.
+                def restart_running():
+                    for name in list(sup.specs):
+                        try:
+                            if sup._alive(sup.rt[name]):
+                                sup.restart(name)
+                        except Exception as exc:  # one plugin failing must not stop the rest
+                            log.warning("restart %s after the account change: %s", name, exc)
+                await run_in_threadpool(restart_running)
+        return JSONResponse({"supported": anx_accounts.switching_supported(),
+                             "accounts": anx_accounts.configured(sup.cfg.root),
+                             "users": await run_in_threadpool(anx_accounts.local_users)})
 
     async def remote_terminal_info(request: Request) -> JSONResponse:
         try:
@@ -703,7 +738,8 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
     from . import terminal as anx_terminal
 
     if getattr(sup.cfg, "terminal", True) and anx_terminal.available():
-        terminals = anx_terminal.Terminals()
+        from . import accounts as anx_accounts
+        terminals = anx_terminal.Terminals(account=lambda: anx_accounts.effective(sup.cfg.root, "terminal"))
         hub.handlers.update(terminals.handlers())
         hub.extra_features = (*hub.extra_features, anx_terminal.FEATURE)
 
@@ -713,11 +749,18 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
     from .remote_hub import FEATURE as REMOTE_HUB_FEATURE, RemoteHub
 
     p2p_exe = p2p_mod.binary(sup.cfg.root)
-    p2p_state: dict[str, Any] = {"config": None, "sidecar": None, "connector": None, "hub": None}
+    p2p_state: dict[str, Any] = {"config": None, "sidecar": None, "connector": None, "hub": None, "sessions": None}
     if p2p_exe and getattr(sup.cfg, "terminal", True) and anx_terminal.available():
         from . import vnc
         desktop_ok, desktop_why = vnc.available()
-        desktop_service = vnc.DesktopService(joining.local_hostname()) if desktop_ok and getattr(sup.cfg, "desktop", True) else None
+        from . import session_helper
+        desktop_service = None
+        if getattr(sup.cfg, "desktop", True):
+            if session_helper.supported() and session_helper.graphical_target():
+                # The core is the root system service: the person's own session shares the screen.
+                desktop_service = p2p_state["sessions"] = session_helper.SessionRegistry(root=sup.cfg.root)
+            elif desktop_ok:
+                desktop_service = vnc.DesktopService(joining.local_hostname())
         if desktop_service is None:
             log.info("remote desktop not offered here: %s", desktop_why or "turned off")
         remote_hub = RemoteHub(terminals, desktop=desktop_service)
@@ -1078,6 +1121,7 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
     from starlette.routing import WebSocketRoute
     routes += [
         Route("/api/lock", lock_api, methods=["GET", "POST"]),
+        Route("/api/accounts", accounts_api, methods=["GET", "PUT"]),
         Route("/api/lock/password", lock_api, methods=["PUT"]),
         Route("/api/remote/devices/{device_id}/terminal", remote_terminal_info),
         Route("/api/remote/devices/{device_id}/terminal/external", remote_terminal_external, methods=["POST"]),

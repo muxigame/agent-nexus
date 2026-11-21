@@ -11,6 +11,14 @@ headless commands instead of failing:
     agent-nexus term [device]          remote terminal on another device of the gateway
     agent-nexus anx <args>             any `anx` command (status, leave, plugin...)
     agent-nexus --serve                run the manager in the foreground
+
+System mode (a package with systemd): like Clash's service and its window, the core -- the
+gateway link, updates, P2P, every plugin -- is the root system service ``agent-nexus.service``
+with its root in /var/lib/agent-nexus; what people see is user-level: this GTK window, and the
+session helper (``agent-nexus session``, XDG autostart) that shares the logged-in desktop for
+remote control. The package's postinst runs ``--setup-system``, which moves an existing per-user
+root there once and retires the old user unit. Plugins and remote terminals then run as the
+执行账户 (``accounts`` in agent-nexus.json, agent_nexus/accounts.py), not as root.
 """
 import argparse
 import hashlib
@@ -26,6 +34,10 @@ import urllib.request
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+#: System mode: the core as a root system service (see the module docstring).
+SYSTEM_ROOT = Path(os.environ.get("ANX_SYSTEM_ROOT") or "/var/lib/agent-nexus")
+SYSTEM_UNIT_FILE = Path(os.environ.get("ANX_SYSTEM_UNIT_FILE") or "/usr/lib/systemd/system/agent-nexus.service")
+SYSTEM_MARKER = ".system"
 SOURCE = HERE / "runtime"
 CONFIG_NAMES = ("agent-nexus.json", "mcp-manager.json")
 UNIT = "agent-nexus.service"
@@ -42,8 +54,29 @@ def _resolve_root():
     explicit = os.environ.get("ANX_ROOT") or os.environ.get("MCPM_ROOT")
     if explicit:
         return Path(explicit).expanduser().resolve()
+    if system_mode():
+        return SYSTEM_ROOT
     data = Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local/share")))
     return (data / "agent-nexus").expanduser().resolve()
+
+
+def system_mode():
+    """The package's system service is installed and set up (``--setup-system`` ran)."""
+    return SYSTEM_UNIT_FILE.is_file() and (SYSTEM_ROOT / SYSTEM_MARKER).is_file()
+
+
+def _is_root():
+    return hasattr(os, "geteuid") and os.geteuid() == 0
+
+
+def _is_system_root(root):
+    return Path(root).resolve() == SYSTEM_ROOT.resolve()
+
+
+def _legacy_root_path(root):
+    """``~/.local/share/agent-nexus``: a per-user root from before the system service."""
+    root = Path(root)
+    return root.name == "agent-nexus" and root.parent.name == "share" and root.parent.parent.name == ".local"
 
 
 def _has_config(directory):
@@ -78,7 +111,16 @@ def _remove(path):
 
 
 def prepare():
+    if _is_system_root(ROOT) and not _is_root():
+        return  # the system service keeps its runtime itself; nothing to write as a user
     ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if _is_system_root(ROOT):
+        # Readable by the accounts it runs things as (plugins, the session helper); what is
+        # private stays private: secrets/ (owner-only, or traverse-only, see accounts.py), .anx/.
+        ROOT.chmod(0o755)
+        for private in ("secrets", ".anx", ".private"):
+            if (ROOT / private).is_dir() and (ROOT / private).stat().st_mode & 0o077 not in (0, 0o011):
+                (ROOT / private).chmod(0o700)
     version = hashlib.sha256((SOURCE / "SHA256.json").read_bytes()).hexdigest()
     if (ROOT / ".installed-version").exists() and (ROOT / ".installed-version").read_text() == version and (ROOT / "tools/uv").is_file() and (ROOT / "agent_nexus/cli.py").is_file():
         return
@@ -206,6 +248,12 @@ def runtime_env():
 
 
 def serve():
+    if system_mode() and not _is_system_root(ROOT) and _legacy_root_path(ROOT):
+        # The old per-user unit after the move to the system service: step aside for good.
+        print("agent-nexus: this user service was replaced by the system service agent-nexus.service; "
+              "disabling it", file=sys.stderr)
+        subprocess.run(["systemctl", "--user", "disable", UNIT], capture_output=True)
+        return 0
     prepare()
     for key, value in runtime_env().items():
         os.environ.setdefault(key, value)
@@ -279,6 +327,23 @@ HEADLESS_HELP = """Agent Nexus（无桌面模式）
 """
 
 
+SYSTEM_HELP = """Agent Nexus（系统服务模式：核心以 root 运行在 agent-nexus.service，根目录 /var/lib/agent-nexus）
+
+  sudo agent-nexus join <邀请码>        用邀请码加入网关（加入后自动重启核心服务）
+  agent-nexus service status            服务状态和云端连接
+  agent-nexus service logs [-f]         最近的日志（-f 持续输出）
+  sudo agent-nexus service restart      重启服务
+  sudo agent-nexus service disable      停止并取消自启
+  sudo agent-nexus term [设备]          打开网关里另一台设备的远程终端
+  sudo agent-nexus anx <参数>           其他 anx 命令，例如 anx status、anx leave、anx plugin list
+
+插件和远程终端以“执行账户”运行（控制台 设置 → 执行账户）。
+本机控制台在 http://127.0.0.1:8399 ；在自己电脑上执行
+  ssh -L 8399:127.0.0.1:8399 <用户>@<服务器>
+后即可在浏览器打开。
+"""
+
+
 class HeadlessError(Exception):
     pass
 
@@ -289,10 +354,13 @@ def _user():
 
 
 def _systemctl(*args, check=True):
+    scope = [] if system_mode() else ["--user"]
     try:
-        result = subprocess.run(["systemctl", "--user", *args], capture_output=True, text=True)
+        result = subprocess.run(["systemctl", *scope, *args], capture_output=True, text=True)
     except FileNotFoundError:
         raise HeadlessError("找不到 systemctl：这台机器没有 systemd，请用 agent-nexus --serve 在前台运行") from None
+    if check and result.returncode and not scope:
+        raise HeadlessError("systemctl %s 失败：%s" % (" ".join(args), (result.stderr or result.stdout or "").strip()))
     if check and result.returncode:
         detail = (result.stderr or result.stdout or "").strip()
         if "bus" in detail.lower() or "XDG_RUNTIME_DIR" in detail:
@@ -332,7 +400,18 @@ def wait_ready(timeout=300):
     raise HeadlessError("管理器没有启动；查看日志：agent-nexus service logs")
 
 
+def as_root(argv):
+    """System mode: the core's files belong to root; run this command again with sudo."""
+    if not system_mode() or _is_root():
+        return
+    if not shutil.which("sudo"):
+        raise HeadlessError("这个命令需要 root：请用 root 运行 agent-nexus %s" % " ".join(argv))
+    os.execvp("sudo", ["sudo", "/usr/bin/python3", str(HERE / "ubuntu_launcher.py"), *argv])
+
+
 def service(action, options=()):
+    if system_mode():
+        return system_service(action, options)
     if action == "enable":
         prepare()
         install_unit()
@@ -370,6 +449,208 @@ def service(action, options=()):
     raise HeadlessError("未知的 service 操作：%s（enable / restart / disable / status / logs）" % action)
 
 
+def system_service(action, options=()):
+    """``agent-nexus service ...`` against the system service (system mode)."""
+    if action in ("enable", "restart"):
+        _systemctl("enable", UNIT)
+        _systemctl("restart", UNIT)
+        print("系统服务 %s 已启用并正在运行（开机自启，不依赖任何人登录）。" % UNIT)
+        return wait_ready()
+    if action == "disable":
+        _systemctl("disable", "--now", UNIT, check=False)
+        print("已停止并取消自启：%s（再次启用：sudo agent-nexus service enable）" % UNIT)
+        return 0
+    if action == "status":
+        active = _systemctl("is-active", UNIT, check=False).stdout.strip() or "unknown"
+        enabled = _systemctl("is-enabled", UNIT, check=False).stdout.strip() or "not-found"
+        print("系统服务：%s（%s）· 根目录 %s" % (active, enabled, ROOT))
+        try:
+            info = api("/api/cloud")
+        except Exception:
+            print("管理器：未运行")
+            return 0 if active == "active" else 3
+        print("管理器：运行中 %s" % base_url())
+        hub = info.get("hub")
+        print("网关：%s%s" % (info.get("state"), "（%s）" % hub if hub else ""))
+        return 0
+    if action == "logs":
+        command = ["journalctl", "-u", UNIT, "-n", "200", "--no-pager"]
+        if "-f" in options:
+            command.append("-f")
+        return subprocess.call(command)
+    raise HeadlessError("未知的 service 操作：%s（enable / restart / disable / status / logs）" % action)
+
+
+# -- system mode: the session helper and the one-time setup ----------------------------------
+
+def session():
+    """``agent-nexus session``: the desktop session's helper (XDG autostart; system mode only)."""
+    if not system_mode():
+        return 0  # a per-user manager shares its own display itself
+    if _is_root():
+        raise HeadlessError("agent-nexus session 在桌面会话里以登录用户运行，不要用 root")
+    python = ROOT / ".venv/bin/python"
+    if not python.exists():
+        raise HeadlessError("系统服务的运行环境还没准备好（%s）" % python)
+    env = {key: value for key, value in os.environ.items() if key not in ("VIRTUAL_ENV", "MCPM_ROOT", "PYTHONHOME")}
+    env.update(ANX_ROOT=str(ROOT), PYTHONUTF8="1", PYTHONDONTWRITEBYTECODE="1")
+    os.chdir(ROOT)
+    os.execve(str(python), [str(python), "-m", "agent_nexus.session_helper"], env)
+
+
+def _wait_dpkg(timeout=900):
+    """postinst runs us while dpkg still holds its lock: wait for the whole apt run to end."""
+    import fcntl
+    deadline = time.monotonic() + timeout
+    for name in ("/var/lib/dpkg/lock-frontend", "/var/lib/dpkg/lock"):
+        while time.monotonic() < deadline:
+            try:
+                fd = os.open(name, os.O_RDWR)
+            except OSError:
+                break
+            try:
+                fcntl.lockf(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.lockf(fd, fcntl.LOCK_UN)
+                break
+            except OSError:
+                time.sleep(1)
+            finally:
+                os.close(fd)
+
+
+def _legacy_roots():
+    """(root, owner) of every per-user root on this machine, root's own included."""
+    import pwd
+    found, seen = [], set()
+    for entry in pwd.getpwall():
+        candidate = Path(entry.pw_dir or "/nonexistent") / ".local/share/agent-nexus"
+        try:
+            if candidate in seen or not _has_config(candidate):
+                continue
+            seen.add(candidate)
+            owner = pwd.getpwuid(candidate.stat().st_uid).pw_name
+        except (OSError, KeyError):
+            continue
+        found.append((candidate, owner))
+    return found
+
+
+def _joined(root):
+    return (root / "secrets/cloud/device-token").is_file()
+
+
+def _pick_legacy(roots, install_user):
+    """The root to move: the installing user's, else a joined one, else the newest."""
+    def config_time(item):
+        try:
+            return max((item[0] / name).stat().st_mtime for name in CONFIG_NAMES if (item[0] / name).is_file())
+        except ValueError:
+            return 0
+    ranked = sorted(roots, key=lambda item: (item[1] == install_user, _joined(item[0]), config_time(item)), reverse=True)
+    return ranked[0] if ranked else None
+
+
+def _retire_legacy(root, owner):
+    """Stop and disable the old user unit of ``owner`` (and its manager, if it still answers)."""
+    import pwd
+    subprocess.run(["systemctl", "--user", "-M", owner + "@", "disable", "--now", UNIT], capture_output=True, timeout=60)
+    try:
+        home = Path(pwd.getpwnam(owner).pw_dir)
+    except KeyError:
+        return
+    units = home / ".config/systemd/user"
+    wants = units / "default.target.wants" / UNIT
+    if wants.is_symlink() or wants.exists():
+        wants.unlink()
+    if (units / UNIT).is_file():
+        (units / UNIT).replace(units / (UNIT + ".migrated"))
+    # A desktop shell started without the unit (older versions): ask the manager itself.
+    try:
+        config = json.loads(next(root / name for name in CONFIG_NAMES if (root / name).is_file()).read_text(encoding="utf-8-sig"))
+        port = config.get("manager", {}).get("port", 8399)
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        headers = {"X-ANX": "1", "X-MCPM": "1"}
+        with opener.open(urllib.request.Request("http://127.0.0.1:%s/api/ping" % port, headers=headers), timeout=2) as response:
+            info = json.load(response)
+        if Path(info.get("root", "")).resolve() == root.resolve():
+            opener.open(urllib.request.Request("http://127.0.0.1:%s/api/manager/shutdown" % port, data=b"",
+                                               headers=headers, method="POST"), timeout=5)
+            time.sleep(3)
+    except Exception:
+        pass
+
+
+#: What moves from a per-user root to the system root (the runtime itself is installed fresh).
+MIGRATED = (*CONFIG_NAMES, "secrets", "plugins", "plugin-data", ".anx")
+
+
+def _migrate(source):
+    for name in MIGRATED:
+        origin = source / name
+        target = SYSTEM_ROOT / name
+        if origin.is_file():
+            shutil.copy2(origin, target)
+        elif origin.is_dir():
+            shutil.copytree(origin, target, symlinks=True, dirs_exist_ok=True,
+                            ignore=shutil.ignore_patterns("logs") if name == ".anx" else None)
+        else:
+            continue
+        for path in [target, *(_walk(target) if target.is_dir() else ())]:
+            os.chown(path, 0, 0, follow_symlinks=False)
+    if (SYSTEM_ROOT / "secrets").is_dir():
+        (SYSTEM_ROOT / "secrets").chmod(0o700)
+    (SYSTEM_ROOT / "migrated-from").write_text(str(source) + "\n")
+
+
+def _default_account(name):
+    """accounts.default: who plugins and terminals run as (kept when already set)."""
+    path = config_path()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return
+    accounts = data.get("accounts") if isinstance(data.get("accounts"), dict) else {}
+    if isinstance(accounts.get("default"), str):
+        return
+    accounts["default"] = name
+    data["accounts"] = accounts
+    temporary = path.with_name(path.name + ".setup.tmp")
+    temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    temporary.replace(path)
+
+
+def setup_system(install_user=None):
+    """``--setup-system`` (root; the package's postinst schedules it): set up or update the system service."""
+    global ROOT, STARTUP_LOG
+    if not _is_root():
+        raise HeadlessError("--setup-system 需要 root：sudo agent-nexus --setup-system")
+    if not SYSTEM_UNIT_FILE.is_file():
+        raise HeadlessError("没有安装系统服务单元 %s" % SYSTEM_UNIT_FILE)
+    _wait_dpkg()
+    ROOT, STARTUP_LOG = SYSTEM_ROOT, SYSTEM_ROOT / ".anx/logs/startup.log"
+    SYSTEM_ROOT.mkdir(parents=True, exist_ok=True, mode=0o755)
+    legacy = _legacy_roots()
+    for root, owner in legacy:
+        _retire_legacy(root, owner)
+    owner = None
+    if not _has_config(SYSTEM_ROOT):
+        chosen = _pick_legacy(legacy, install_user)
+        if chosen is not None:
+            _migrate(chosen[0])
+            owner = chosen[1]
+            print("agent-nexus: moved %s to %s" % (chosen[0], SYSTEM_ROOT))
+    prepare()
+    _default_account(owner or install_user or "root")
+    (SYSTEM_ROOT / SYSTEM_MARKER).write_text("1\n")
+    subprocess.run(["systemctl", "daemon-reload"], capture_output=True)
+    subprocess.run(["systemctl", "enable", UNIT], capture_output=True)
+    result = subprocess.run(["systemctl", "restart", UNIT], capture_output=True, text=True)
+    if result.returncode:
+        raise HeadlessError("systemctl restart %s 失败：%s" % (UNIT, result.stderr.strip()))
+    print("agent-nexus: system service %s is running (root %s)" % (UNIT, SYSTEM_ROOT))
+    return 0
+
+
 def anx(arguments):
     """``anx --root ROOT <arguments>`` from the bundled environment (offline)."""
     prepare()
@@ -398,6 +679,8 @@ def main(argv):
     parser = argparse.ArgumentParser(prog="agent-nexus", add_help=False)
     parser.add_argument("--serve", action="store_true")
     parser.add_argument("--prepare", action="store_true")
+    parser.add_argument("--setup-system", action="store_true")
+    parser.add_argument("--user")
     parser.add_argument("-h", "--help", action="store_true")
     parser.add_argument("command", nargs="?")
     parser.add_argument("rest", nargs=argparse.REMAINDER)
@@ -405,18 +688,27 @@ def main(argv):
     try:
         if args.serve:
             return serve()
+        if args.setup_system:
+            return setup_system(args.user)
         if args.prepare:
             prepare()
             return 0
         if args.help or args.command == "help":
             print(HEADLESS_HELP)
             return 0
+        if args.command == "session":
+            return session()
+        if args.command in ("anx", "join", "term") or (args.command == "service" and (args.rest[:1] or ["status"])[0]
+                                                         in ("enable", "restart", "disable")):
+            as_root([args.command, *args.rest])
         if args.command == "anx":
             return anx(args.rest)
         if args.command == "join":
             if not args.rest:
                 raise HeadlessError("用法：agent-nexus join <邀请码> [--agent-id ID]")
             code = anx(["join", *args.rest])
+            if code == 0 and system_mode():
+                return system_service("restart")  # the core reads the new gateway link on start
             if code == 0 and _systemctl("is-active", UNIT, check=False).stdout.strip() != "active":
                 print("下一步：agent-nexus service enable（作为服务运行并连接网关）")
             return code
@@ -427,7 +719,7 @@ def main(argv):
         if args.command is not None:
             raise HeadlessError("未知命令：%s\n\n%s" % (args.command, HEADLESS_HELP))
         if not has_display():
-            print(HEADLESS_HELP)
+            print(SYSTEM_HELP if system_mode() else HEADLESS_HELP)
             return 0
         return desktop()
     except HeadlessError as exc:
@@ -608,6 +900,8 @@ def create_desktop_application():
                 return
             started = time.monotonic()
             try:
+                if system_mode():
+                    return self.attach_system(started)
                 self.progress("正在准备本机程序…", 1)
                 prepare()
                 info = None
@@ -642,6 +936,30 @@ def create_desktop_application():
                 self.progress("启动失败", logs=str(exc), error=True, elapsed=int(time.monotonic() - started))
             finally:
                 self.start_lock.release()
+
+        def attach_system(self, started):
+            """System mode: the core is the system service; connect to it, start the session helper."""
+            try:
+                subprocess.Popen(["/usr/bin/python3", str(HERE / "ubuntu_launcher.py"), "session"],
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 start_new_session=True, close_fds=True)
+            except OSError:
+                pass
+            while not self.closing:
+                try:
+                    info = api("/api/ping")
+                    if (info.get("anx") or info.get("mcpm")) and Path(info["root"]).resolve() == ROOT:
+                        GLib.idle_add(self.ready)
+                        return
+                except Exception:
+                    pass
+                state = subprocess.run(["systemctl", "is-active", UNIT], capture_output=True, text=True).stdout.strip()
+                waited = int(time.monotonic() - started)
+                if state in ("failed", "inactive") and waited > 20:
+                    raise RuntimeError("核心服务 %s 没有运行（%s）。在终端执行：sudo systemctl restart %s"
+                                       % (UNIT, state, UNIT))
+                self.progress("正在连接核心服务（系统服务 %s）…" % UNIT, 3, elapsed=waited)
+                time.sleep(1)
 
         def ready(self):
             if self.closing or self.connected:
@@ -697,7 +1015,7 @@ def create_desktop_application():
                         action_item.connect("activate", lambda _, name=service["name"], action=action: self.service_action(name, action))
                         submenu.append(action_item)
                     entry.set_submenu(submenu)
-            item("退出管理器并停止所有服务", self.stop)
+            item("退出界面（核心服务在后台继续运行）" if system_mode() else "退出管理器并停止所有服务", self.stop)
             menu.show_all()
             self.indicator.set_menu(menu)
             return False
@@ -732,6 +1050,9 @@ def create_desktop_application():
             if self.window is not None:
                 self.close_window(self.window)
             def run():
+                if system_mode():  # the window only: the core keeps serving the gateway
+                    GLib.idle_add(self.quit)
+                    return
                 with self.start_lock:
                     try:
                         info = api("/api/ping")

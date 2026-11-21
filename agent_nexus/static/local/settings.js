@@ -11,6 +11,30 @@ function setting(title, desc, control) {
     desc ? el("span", { class: "setting-desc" }, desc) : null), control);
 }
 
+// 执行账户 (agent_nexus/accounts.py): only a root core on Linux (the Ubuntu system service) switches.
+async function accountsCard() {
+  let data;
+  try { data = await fetchJSON("/api/accounts", { quiet: true }); } catch { return null; }
+  if (!data.supported) return null;
+  const purposes = [["mcp", "Agent 和 MCP 插件", "插件进程（设备插件的命令、文件读写）以这个账户运行"],
+    ["terminal", "远程终端", "其他设备打开这台电脑的终端时，登录这个账户的 shell"]];
+  const rows = purposes.map(([key, title, desc]) => {
+    const select = el("select", { class: "input", style: { maxWidth: "220px" }, onchange: async () => {
+      select.disabled = true;
+      try {
+        const result = await fetchJSON("/api/accounts", { method: "PUT", body: { [key]: select.value } });
+        select.value = result.accounts[key];
+        toast(key === "mcp" ? `插件改为以 ${select.value} 运行（正在运行的插件已重启）` : `远程终端改为登录 ${select.value}`);
+      } catch { select.value = data.accounts[key]; }
+      select.disabled = false;
+    } }, data.users.map((user) => el("option", { value: user.name }, user.uid === 0 ? `${user.name}（管理员，不切换）` : user.name)));
+    select.value = data.accounts[key];
+    return setting(title, desc, select);
+  });
+  return card("执行账户", ...rows,
+    el("p", { class: "faint xs" }, "核心服务以 root 运行（网关连接、自动更新、远程桌面）；这里决定它替你运行的东西用哪个账户。"));
+}
+
 export async function settingsPage(ctx) {
   const { page } = ctx;
   mount(page, el("div", { class: "page-head" }, el("div", { class: "titles" }, el("h1", {}, "设置"), el("p", {}, "这台电脑上的 Agent Nexus。"))));
@@ -92,6 +116,7 @@ export async function settingsPage(ctx) {
     try { await fetchJSON("/api/manager/shutdown", { method: "POST" }); toast("Agent Nexus 正在退出"); } catch { /* toasted */ }
   } }, icon("power", { size: 16 }), "退出 Agent Nexus");
 
+  const accounts = await accountsCard();
   page.append(el("div", { class: "stack lg", style: { maxWidth: "820px" } },
     card("启动", setting("开机自动启动", autostart.enabled === null ? "只有 Windows 桌面应用支持" : "登录 Windows 后在后台启动，托盘里显示状态", el("label", { class: "switch" }, autostartBox, el("span")))),
     card("更新", setting("Agent Nexus 版本", updateText, updateArea),
@@ -103,6 +128,7 @@ export async function settingsPage(ctx) {
         el("div", { class: "field" }, el("label", {}, "配置文件"), tokenField(info.config)),
         el("div", { class: "field" }, el("label", {}, "控制台地址"), tokenField(info.url)),
         el("p", { class: "faint xs" }, "插件安装在数据目录的 plugins/ 下，插件数据在 plugin-data/，凭据在 secrets/。"))),
+    accounts,
     lockPasswordCard(),
     card("外观", setting("主题", "", themes)),
     card("高级",

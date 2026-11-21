@@ -107,6 +107,9 @@ def build(uv, out, enrollment=None, offline=False):
         entries[LIB + filename] = ((ROOT / "packaging/ubuntu" / filename).read_bytes(), 0o755)
     entries["usr/bin/" + LAUNCHER] = (f'#!/bin/sh\nexec /{LIB}{LAUNCHER} "$@"\n'.encode(), 0o755)
     entries[LIB + "startup.html"] = ((ROOT / "desktop/dist/index.html").read_bytes(), 0o644)
+    # System mode (ubuntu_launcher.py): the core as a root service, the session helper per login.
+    entries["usr/lib/systemd/system/agent-nexus.service"] = ((ROOT / "packaging/ubuntu/agent-nexus.service").read_bytes(), 0o644)
+    entries["etc/xdg/autostart/agent-nexus-session.desktop"] = ((ROOT / "packaging/ubuntu/agent-nexus-session.desktop").read_bytes(), 0o644)
     entries[f"usr/share/applications/{DESKTOP_ID}.desktop"] = ((ROOT / f"packaging/ubuntu/{DESKTOP_ID}.desktop").read_bytes(), 0o644)
     entries[f"usr/share/icons/hicolor/128x128/apps/{DESKTOP_ID}.png"] = ((ROOT / "agent_nexus/static/icon.png").read_bytes(), 0o644)
     control = f"""Package: {name}
@@ -124,10 +127,16 @@ Description: Agent Nexus desktop, device plugin and outbound gateway connector
  Per-user GTK/WebKit console, system tray and independent managed Python runtime.
  Close the window to keep services running; quit from the tray to stop all owned services.
  .
+ The core runs as the root system service agent-nexus.service (/var/lib/agent-nexus);
+ the window and the session helper (remote desktop) are per user.
+ .
  Servers without a desktop: apt install --no-install-recommends ./agent-nexus_*.deb,
- then `agent-nexus join <invite>` and `agent-nexus service enable`.
+ then `sudo agent-nexus join <invite>`.
 """
     control_entries = {"control": (control.encode(), 0o644),
+                       "postinst": ((ROOT / "packaging/ubuntu/postinst").read_bytes().replace(b"\r\n", b"\n"), 0o755),
+                       "prerm": ((ROOT / "packaging/ubuntu/prerm").read_bytes().replace(b"\r\n", b"\n"), 0o755),
+                       "conffiles": (b"/etc/xdg/autostart/agent-nexus-session.desktop\n", 0o644),
                        "md5sums": ("\n".join(hashlib.md5(data).hexdigest() + "  " + path for path, (data, mode) in sorted(entries.items()) if mode is not SYMLINK).encode() + b"\n", 0o644)}
     out.mkdir(parents=True, exist_ok=True)
     deb = out / f"{name}_{VERSION}_amd64.deb"

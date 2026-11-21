@@ -97,8 +97,17 @@ def _download(deb: dict) -> Path:
     return target
 
 
+SYSTEM_UNIT_FILE = Path("/usr/lib/systemd/system/agent-nexus.service")
+
+
 def _restart() -> str:
-    """Restart into the new version: the user service if active, else the desktop app."""
+    """Restart into the new version: the user service if active, else the desktop app.
+
+    The system service (the core as root) restarts nothing itself: the package's postinst
+    schedules ``--setup-system``, which waits for apt to finish and restarts the service."""
+    if hasattr(os, "geteuid") and os.geteuid() == 0 and SYSTEM_UNIT_FILE.is_file() \
+            and os.environ.get("ANX_ROOT", "").rstrip("/") == "/var/lib/agent-nexus":
+        return "system"
     active = subprocess.run(["systemctl", "--user", "is-active", "agent-nexus.service"],
                             capture_output=True, text=True).stdout.strip() == "active"
     if active:

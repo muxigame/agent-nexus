@@ -53,6 +53,8 @@ class BuildPipelineTests(unittest.TestCase):
             "packaging/ubuntu/ubuntu_launcher.py": "# current launcher\n",
             "packaging/ubuntu/agent-nexus": "#!/bin/sh\nexit 0\n",
             "packaging/ubuntu/agent-nexus.desktop": "[Desktop Entry]\nName=fixture\n",
+            "packaging/ubuntu/agent-nexus.service": "[Unit]\n", "packaging/ubuntu/agent-nexus-session.desktop": "[Desktop Entry]\n",
+            "packaging/ubuntu/postinst": "#!/bin/sh\nexit 0\n", "packaging/ubuntu/prerm": "#!/bin/sh\nexit 0\n",
             "config/client.example.json": json.dumps({"cloud": {"enabled": True}, "services": {"device": {}}}),
             "config/server.example.json": "{}",
             "desktop/src-tauri/Cargo.toml": '[package]\nname = "agent-nexus-desktop"\nversion = "0.2.0"\n',
