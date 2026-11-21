@@ -218,6 +218,31 @@ fn retire_user_logon_entries() {
     }
 }
 
+/// The installing user's own per-user copy (`%LOCALAPPDATA%`): uninstall it, data kept. Left in
+/// place, its shortcuts would start that copy and its updater would run the installer as that user.
+/// (Run by the core as SYSTEM for an update, there is no such entry: nothing to do.)
+fn retire_user_install() {
+    #[cfg(target_os = "windows")]
+    {
+        use winreg::{enums::HKEY_CURRENT_USER, RegKey};
+        let Ok(key) = RegKey::predef(HKEY_CURRENT_USER)
+            .open_subkey(r"Software\Microsoft\Windows\CurrentVersion\Uninstall\Agent Nexus") else { return; };
+        let Ok(command) = key.get_value::<String, _>("UninstallString") else { return; };
+        let uninstaller = PathBuf::from(command.trim().trim_matches('"').split("\" ").next().unwrap_or("").trim_matches('"'));
+        let Some(dir) = uninstaller.parent().map(Path::to_path_buf) else { return; };
+        if !dir.display().to_string().to_ascii_lowercase().contains(r"\appdata\local\") || !uninstaller.is_file() { return; }
+        if env::current_exe().ok().and_then(|exe| exe.parent().map(Path::to_path_buf)) == Some(dir.clone()) { return; }
+        say(&format!("removing the per-user installation in {}", dir.display()));
+        // `_?=` runs the uninstaller in place, so this waits for it; the data root stays.
+        let mut command = Command::new(&uninstaller);
+        command.arg("/S").arg(format!("_?={}", dir.display()));
+        quiet(&mut command);
+        let _ = command.status();
+        let _ = fs::remove_file(&uninstaller);
+        let _ = fs::remove_dir(&dir);
+    }
+}
+
 /// `--setup-system`: run elevated by the all-users installer (also after each update).
 pub fn setup() -> Result<(), String> {
     let root = system_root();
@@ -238,6 +263,7 @@ pub fn setup() -> Result<(), String> {
     register_service(&exe)?;
     logon_entry(&exe, true);
     retire_user_logon_entries();
+    retire_user_install();
     let (ok, out) = run("sc.exe", &["start", SERVICE]);
     if !ok && !out.contains("1056") { return Err(format!("sc start：{out}")); }  // 1056: already running
     wait_service("RUNNING", 30);

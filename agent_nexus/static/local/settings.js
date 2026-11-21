@@ -47,7 +47,7 @@ export async function settingsPage(ctx) {
   }
   try { autostart = await fetchJSON("/api/app/autostart", { quiet: true }); } catch { autostart = { enabled: null }; }
 
-  const system = Boolean(info.system_service);
+  const system = Boolean(info.system_service || autostart.system);
   const autostartBox = el("input", { type: "checkbox", role: "switch", checked: system || Boolean(autostart.enabled),
     disabled: system || autostart.enabled === null,
     onchange: async (event) => {

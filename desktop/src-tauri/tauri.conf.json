@@ -34,7 +34,8 @@
         ],
         "displayLanguageSelector": false,
         "installerHooks": "nsis/hooks.nsh",
-        "startMenuFolder": "Agent Nexus"
+        "startMenuFolder": "Agent Nexus",
+        "template": "nsis/installer.nsi"
       }
     }
   },

@@ -648,6 +648,84 @@ fn bootstrap(app: AppHandle, override_url: Option<Url>) {
     });
 }
 
+// -- the tray's status dot when the core is the system service ----------------------------
+// (Per user, the core's own pystray tray draws it: agent_nexus/tray.py. The service's core runs
+// in session 0 where nobody sees a tray, so this window draws the same dot from the console API.)
+
+const DOT_OK: [u8; 3] = [34, 197, 94];
+const DOT_WARN: [u8; 3] = [245, 158, 11];
+const DOT_BAD: [u8; 3] = [239, 68, 68];
+const DOT_OFFLINE: [u8; 3] = [148, 163, 184];
+const BADGE_UPDATE: [u8; 3] = [249, 115, 22];
+const PROBLEMS: [&str; 4] = ["crashed", "conflict", "invalid", "unhealthy"];
+
+/// (dot colour, update available, tooltip) from the core's console API.
+fn system_status(target: &Url) -> ([u8; 3], bool, String) {
+    let cloud = http(target, "GET", "/api/cloud").map(|(_, v)| v).unwrap_or(Value::Null);
+    let connected = cloud.get("state").and_then(Value::as_str) == Some("connected");
+    let services = http(target, "GET", "/api/services").map(|(_, v)| v).unwrap_or(Value::Null);
+    let mut broken = Vec::new();
+    let mut warn = false;
+    for service in services.get("services").and_then(Value::as_array).cloned().unwrap_or_default() {
+        let status = service.get("status").and_then(Value::as_str).unwrap_or("");
+        let observed = service.get("kind").and_then(Value::as_str) == Some("observe");
+        if PROBLEMS.contains(&status) {
+            if observed { warn = true; } else {
+                broken.push(service.get("name").and_then(Value::as_str).unwrap_or("?").to_string());
+            }
+        } else if status == "starting" { warn = true; }
+    }
+    let update = http(target, "GET", "/api/app/update").map(|(_, v)| v).unwrap_or(Value::Null);
+    let available = update.get("available").and_then(Value::as_bool).unwrap_or(false);
+    let colour = if !broken.is_empty() { DOT_BAD } else if warn { DOT_WARN } else if connected { DOT_OK } else { DOT_OFFLINE };
+    let mut tip = format!("Agent Nexus — {}", if connected { "已连接网关" } else { "未连接网关" });
+    if !broken.is_empty() { tip.push_str(&format!("；异常：{}", broken.join("、"))); }
+    if available {
+        if let Some(version) = update.get("version").and_then(Value::as_str) { tip.push_str(&format!("；可更新到 v{version}")); }
+    }
+    (colour, available, tip)
+}
+
+/// ``base`` with the status dot (bottom-right) and, with an update, an orange badge (top-left).
+fn status_icon(base: &tauri::image::Image<'_>, colour: [u8; 3], update: bool) -> tauri::image::Image<'static> {
+    let (width, height) = (base.width() as i32, base.height() as i32);
+    let mut rgba = base.rgba().to_vec();
+    let size = width.min(height);
+    let radius = ((size as f32 * 0.2).round() as i32).min((size - 8) / 4).max(2);
+    let ring = (size / 24).max(1);
+    let mut disc = |cx: i32, cy: i32, r: i32, rgb: [u8; 3]| {
+        for y in (cy - r).max(0)..=(cy + r).min(height - 1) {
+            for x in (cx - r).max(0)..=(cx + r).min(width - 1) {
+                if (x - cx) * (x - cx) + (y - cy) * (y - cy) <= r * r {
+                    let index = ((y * width + x) * 4) as usize;
+                    rgba[index..index + 4].copy_from_slice(&[rgb[0], rgb[1], rgb[2], 255]);
+                }
+            }
+        }
+    };
+    let c = size - radius - 2;
+    disc(c, c, radius + ring, [255, 255, 255]);
+    disc(c, c, radius, colour);
+    if update {
+        let a = radius + 2;
+        disc(a, a, radius + ring, [255, 255, 255]);
+        disc(a, a, radius, BADGE_UPDATE);
+    }
+    tauri::image::Image::new_owned(rgba, width as u32, height as u32)
+}
+
+fn show_system_status(app: &AppHandle, target: &Url, last: &mut Option<([u8; 3], bool, String)>) {
+    let status = system_status(target);
+    if last.as_ref() == Some(&status) { return; }
+    *last = Some(status.clone());
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        let (Some(tray), Some(base)) = (handle.tray_by_id("startup-tray"), handle.default_window_icon()) else { return; };
+        let _ = tray.set_icon(Some(status_icon(base, status.0, status.1)));
+        let _ = tray.set_tooltip(Some(status.2.as_str()));
+    });
+}
+
 fn with_fragment(target: &Url, fragment: Option<String>) -> Url {
     match fragment {
         Some(fragment) => target.join(&fragment).unwrap_or_else(|_| target.clone()),
@@ -663,11 +741,18 @@ fn ready(app: &AppHandle, target: &Url, info: Value) {
     let app = app.clone(); let target = target.clone();
     thread::spawn(move || {
         let mut misses = 0; let mut current = info;
+        let (mut tick, mut shown) = (0u32, None);
+        let system = crate::system::system_mode();
         loop {
             if app.state::<StartupState>().quit.load(Ordering::SeqCst) { return; }
             if current.get("tray_visible").and_then(Value::as_bool) == Some(true) { hide_startup_tray(&app); }
+            if system && tick % 3 == 0 { show_system_status(&app, &target, &mut shown); }
+            tick = tick.wrapping_add(1);
             thread::sleep(Duration::from_secs(1));
             if let Some(info) = ping(&target) { current = info; misses = 0; continue; }
+            if system && shown.as_ref().map(|s| s.0) != Some(DOT_OFFLINE) {
+                show_system_status(&app, &target, &mut shown);  // the core is restarting (an update)
+            }
             misses += 1;
             if misses < 4 { continue; }
             misses = 0;

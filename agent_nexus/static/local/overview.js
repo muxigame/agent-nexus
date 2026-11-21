@@ -71,7 +71,8 @@ export async function overviewPage(ctx) {
             try { await fetchJSON("/api/app/update/apply", { method: "POST" }); toast("正在安装更新，完成后会自动重启"); } catch { /* toasted */ }
           } }, `更新到 v${update.version}`))) : el("p", { class: "muted small" }, update.checked_at ? `已是最新版本 · 上次检查 ${relTime(update.checked_at)}` : "已是最新版本"),
         autostart.enabled === null || autostart.enabled === undefined ? null : el("label", { class: "switch" },
-          el("input", { type: "checkbox", role: "switch", checked: autostart.enabled, onchange: async (event) => {
+          el("input", { type: "checkbox", role: "switch", checked: autostart.enabled, disabled: Boolean(autostart.system),
+            title: autostart.system ? "核心是系统服务：开机即运行，界面在登录后自动出现" : "", onchange: async (event) => {
             const box = event.currentTarget;
             try {
               const result = await fetchJSON("/api/app/autostart", { method: "PUT", body: { enabled: box.checked } });

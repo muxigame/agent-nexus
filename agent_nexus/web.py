@@ -714,6 +714,9 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
         return JSONResponse({"started": verb.removeprefix("--")})
 
     async def app_autostart(request: Request) -> JSONResponse:
+        if _system_service():
+            # The system service starts with the machine, and the window at every logon.
+            return JSONResponse({"enabled": True, "system": True})
         if request.method == "PUT":
             body = await json_body(request)
             if body is None or not isinstance(body.get("enabled"), bool):
