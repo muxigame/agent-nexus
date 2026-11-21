@@ -80,7 +80,14 @@ export async function terminalPage(ctx, { params }, api = GATEWAY_TERMINAL_API) 
     el("div", { class: "row", style: { gap: "6px" } }, select, openExternal,
       el("button", { class: "btn btn-sm", type: "button", title: "重新连接", onclick: () => connect() }, icon("refresh-cw", { size: 14 }), "重连"),
       el("button", { class: "btn btn-sm btn-icon", type: "button", title: "全屏", "aria-label": "全屏",
-        onclick: () => (document.fullscreenElement ? document.exitFullscreen() : frame.parentElement.requestFullscreen?.()) }, icon("maximize", { size: 14 }))));
+        onclick: () => (document.fullscreenElement ? document.exitFullscreen() : frame.parentElement.requestFullscreen?.()) }, icon("maximize", { size: 14 })),
+      el("button", { class: "btn btn-sm btn-danger", type: "button", title: "结束会话并返回设备列表", "data-action": "exit",
+        onclick: () => {
+          closedByUs = true;
+          socket?.close();
+          if (document.fullscreenElement) document.exitFullscreen();
+          location.hash = api.back?.href || "#/devices";
+        } }, icon("log-out", { size: 14 }), "退出")));
   const cliCard = el("section", { class: "card" },
     el("div", { class: "card-head" }, el("h2", {}, "这台设备上的命令行工具"), el("span", { class: "faint xs" }, `${clis.length} 个 · 点击输入`)),
     el("div", { class: "card-body" }, clis.length ? el("div", { class: "chips" }, clis.map((cli) =>

@@ -70,6 +70,16 @@ export async function settingsPage(ctx) {
       `当前 v${data.current} · ${data.checked_at ? `上次检查 ${relTime(data.checked_at)}` : "还没有检查过"}${data.desktop_app || data.updater ? "" : " · 不是从桌面应用启动的，无法在这里更新"}${data.error ? ` · ${data.error}` : ""}`;
   }
   const updateText = el("span");
+  const autoUpdateBox = el("input", { type: "checkbox", role: "switch", checked: update.mode === "auto",
+    disabled: !(update.desktop_app || update.updater),
+    onchange: async (event) => {
+      const box = event.currentTarget;
+      try {
+        const result = await fetchJSON("/api/app/update/mode", { method: "PUT", body: { mode: box.checked ? "auto" : "notify" } });
+        box.checked = result.mode === "auto";
+        toast(box.checked ? "已开启自动更新" : "已关闭自动更新（有新版本时只提醒）");
+      } catch { box.checked = !box.checked; }
+    } });
 
   const themeMode = (() => { try { return localStorage.getItem("anx-theme") || "system"; } catch { return "system"; } })();
   const themes = el("div", { class: "segmented", role: "group", "aria-label": "主题" },
@@ -84,7 +94,9 @@ export async function settingsPage(ctx) {
 
   page.append(el("div", { class: "stack lg", style: { maxWidth: "820px" } },
     card("启动", setting("开机自动启动", autostart.enabled === null ? "只有 Windows 桌面应用支持" : "登录 Windows 后在后台启动，托盘里显示状态", el("label", { class: "switch" }, autostartBox, el("span")))),
-    card("更新", setting("Agent Nexus 版本", updateText, updateArea)),
+    card("更新", setting("Agent Nexus 版本", updateText, updateArea),
+      setting("自动更新", update.headless ? "这台设备没有桌面：默认自动更新（每 6 小时检查，发现新版本就安装并重启）"
+        : "每 6 小时检查一次，发现新版本自动安装并重启；关闭后只提醒", el("label", { class: "switch" }, autoUpdateBox, el("span")))),
     card("本机",
       el("div", { class: "stack" },
         el("div", { class: "field" }, el("label", {}, "数据目录"), tokenField(info.root)),

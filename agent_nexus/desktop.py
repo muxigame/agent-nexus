@@ -90,16 +90,16 @@ _update_cache: dict[Path, tuple[float, dict]] = {}
 
 
 def update_mode(config: dict | None) -> tuple[str, str | None]:
-    """``desktop.update.mode``: ``notify`` (default) or ``off``; the retired
-    ``auto`` and unknown values mean ``notify`` with a warning (decision D7)."""
+    """``desktop.update.mode``: ``auto``, ``notify`` or ``off``; unset means ``auto`` on a device
+    without a desktop (agent_nexus/auto_update.py) and ``notify`` elsewhere."""
     value = (((config or {}).get("desktop") or {}).get("update") or {}).get("mode")
-    if value in (None, "notify"):
-        return "notify", None
-    if value == "off":
-        return "off", None
-    if value == "auto":
-        return "notify", 'desktop.update.mode "auto" is no longer supported; using "notify" (updates install only when you click)'
-    return "notify", f"unknown desktop.update.mode {value!r}; using \"notify\""
+    if value in ("auto", "notify", "off"):
+        return value, None
+    from .auto_update import headless
+    default = "auto" if headless() else "notify"
+    if value is None:
+        return default, None
+    return default, f"unknown desktop.update.mode {value!r}; using \"{default}\""
 
 
 def read_update(root: Path, current: str | None = None) -> dict:

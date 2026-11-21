@@ -220,19 +220,8 @@ jobs:
 
   # Every release tag goes live with no manual step: the gateway first (its download page
   # reads <OSS_PUBLIC_BASE>/downloads.json), then the GitHub release leaves draft.
-  deploy-gateway:
-    needs: [publish-oss, draft-release]
-    if: ${{ !contains(github.ref_name, '-') }}
-    permissions:
-      contents: write  # gh release download of a draft
-    uses: ./.github/workflows/deploy-gateway.yml
-    with:
-      tag: ${{ github.ref_name }}
-      target: production
-    secrets: inherit
-
   publish-release:
-    needs: deploy-gateway
+    needs: [publish-oss, draft-release]
     runs-on: ubuntu-latest
     permissions:
       contents: write

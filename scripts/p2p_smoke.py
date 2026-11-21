@@ -188,6 +188,12 @@ async def browser_check(port: int, beta_id: str, out: Path | None) -> None:
         if out:
             await page.wait_for_timeout(1500)
             await page.screenshot(path=str(out / "p2p-terminal.png"))
+        await page.click('button[data-action="exit"]')
+        await page.wait_for_function("location.hash === '#/devices'", timeout=5000) if False else await page.wait_for_selector(f'[data-device="{beta_id}"]', timeout=10000)
+        assert (await page.evaluate("location.hash")) == "#/devices"
+        await page.evaluate("location.hash = '#/connectors'")
+        await page.wait_for_selector("text=添加连接器", timeout=10000)
+        print("exit button and connectors page ok")
         await browser.close()
     errors = [e for e in errors if "favicon" not in e]
     assert not errors, errors

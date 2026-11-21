@@ -111,7 +111,18 @@ def _restart() -> str:
     return "service" if active else "desktop"
 
 
-def apply(root: Path) -> dict:
+def _privileged(unattended: bool) -> list[str] | None:
+    """How to run apt-get as root here: directly, with passwordless sudo, or (interactive only) pkexec."""
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        return []
+    if shutil.which("sudo") and subprocess.run(["sudo", "-n", "true"], capture_output=True).returncode == 0:
+        return ["sudo", "-n"]
+    if not unattended and (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")) and shutil.which("pkexec"):
+        return ["pkexec"]
+    return None
+
+
+def apply(root: Path, *, unattended: bool = False) -> dict:
     path = Path(root) / UPDATE_FILE
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -123,9 +134,10 @@ def apply(root: Path) -> dict:
     package = _download(deb)
     command = ["apt-get", "install", "-y", "--no-install-recommends", str(package)]
     manual = f"sudo apt install -y ./{package.name}  （在 {package.parent} 目录下执行）"
-    if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")) or not shutil.which("pkexec"):
+    prefix = _privileged(unattended)
+    if prefix is None:
         return {"installed": False, "manual": manual, "path": str(package)}
-    result = subprocess.run(["pkexec", *command], capture_output=True, text=True)
+    result = subprocess.run([*prefix, *command], capture_output=True, text=True)
     if result.returncode in (126, 127):  # the password dialog was dismissed / not authorized
         return {"installed": False, "cancelled": True, "manual": manual, "path": str(package)}
     if result.returncode != 0:

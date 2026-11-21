@@ -1,7 +1,8 @@
 # Deploy a released gateway zip to the hub host (docs/design.md §11.2, deploy/gateway/README.md).
-# release.yml calls it for every release tag (vX.Y.Z, not prereleases) once the files are on
-# OSS, with no manual approval; it can also be run by hand (workflow_dispatch) to redeploy or
-# roll back to an older tag. The `production` environment holds the deploy secrets and only
+# Releases are NOT deployed by CI any more: the gateway updates itself (deploy/gateway/
+# auto_update.py, a systemd timer every 10 minutes, always on) from the published releases.
+# This workflow is for a person only (workflow_dispatch): a trial instance, or rolling
+# production back to an older tag. The `production` environment holds the deploy secrets and only
 # admits release tags and main.
 #
 # Environment secrets:
@@ -26,14 +27,6 @@ on:
         type: choice
         options: [trial, production]
         default: trial
-  workflow_call:
-    inputs:
-      tag:
-        type: string
-        required: true
-      target:
-        type: string
-        default: production
 
 permissions:
   contents: write  # reading the assets of a draft release needs write access

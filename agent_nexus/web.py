@@ -162,6 +162,9 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
     async def lifespan(_app):
         link["task"] = asyncio.create_task(connector())
         tasks = []
+        # desktop.update.mode = auto (the default without a desktop): check and install by itself
+        from . import auto_update
+        tasks.append(asyncio.create_task(auto_update.loop(sup.cfg.root)))
         if lifecycle is not None:
             tasks.append(asyncio.create_task(lifecycle.beat_loop()))
         try:
@@ -589,6 +592,40 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
     async def app_update(_request: Request) -> JSONResponse:
         return JSONResponse(await run_in_threadpool(desktop.update_status, sup.cfg.root))
 
+    # -- 连接器: local MCP servers agent-nexus does not run, offered to the gateway --
+    from . import local_connectors
+
+    async def connectors_api(request: Request) -> JSONResponse:
+        name = request.path_params.get("name")
+        try:
+            if request.method == "GET":
+                return JSONResponse({"connectors": await run_in_threadpool(local_connectors.list_connectors, sup.cfg.root)})
+            if request.method == "DELETE":
+                await run_in_threadpool(local_connectors.delete, sup.cfg.root, name)
+                return JSONResponse({"deleted": name})
+            body = await json_body(request)
+            if body is None:
+                return JSONResponse({"error": "body must be a JSON object"}, status_code=400)
+            return JSONResponse({"connector": await run_in_threadpool(local_connectors.save, sup.cfg.root, name, body)})
+        except local_connectors.ConnectorError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=exc.status)
+
+    async def connector_test(request: Request) -> JSONResponse:
+        try:
+            return JSONResponse(await local_connectors.test(sup.cfg.root, request.path_params["name"]))
+        except local_connectors.ConnectorError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=exc.status)
+
+    async def app_update_mode(request: Request) -> JSONResponse:
+        """``PUT /api/app/update/mode`` {mode: auto|notify|off}: the 自动更新 switch."""
+        from . import auto_update
+        body = await json_body(request) or {}
+        try:
+            mode = await run_in_threadpool(auto_update.set_mode, sup.cfg.root, str(body.get("mode") or ""))
+        except (ValueError, OSError) as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        return JSONResponse({"mode": mode})
+
     async def app_update_verb(request: Request) -> JSONResponse:
         verb = "--apply-update" if request.url.path.endswith("/apply") else "--check-update"
         from . import linux_update
@@ -1009,6 +1046,10 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
         Route("/api/app/update", app_update),
         Route("/api/app/update/check", app_update_verb, methods=["POST"]),
         Route("/api/app/update/apply", app_update_verb, methods=["POST"]),
+        Route("/api/app/update/mode", app_update_mode, methods=["PUT"]),
+        Route("/api/local-connectors", connectors_api, methods=["GET"]),
+        Route("/api/local-connectors/{name}", connectors_api, methods=["PUT", "DELETE"]),
+        Route("/api/local-connectors/{name}/test", connector_test, methods=["POST"]),
         Route("/api/app/autostart", app_autostart, methods=["GET", "PUT"]),
         Route("/api/services", list_services),
         Route("/api/rescan", rescan, methods=["POST"]),

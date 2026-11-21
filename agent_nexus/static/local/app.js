@@ -8,6 +8,7 @@ import { cloudPage } from "/local/cloud.js";
 import { settingsPage } from "/local/settings.js";
 import { devicesPage, lockButton } from "/local/devices.js";
 import { desktopPage } from "/local/desktop.js";
+import { localConnectorsPage } from "/local/connectors.js";
 import { terminalPage } from "/ui/terminal.js";
 import { CLIENT_TERMINAL_API } from "/ui/terminal-config.js";
 
@@ -24,6 +25,7 @@ const NAV = [
   { path: "/", label: "概览", icon: "layout-dashboard", primary: true },
   { path: "/plugins", label: "插件", icon: "puzzle", primary: true },
   { path: "/devices", label: "设备", icon: "monitor", primary: true },
+  { path: "/connectors", label: "连接器", icon: "plug" },
   { path: "/cloud", label: "连接云端", icon: "cloud", primary: true, short: "云端" },
   { path: "/inbox", label: "收件箱", icon: "inbox", primary: true },
   { section: "其他" },
@@ -125,6 +127,7 @@ const router = createRouter({
   "/devices": (route) => devicesPage(context("设备"), route),
   "/terminal/:device": (route) => terminalPage(context("终端", { wide: true }), route, CLIENT_TERMINAL_API),
   "/desktop/:device": (route) => desktopPage(context("远程桌面", { wide: true }), route),
+  "/connectors": (route) => localConnectorsPage(context("连接器"), route),
   "/inbox/:thread?": inboxPage,
   "/settings": (route) => settingsPage(context("设置"), route),
 }, { fallback: "/" });

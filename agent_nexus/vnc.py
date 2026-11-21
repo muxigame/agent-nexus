@@ -36,6 +36,12 @@ JPEG_QUALITY = {0: 30, 1: 40, 2: 50, 3: 60, 4: 65, 5: 70, 6: 75, 7: 80, 8: 85, 9
 QUALITY_BASE = -32
 FRAME_INTERVAL = 1 / 60
 IDLE_POLL = 0.016
+#: After a change, this many more frames of the same picture: encoders that keep a frame or two
+#: (Media Foundation, Quick Sync, AMF) only release the last change when more frames come in --
+#: without these the picture stayed on an old frame until the screen changed again.
+SETTLE_FRAMES = 4
+#: a key frame at least this often while frames flow, so a viewer's decoder never waits long
+KEYFRAME_INTERVAL = 4.0
 #: H.264 bitrate (bits/s) per noVNC quality level 0..9
 H264_BITRATE = {0: 1_500_000, 1: 2_000_000, 2: 3_000_000, 3: 4_000_000, 4: 5_000_000, 5: 6_000_000,
                 6: 8_000_000, 7: 10_000_000, 8: 14_000_000, 9: 20_000_000}
@@ -225,7 +231,9 @@ class H264Encoder:
         self.name = None
         platform = "win32" if sys.platform == "win32" else "linux"
         errors = []
-        for name in self.CANDIDATES[platform]:
+        # ANX_DESKTOP_ENCODER=h264_mf (etc.) pins one encoder: troubleshooting, or a driver to avoid.
+        pinned = os.environ.get("ANX_DESKTOP_ENCODER", "").strip()
+        for name in ([pinned] if pinned else self.CANDIDATES[platform]):
             try:
                 self.context = self._open(name)
                 self._probe()
@@ -248,7 +256,7 @@ class H264Encoder:
         context.time_base = __import__("fractions").Fraction(1, 1000)
         context.framerate = 60
         context.bit_rate = self.bitrate
-        context.gop_size = 600
+        context.gop_size = 240
         context.max_b_frames = 0
         context.options = dict(self.OPTIONS.get(name, {}))
         context.open()
@@ -491,6 +499,9 @@ class Session:
         self.cursor_key = None
         self.announced = set()
         self.continuous = False
+        self.settle = 0
+        self.last_key = 0.0
+        self.encode_failures = 0
 
     async def run(self) -> None:
         loop = asyncio.get_running_loop()
@@ -499,18 +510,33 @@ class Session:
         try:
             await self._handshake()
             sender = asyncio.create_task(self._updates())
+            sender.add_done_callback(self._sender_done)
+            reader = asyncio.create_task(self._messages())
             try:
-                await self._messages()
+                # Either side ending ends the session: a stopped sender must not leave the
+                # viewer on a frozen picture of a session that still looks connected.
+                done, _ = await asyncio.wait({sender, reader}, return_when=asyncio.FIRST_COMPLETED)
+                if reader in done:
+                    reader.result()  # the viewer left (IncompleteReadError etc.)
             finally:
-                sender.cancel()
-                with contextlib.suppress(BaseException):
-                    await sender
+                for task in (sender, reader):
+                    task.cancel()
+                for task in (sender, reader):
+                    with contextlib.suppress(BaseException):
+                        await task
         finally:
             if self.encoder is not None:
                 self.encoder.close()
             with contextlib.suppress(Exception):
                 await loop.run_in_executor(self.capture, self.screen.close)
             self.capture.shutdown(wait=False)
+
+    @staticmethod
+    def _sender_done(task: asyncio.Task) -> None:
+        if not task.cancelled() and task.exception() is not None:
+            exc = task.exception()
+            if not isinstance(exc, (ConnectionError, asyncio.IncompleteReadError)):
+                log.error("remote desktop: frame sender stopped", exc_info=exc)
 
     async def _handshake(self) -> None:
         w, r = self.writer, self.reader
@@ -601,7 +627,11 @@ class Session:
             if wait > 0:
                 await asyncio.sleep(wait)
             while True:
-                image = await asyncio.get_running_loop().run_in_executor(self.capture, self.screen.grab)
+                try:
+                    image = await asyncio.get_running_loop().run_in_executor(self.capture, self.screen.grab)
+                except Exception as exc:
+                    await self._recapture(exc)
+                    continue
                 if self.full or self.previous is None or self.previous.size != image.size:
                     box = (0, 0, image.width, image.height)
                 else:
@@ -646,9 +676,13 @@ class Session:
                 self.encoder = None
                 raise _NoH264() from None
         while True:
-            raw, size = await loop.run_in_executor(self.capture, self.screen.grab_raw)
+            try:
+                raw, size = await loop.run_in_executor(self.capture, self.screen.grab_raw)
+            except Exception as exc:  # lock screen / UAC (secure desktop), display change
+                await self._recapture(exc)
+                continue
             cursor = await self._cursor_rect()
-            if self.full or raw != self.last_raw:
+            if self.full or raw != self.last_raw or self.settle > 0:
                 break
             if cursor:  # only the pointer's shape changed
                 if not self.continuous:
@@ -657,15 +691,34 @@ class Session:
                 await self.writer.drain()
                 return time.monotonic()
             await asyncio.sleep(IDLE_POLL)
-        keyframe = self.full
+        changed = raw != self.last_raw
+        keyframe = self.full or time.monotonic() - self.last_key > KEYFRAME_INTERVAL
+        self.settle = SETTLE_FRAMES if changed or self.full else self.settle - 1
         self.pending.clear()
         self.full = False
         self.last_raw = raw
+        if keyframe:
+            self.last_key = time.monotonic()
 
         def encode():
             return self.encoder.encode(Image.frombytes("RGB", size, raw, "raw", "BGRX"), keyframe=keyframe)
 
-        data = await loop.run_in_executor(None, encode)
+        try:
+            data = await loop.run_in_executor(None, encode)
+            self.encode_failures = 0
+        except Exception as exc:
+            self.encode_failures += 1
+            log.warning("remote desktop: %s failed (%s)", self.encoder.name, exc)
+            self.encoder.close()
+            self.encoder = None  # a fresh encoder (and key frame) next time
+            if self.encode_failures >= 3:
+                self.encoder_failed = True
+                raise _NoH264() from None
+            self.pending.set()
+            return time.monotonic()
+        if not data:  # the encoder kept this frame: the settle frames bring it out
+            self.pending.set()
+            return time.monotonic()
         flags = 1 if keyframe else 0  # bit 0: reset the decoder context
         header = struct.pack(">HHHHi", 0, 0, self.encoder.width, self.encoder.height, H264)
         rects = [header + struct.pack(">II", len(data), flags) + data]
@@ -676,6 +729,19 @@ class Session:
         if self.continuous:
             self.pending.set()
         return time.monotonic()
+
+    async def _recapture(self, exc: Exception) -> None:
+        """Capture failed: wait, then start a new capture (the desktop may have switched)."""
+        if "capture" not in self.announced:
+            self.announced.add("capture")
+            log.warning("remote desktop: screen capture failed (%s); retrying", exc)
+        await asyncio.sleep(0.5)
+        loop = asyncio.get_running_loop()
+        with contextlib.suppress(Exception):
+            await loop.run_in_executor(self.capture, self.screen.close)
+        with contextlib.suppress(Exception):
+            self.screen = await loop.run_in_executor(self.capture, Screen)
+        self.full = True
 
     async def _cursor_rect(self) -> bytes | None:
         """A Cursor pseudo-rectangle when the pointer's shape changed (and the viewer wants them)."""

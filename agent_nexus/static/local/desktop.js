@@ -83,7 +83,14 @@ export async function desktopPage(ctx, { params }) {
       el("button", { class: "btn btn-sm", type: "button", title: "发送 Ctrl+Alt+Del", onclick: () => rfb?.sendCtrlAltDel() }, "Ctrl+Alt+Del"),
       el("button", { class: "btn btn-sm", type: "button", title: "重新连接", onclick: () => connect() }, icon("refresh-cw", { size: 14 }), "重连"),
       el("button", { class: "btn btn-sm btn-icon", type: "button", title: "全屏", "aria-label": "全屏",
-        onclick: () => (document.fullscreenElement ? document.exitFullscreen() : screen.parentElement.requestFullscreen?.()) }, icon("maximize", { size: 14 }))));
+        onclick: () => (document.fullscreenElement ? document.exitFullscreen() : screen.parentElement.requestFullscreen?.()) }, icon("maximize", { size: 14 })),
+      el("button", { class: "btn btn-sm btn-danger", type: "button", title: "断开远程桌面并返回设备列表", "data-action": "exit",
+        onclick: () => {
+          leaving = true;
+          try { rfb?.disconnect(); } catch { /* closed */ }
+          if (document.fullscreenElement) document.exitFullscreen();
+          location.hash = "#/devices";
+        } }, icon("log-out", { size: 14 }), "退出")));
   mount(page, el("div", { class: "term-shell desktop-shell" }, toolbar, screen),
     el("p", { class: "faint xs" }, "画面和键鼠经打洞直连传输，不经过网关。点击画面后键盘输入会发到对方电脑。"));
 

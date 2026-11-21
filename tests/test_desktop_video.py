@@ -103,6 +103,50 @@ def test_h264_frames_carry_the_pointer_shape_and_are_pushed(monkeypatch):
     asyncio.run(scenario())
 
 
+class BufferingEncoder(FakeEncoder):
+    """Like Media Foundation: a frame comes out one encode() call later."""
+
+    def __init__(self, *args):
+        super().__init__(*args)
+        self.held = None
+
+    def encode(self, image, keyframe=False):
+        out, self.held = self.held, image.getpixel((0, 0))
+        return b"" if out is None else b"\x00\x00\x00\x01\x41" + bytes(out)
+
+
+def test_a_buffering_encoder_still_delivers_the_last_change(monkeypatch):
+    from agent_nexus import vnc
+    monkeypatch.setattr(vnc, "Screen", FakeScreen)
+    monkeypatch.setattr(vnc, "make_input", lambda screen: None)
+    monkeypatch.setattr(vnc, "H264Encoder", BufferingEncoder)
+    monkeypatch.setattr(vnc, "h264_available", lambda: (True, ""))
+
+    async def scenario():
+        async def serve(reader, writer):
+            with pytest.raises((asyncio.IncompleteReadError, ConnectionError)):
+                await vnc.Session(reader, writer, "host").run()
+
+        server = await asyncio.start_server(serve, "127.0.0.1", 0)
+        reader, writer = await asyncio.open_connection("127.0.0.1", server.sockets[0].getsockname()[1])
+        await _handshake(reader, writer)
+        encodings = [vnc.H264, vnc.CONTINUOUS_UPDATES]
+        writer.write(struct.pack(">BxH", 2, len(encodings)) + struct.pack(f">{len(encodings)}i", *encodings))
+        assert await asyncio.wait_for(reader.readexactly(1), 5) == b"\x96"
+        writer.write(struct.pack(">BBHHHH", 150, 1, 0, 0, 64, 48))
+        payloads = []
+        while b"\x20\x20\x20" not in b"".join(payloads):  # the second (last) picture, held by the encoder
+            head = await asyncio.wait_for(reader.readexactly(4), 5)
+            for _ in range(struct.unpack(">H", head[2:])[0]):
+                _x, _y, _w, _h, encoding = struct.unpack(">HHHHi", await reader.readexactly(12))
+                length, _flags = struct.unpack(">II", await reader.readexactly(8))
+                payloads.append(await reader.readexactly(length))
+        writer.close()
+        server.close()
+
+    asyncio.run(scenario())
+
+
 # --------------------------------------------------------------------------- Ubuntu updates
 
 class Response:

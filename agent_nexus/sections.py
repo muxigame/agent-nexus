@@ -105,6 +105,10 @@ def mcp_from_connector(connector: Mapping[str, Any]) -> dict[str, Any] | None:
     entry = {"url": connector["url"], "transport": "http" if transport == "auto" else transport}
     if auth.get("type") == "bearer" and auth.get("token_env"):
         entry["token_env"] = auth["token_env"]
+    elif auth.get("type") == "bearer" and auth.get("token_secret"):
+        entry["token_secret"] = auth["token_secret"]  # the client's 连接器 page (local_connectors.py)
+    elif auth.get("type") == "headers" and auth.get("headers_secret"):
+        entry["headers_secret"] = auth["headers_secret"]
     elif auth.get("type") not in (None, "none"):
         return None
     for key in ("enabled", "description"):

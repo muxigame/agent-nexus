@@ -443,7 +443,14 @@ class LocalGateway:
                 targets.pop(name, None)
                 continue
             self.descriptions[name] = str(entry.get("description", ""))
-            if "url" in entry:
+            if "url" in entry and (entry.get("token_secret") or entry.get("headers_secret")):
+                # The client's 连接器 page keeps the credential in secrets/connectors/<name>.
+                from .local_connectors import transport_for
+                targets[name] = lambda entry=dict(entry): transport_for(self.root, entry)
+                if entry.get("transport", "http") == "http":
+                    parsed = urlsplit(entry["url"])
+                    self.media_endpoints[name] = f"{parsed.scheme}://{parsed.netloc}"
+            elif "url" in entry:
                 transport = entry.get("transport", "http")
                 token = None
                 if entry.get("token_env"):

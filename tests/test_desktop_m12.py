@@ -108,12 +108,16 @@ def test_update_state_file(tmp_path):
     assert desktop.read_update(tmp_path)["available"] is False
 
 
-def test_update_mode_retires_auto():
+def test_update_mode_auto_notify_off(monkeypatch):
+    from agent_nexus import auto_update
+    monkeypatch.setattr(auto_update, "headless", lambda: False)
     assert desktop.update_mode({}) == ("notify", None)
     assert desktop.update_mode({"desktop": {"update": {"mode": "off"}}}) == ("off", None)
-    mode, warning = desktop.update_mode({"desktop": {"update": {"mode": "auto"}}})
-    assert mode == "notify" and "auto" in warning and "notify" in warning
-    assert desktop.update_mode({"desktop": {"update": {"mode": "weird"}}})[0] == "notify"
+    assert desktop.update_mode({"desktop": {"update": {"mode": "auto"}}}) == ("auto", None)
+    mode, warning = desktop.update_mode({"desktop": {"update": {"mode": "weird"}}})
+    assert mode == "notify" and "weird" in warning
+    monkeypatch.setattr(auto_update, "headless", lambda: True)  # no desktop: nobody to click
+    assert desktop.update_mode({}) == ("auto", None)
 
 
 # -- the tray, built but not run ---------------------------------------------------------
@@ -178,7 +182,7 @@ def test_app_update_api(tmp_path, monkeypatch):
     headers = {"X-ANX": "1"}
 
     status = client.get("/api/app/update", headers=headers).json()
-    assert status["available"] is False and status["mode"] == "notify" and "auto" in status["warning"]
+    assert status["available"] is False and status["mode"] == "auto" and status["warning"] is None
     assert status["current"] == __version__
     # Installing needs a known update; checking is always possible.
     assert client.post("/api/app/update/apply", headers=headers).status_code == 409

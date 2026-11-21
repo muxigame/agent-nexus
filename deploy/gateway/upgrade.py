@@ -323,6 +323,28 @@ def install_self(release: Path, base: Path) -> None:
     log("updated", target)
 
 
+def install_auto_update(release: Path, host) -> None:
+    """The gateway's self-update (anx-auto-upgrade + its timer), always on: every upgrade
+    installs the release's copy and enables the timer again."""
+    source = release / "deploy" / "gateway"
+    pairs = [(source / "auto_update.py", Path("/opt/agent-nexus/bin/anx-auto-upgrade"), 0o755),
+             (source / "agent-nexus-gateway-update.service", Path("/etc/systemd/system/agent-nexus-gateway-update.service"), 0o644),
+             (source / "agent-nexus-gateway-update.timer", Path("/etc/systemd/system/agent-nexus-gateway-update.timer"), 0o644)]
+    if not all(src.is_file() for src, _, _ in pairs):
+        return
+    try:
+        for src, target, mode in pairs:
+            temporary = target.with_name(target.name + ".new")
+            shutil.copyfile(src, temporary)
+            os.chmod(temporary, mode)
+            os.replace(temporary, target)
+        host.run(["systemctl", "daemon-reload"])
+        host.run(["systemctl", "enable", "--now", "agent-nexus-gateway-update.timer"])
+        log("self-update timer enabled")
+    except Exception as error:  # the upgrade itself succeeded; say so and carry on
+        log("warning: could not install the self-update timer:", error)
+
+
 # ---- main ----------------------------------------------------------------------------------------
 
 def upgrade(args, host: Host | None = None) -> int:
@@ -361,6 +383,8 @@ def upgrade(args, host: Host | None = None) -> int:
         raise
     log(f"active: {release} (version {body.get('version')}, db_schema {body.get('db_schema')})")
     install_self(release, args.base)
+    if args.base == Path("/opt/agent-nexus") and args.service == "agent-nexus-gateway.service":
+        install_auto_update(release, host)
     prune_releases(args.base, args.keep_releases, {release.resolve()} | ({previous} if previous else set()))
     return 0
 

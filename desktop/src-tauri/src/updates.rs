@@ -29,15 +29,15 @@ pub const ENDPOINT_OVERRIDE: &str = "ANX_UPDATER_ENDPOINT";
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Mode { Notify, Off }
 
-/// `desktop.update.mode`: `notify` (default) or `off`. The retired `auto` and
-/// unknown values mean `notify`, with a warning. The private edition is `off`.
+/// `desktop.update.mode`: `notify` (default), `auto` or `off`. With `auto` the manager
+/// (agent_nexus/auto_update.py) asks this shell to check and apply (`--check-update`,
+/// `--apply-update`); the shell itself behaves as for `notify`. Unknown values mean `notify`,
+/// with a warning. The private edition is `off`.
 pub fn mode(config: &Value, private: bool) -> (Mode, Option<String>) {
     if private { return (Mode::Off, None); }
     match config.pointer("/desktop/update/mode").and_then(Value::as_str) {
-        None | Some("notify") => (Mode::Notify, None),
+        None | Some("notify") | Some("auto") => (Mode::Notify, None),
         Some("off") => (Mode::Off, None),
-        Some("auto") => (Mode::Notify, Some(
-            "desktop.update.mode \"auto\" is no longer supported; using \"notify\" (updates install only when you click)".into())),
         Some(other) => (Mode::Notify, Some(format!("unknown desktop.update.mode {other:?}; using \"notify\""))),
     }
 }
@@ -183,12 +183,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mode_defaults_to_notify_and_retires_auto() {
+    fn mode_defaults_to_notify_and_auto_is_driven_by_the_manager() {
         assert_eq!(mode(&Value::Null, false), (Mode::Notify, None));
         assert_eq!(mode(&json!({"desktop": {"update": {"mode": "off"}}}), false), (Mode::Off, None));
-        let (auto, warning) = mode(&json!({"desktop": {"update": {"mode": "auto"}}}), false);
-        assert_eq!(auto, Mode::Notify);
-        assert!(warning.unwrap().contains("notify"));
+        assert_eq!(mode(&json!({"desktop": {"update": {"mode": "auto"}}}), false), (Mode::Notify, None));
         assert_eq!(mode(&json!({"desktop": {"update": {"mode": "notify"}}}), true), (Mode::Off, None));
     }
 

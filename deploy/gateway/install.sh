@@ -60,6 +60,10 @@ install -d -m 0700 -o agent-nexus -g agent-nexus "$state_dir/plugin-repo"
 # One upgrade script serves every instance (the sudoers rule names only this path).
 install -d -m 0755 /opt/agent-nexus/bin
 install -m 0755 "$here/upgrade.py" /opt/agent-nexus/bin/anx-upgrade
+# Self-update (always on): follows the releases CI publishes; see auto_update.py.
+install -m 0755 "$here/auto_update.py" /opt/agent-nexus/bin/anx-auto-upgrade
+install -m 0644 "$here/agent-nexus-gateway-update.service" /etc/systemd/system/agent-nexus-gateway-update.service
+install -m 0644 "$here/agent-nexus-gateway-update.timer" /etc/systemd/system/agent-nexus-gateway-update.timer
 
 # Config and env: created once, never overwritten.
 ANX_PORT=$port ANX_PUBLIC_URL=$public_url ANX_FIRST_AGENT=$first_agent ANX_CONFIG_DIR=$config_dir \
@@ -96,6 +100,7 @@ else
     install -m 0644 "$here/agent-nexus-gateway.service" /etc/systemd/system/agent-nexus-gateway.service
 fi
 systemctl daemon-reload
+systemctl enable --now agent-nexus-gateway-update.timer
 
 # Verify, extract, sync, check-config, then switch and start (the upgrade path does it all).
 umask 022
