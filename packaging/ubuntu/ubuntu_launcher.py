@@ -65,6 +65,15 @@ def system_mode():
     return SYSTEM_UNIT_FILE.is_file() and (SYSTEM_ROOT / SYSTEM_MARKER).is_file()
 
 
+def system_superseded():
+    """The package's system service replaces per-user units here (set up or about to be).
+
+    Not tied to the setup marker: the old user unit can be restarted (by the old version's own
+    updater) between ``--setup-system`` stopping it and the marker being written."""
+    return (SYSTEM_UNIT_FILE.is_file() and Path(os.environ.get("ANX_SYSTEMD_DIR") or "/run/systemd/system").is_dir()
+            and not os.environ.get("ANX_NO_SYSTEM_SETUP"))
+
+
 def _is_root():
     return hasattr(os, "geteuid") and os.geteuid() == 0
 
@@ -248,12 +257,19 @@ def runtime_env():
 
 
 def serve():
-    if system_mode() and not _is_system_root(ROOT) and _legacy_root_path(ROOT):
+    if system_superseded() and not _is_system_root(ROOT) and _legacy_root_path(ROOT):
         # The old per-user unit after the move to the system service: step aside for good.
         print("agent-nexus: this user service was replaced by the system service agent-nexus.service; "
               "disabling it", file=sys.stderr)
         subprocess.run(["systemctl", "--user", "disable", UNIT], capture_output=True)
         return 0
+    if _is_system_root(ROOT) and _is_root() and system_mode():
+        # Whatever per-user manager came back since the setup would hold the port: retire it again.
+        for legacy_root, owner in _legacy_roots():
+            try:
+                _retire_legacy(legacy_root, owner)
+            except Exception as exc:
+                print("agent-nexus: could not retire %s: %s" % (legacy_root, exc), file=sys.stderr)
     prepare()
     for key, value in runtime_env().items():
         os.environ.setdefault(key, value)
@@ -564,6 +580,8 @@ def _retire_legacy(root, owner):
         wants.unlink()
     if (units / UNIT).is_file():
         (units / UNIT).replace(units / (UNIT + ".migrated"))
+    # Forget the old definition, so nothing can start it again from memory.
+    subprocess.run(["systemctl", "--user", "-M", owner + "@", "daemon-reload"], capture_output=True, timeout=60)
     # A desktop shell started without the unit (older versions): ask the manager itself.
     try:
         config = json.loads(next(root / name for name in CONFIG_NAMES if (root / name).is_file()).read_text(encoding="utf-8-sig"))

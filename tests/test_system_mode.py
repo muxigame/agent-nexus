@@ -54,14 +54,30 @@ def test_root_is_the_system_root_once_set_up(monkeypatch, tmp_path):
     assert after.ROOT == tmp_path / "system"
 
 
-def test_old_user_unit_steps_aside(monkeypatch, tmp_path):
+@pytest.mark.parametrize("marker", [True, False])
+def test_old_user_unit_steps_aside(monkeypatch, tmp_path, marker):
+    # Even before --setup-system wrote its marker (the old version's updater restarts its unit).
     legacy = tmp_path / "home/me/.local/share/agent-nexus"
-    module = load_launcher(monkeypatch, tmp_path, system=True, explicit_root=legacy)
+    (tmp_path / "systemd").mkdir()
+    monkeypatch.setenv("ANX_SYSTEMD_DIR", str(tmp_path / "systemd"))
+    module = load_launcher(monkeypatch, tmp_path, system=marker, explicit_root=legacy)
     calls = []
     monkeypatch.setattr(module.subprocess, "run", lambda command, **kw: calls.append(command))
     monkeypatch.setattr(module, "prepare", lambda: pytest.fail("the old unit must not start the manager"))
     assert module.serve() == 0
     assert calls == [["systemctl", "--user", "disable", "agent-nexus.service"]]
+
+
+def test_the_system_core_retires_user_units_that_came_back(monkeypatch, tmp_path):
+    module = load_launcher(monkeypatch, tmp_path, system=True)
+    monkeypatch.setattr(module, "_is_root", lambda: True)
+    retired = []
+    monkeypatch.setattr(module, "_legacy_roots", lambda: [(tmp_path / "old", "me")])
+    monkeypatch.setattr(module, "_retire_legacy", lambda root, owner: retired.append(owner))
+    monkeypatch.setattr(module, "prepare", lambda: (_ for _ in ()).throw(SystemExit(7)))
+    with pytest.raises(SystemExit):
+        module.serve()
+    assert retired == ["me"]
 
 
 def test_system_scope_for_service_commands(monkeypatch, tmp_path):
