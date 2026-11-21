@@ -6,9 +6,10 @@
 # 1. A clean ubuntu:22.04 container installs it with --no-install-recommends: no GTK,
 #    WebKit or python3-gi may come with it, `agent-nexus` prints the headless commands,
 #    the bundled `anx` runs, and a bad invite fails with a message, not a traceback.
-# 2. On the runner (real systemd): a gateway from this checkout makes an invite,
-#    `agent-nexus join` redeems it, `agent-nexus service enable` starts the systemd user
-#    service, and the gateway lists the device online with os_family ubuntu.
+# 2. On the runner (real systemd): the package's postinst sets up the root system service
+#    (/var/lib/agent-nexus, 执行账户 = the installing user); a gateway from this checkout makes
+#    an invite, `sudo agent-nexus join` redeems it and restarts the service, and the gateway
+#    lists the device online with os_family ubuntu.
 # 3. The console's remote terminal reaches a real shell on that device (scripts/terminal_smoke.py).
 #
 # Needs docker, passwordless sudo and `uv` with this checkout synced (GitHub's runners).
@@ -38,9 +39,20 @@ docker run --rm -v "$(dirname "$deb"):/pkg:ro" -e DEB="/pkg/$(basename "$deb")" 
     echo "ok: installs without desktop libraries; headless commands work"
 '
 
-echo "--- 2. join a gateway and run as a systemd user service"
+echo "--- 2. the system service: set up by postinst, join a gateway"
 sudo apt-get update -qq
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends "$deb" >/dev/null
+for _ in $(seq 1 300); do
+    [ -f /var/lib/agent-nexus/.system ] && [ "$(systemctl is-active agent-nexus.service)" = "active" ] && break
+    sleep 1
+done
+if [ ! -f /var/lib/agent-nexus/.system ]; then
+    echo "error: postinst did not set up the system service" >&2
+    sudo journalctl -u 'agent-nexus*' -n 80 --no-pager >&2 || true
+    exit 1
+fi
+systemctl is-enabled agent-nexus.service
+sudo python3 -c 'import json,sys; a=json.load(open("/var/lib/agent-nexus/agent-nexus.json")).get("accounts",{}); print("accounts:", a); sys.exit(0 if a.get("default")==sys.argv[1] else 1)' "$(id -un)"
 work="$(mktemp -d)"
 port=18440
 SERVER_TOKEN="$(openssl rand -hex 24)"
@@ -52,7 +64,7 @@ EOF
 (cd "$here" && uv run --frozen python -m agent_nexus.cloud --config "$work/gateway.json") >"$work/gateway.log" 2>&1 &
 gateway=$!
 cleanup() {
-    agent-nexus service disable >/dev/null 2>&1 || true
+    sudo agent-nexus service disable >/dev/null 2>&1 || true
     kill "$gateway" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -61,16 +73,9 @@ auth=(-H "Authorization: Bearer $SERVER_TOKEN")
 code="$(curl -fsS "${auth[@]}" -H 'Content-Type: application/json' -d '{"label":"headless"}' \
     "http://127.0.0.1:$port/api/invites" | python3 -c 'import json,sys; print(json.load(sys.stdin)["code"])')"
 
-# A systemd user instance for this user, as an SSH login (or linger) gives one.
-sudo loginctl enable-linger "$(id -un)"
-export XDG_RUNTIME_DIR="/run/user/$(id -u)"
-for _ in $(seq 1 30); do [ -S "$XDG_RUNTIME_DIR/bus" ] && break; sleep 1; done
-export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
-
+# No user instance, no linger: the core is the system service; join re-runs itself with sudo.
 agent-nexus join "$code"
-agent-nexus service enable
 agent-nexus service status
-systemctl --user is-enabled agent-nexus.service
 
 for _ in $(seq 1 90); do
     if curl -fsS "${auth[@]}" "http://127.0.0.1:$port/api/devices" | python3 -c '
@@ -81,7 +86,7 @@ print("devices:", [(d["device_id"], d["online"], d.get("os_family")) for d in de
 sys.exit(0 if online and online[0].get("os_family") == "ubuntu" else 1)'; then
         agent-nexus service status | tee "$work/status"
         grep -q "connected" "$work/status"
-        echo "ok: joined, running as a systemd user service, online as an Ubuntu device"
+        echo "ok: joined, running as the system service, online as an Ubuntu device"
         echo "--- 3. a remote terminal through the gateway (real pty on the installed device)"
         (cd "$here" && uv run --frozen python scripts/terminal_smoke.py --gateway "http://127.0.0.1:$port" --token "$SERVER_TOKEN")
         exit 0
@@ -89,6 +94,6 @@ sys.exit(0 if online and online[0].get("os_family") == "ubuntu" else 1)'; then
     sleep 2
 done
 echo "error: the device never came online" >&2
-journalctl --user -u agent-nexus.service -n 80 --no-pager >&2 || true
+sudo journalctl -u agent-nexus.service -n 80 --no-pager >&2 || true
 tail -40 "$work/gateway.log" >&2
 exit 1
