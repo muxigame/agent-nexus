@@ -65,7 +65,7 @@ def active_session() -> dict | None:
         if not parts:
             continue
         try:
-            shown = subprocess.run(["loginctl", "show-session", parts[0], "-p", "Active", "-p", "Type", "-p", "Uid",
+            shown = subprocess.run(["loginctl", "show-session", parts[0], "-p", "Active", "-p", "Type", "-p", "User",
                                     "-p", "Name", "-p", "Remote", "-p", "Class"],
                                    capture_output=True, text=True, timeout=5).stdout
         except (OSError, subprocess.SubprocessError):
@@ -73,8 +73,9 @@ def active_session() -> dict | None:
         props = dict(item.split("=", 1) for item in shown.splitlines() if "=" in item)
         if props.get("Active") == "yes" and props.get("Type") in ("x11", "wayland") \
                 and props.get("Remote") != "yes" and props.get("Class", "user") == "user":
+            # systemd calls it User (the uid); list-sessions' second column is the same number.
             try:
-                uid = int(props.get("Uid", ""))
+                uid = int(props.get("User") or props.get("Uid") or (parts[1] if len(parts) > 1 else ""))
             except ValueError:
                 continue
             return {"id": parts[0], "uid": uid, "user": props.get("Name", ""), "type": props.get("Type")}

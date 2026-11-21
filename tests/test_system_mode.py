@@ -274,3 +274,19 @@ def test_registry_explains_when_nobody_is_logged_in(tmp_path):
 
     data = asyncio.run(scenario())
     assert "没有人登录桌面".encode() in data
+
+
+def test_active_session_is_the_local_graphical_one(monkeypatch):
+    listing = " 102 1000 me seat0 tty2\n7861 1000 me\n"
+    shown = {"102": "Name=me\nRemote=no\nType=x11\nClass=user\nActive=yes\nState=active\nUser=1000\n",
+             "7861": "Name=me\nRemote=yes\nType=tty\nClass=user\nActive=yes\nState=active\nUser=1000\n"}
+
+    def run(command, **kwargs):
+        out = listing if command[1] == "list-sessions" else shown[command[2]]
+        return subprocess.CompletedProcess(command, 0, out, "")
+
+    monkeypatch.setattr(session_helper.subprocess, "run", run)
+    assert session_helper.active_session() == {"id": "102", "uid": 1000, "user": "me", "type": "x11"}
+    # older systemd without User=: the uid comes from list-sessions
+    shown["102"] = shown["102"].replace("User=1000\n", "")
+    assert session_helper.active_session()["uid"] == 1000
