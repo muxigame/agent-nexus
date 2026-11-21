@@ -359,9 +359,9 @@ make desktop                  # 先生成内嵌运行包，再构建 artifacts/a
 
 每台设备的客户端带着 `tools/muxi-p2p-agent`（和 MsQuic），作为后台进程向网关的信令（`/p2p`）登记自己并响应打洞；对方每次连接都要先经网关向这台设备要一张一次性票据（60 秒，只能用一次）。网关在 UDP 45701–45703、TCP 45711–45712 上运行反射器（`gateway.json` 的 `p2p.reflector_hosts` 写网关自己的公网 IP，不要写 CDN 的域名），防火墙需要放行这些端口。Windows 第一次运行直连组件时可能弹出防火墙提示，允许即可（不允许也能打洞，只是少了局域网直连）。
 
-**自动更新**：设置 → 更新 → “自动更新”开关（`agent-nexus.json` 的 `desktop.update.mode`：`auto` / `notify` / `off`）。打开后每 6 小时检查一次，发现新版本自动安装并重启。**没有桌面的设备（Ubuntu 服务器）默认打开**；Ubuntu 上自动安装需要以 root 运行或免密 sudo，否则只记录原因、不弹密码框。
+**自动更新**：设置 → 更新 → “自动更新”开关（`agent-nexus.json` 的 `desktop.update.mode`：`auto` / `notify` / `off`）。打开后每 5 分钟检查一次，发现新版本自动安装并重启。**没有桌面的设备（Ubuntu 服务器）默认打开**；Ubuntu 上自动安装需要以 root 运行或免密 sudo，否则只记录原因、不弹密码框。
 
-**网关自动更新（固定开启）**：网关主机上的 `agent-nexus-gateway-update.timer` 每 10 分钟对照下载镜像的 `downloads.json`，有新的正式版就下载、校验 SHA-256 并交给 `anx-upgrade`（失败自动回滚，同一版本 6 小时后再试）。CI 只发布新版本，不再部署；`deploy-gateway.yml` 只留作手动回滚或部署试用实例。
+**网关自动更新（固定开启）**：网关主机上的 `agent-nexus-gateway-update.timer` 每分钟对照下载镜像的 `downloads.json`（几 KB），有新的正式版就下载、校验 SHA-256 并交给 `anx-upgrade`（失败自动回滚，同一版本 6 小时后再试）。CI 只发布新版本，不再部署；`deploy-gateway.yml` 只留作手动回滚或部署试用实例。
 
 **连接器（客户端）**：本机控制台“连接器”页可以把本机已有、但不归 agent-nexus 管的 MCP 服务（编辑器自带的 MCP、自己起的服务、一条 stdio 命令）接进来，和插件一样出现在网关里；令牌或请求头存在本机 `secrets/connectors/`，不写进配置。
 

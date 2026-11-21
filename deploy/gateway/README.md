@@ -21,12 +21,12 @@ member) and this directory:
 | `nginx.example.conf` | generic TLS reverse proxy (`/mcp`, `/ingress/` WebSockets, everything else) |
 | `anx-deploy.sudoers.example` | lets the CI deploy user run `anx-upgrade` and nothing else |
 | `auto_update.py` | the gateway's self-update, installed as `/opt/agent-nexus/bin/anx-auto-upgrade`: follows `downloads.manifest_url` and hands newer stable releases to `anx-upgrade` |
-| `agent-nexus-gateway-update.service` / `.timer` | runs it every 10 minutes; always on (every upgrade enables it again) |
+| `agent-nexus-gateway-update.service` / `.timer` | runs it every minute (it only fetches the small `downloads.json`); always on (every upgrade enables it again) |
 
 ## Updates
 
 The gateway updates itself. CI publishes releases (GitHub and the download mirror) and
-deploys nothing; within about 10 minutes the timer on the host sees the new version in
+deploys nothing; within about a minute the timer on the host sees the new version in
 `downloads.json`, downloads `agent-nexus-gateway-<version>.zip`, checks its SHA-256 and runs
 `anx-upgrade` (verify, `uv sync`, `--check-config`, backup, switch, restart, `/healthz`, rollback
 on failure). A version whose upgrade failed is retried after 6 hours; prereleases are never

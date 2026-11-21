@@ -1,6 +1,6 @@
 """Automatic updates of the client (``desktop.update.mode``: ``auto`` / ``notify`` / ``off``).
 
-* ``auto``: check 2 minutes after start and every 6 hours, and install what is found -- the
+* ``auto``: check 2 minutes after start and every 5 minutes, and install what is found -- the
   Windows app through its updater (``agent-nexus.exe --check-update`` / ``--apply-update``), the
   Ubuntu package with apt (as root, or with passwordless sudo; never a password prompt).
 * ``notify`` (desktop default): the settings page shows the update, installing is a click.
@@ -24,7 +24,7 @@ from . import desktop, linux_update, paths
 log = logging.getLogger(__name__)
 MODES = ("auto", "notify", "off")
 FIRST_CHECK_S = 120
-INTERVAL_S = 6 * 3600
+INTERVAL_S = 5 * 60
 
 
 def headless() -> bool:

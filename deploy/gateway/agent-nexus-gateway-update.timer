@@ -1,10 +1,11 @@
 [Unit]
-Description=agent-nexus gateway self-update every 10 minutes (always on; re-enabled by every upgrade)
+Description=agent-nexus gateway self-update every minute (always on; re-enabled by every upgrade)
 
 [Timer]
-OnBootSec=5min
-OnUnitActiveSec=10min
-RandomizedDelaySec=60
+OnBootSec=2min
+OnUnitActiveSec=1min
+AccuracySec=5s
+RandomizedDelaySec=5
 Persistent=true
 
 [Install]

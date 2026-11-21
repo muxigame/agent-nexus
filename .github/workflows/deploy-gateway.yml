@@ -1,6 +1,6 @@
 # Deploy a released gateway zip to the hub host (docs/design.md §11.2, deploy/gateway/README.md).
 # Releases are NOT deployed by CI any more: the gateway updates itself (deploy/gateway/
-# auto_update.py, a systemd timer every 10 minutes, always on) from the published releases.
+# auto_update.py, a systemd timer every minute, always on) from the published releases.
 # This workflow is for a person only (workflow_dispatch): a trial instance, or rolling
 # production back to an older tag. The `production` environment holds the deploy secrets and only
 # admits release tags and main.

@@ -95,8 +95,8 @@ export async function settingsPage(ctx) {
   page.append(el("div", { class: "stack lg", style: { maxWidth: "820px" } },
     card("启动", setting("开机自动启动", autostart.enabled === null ? "只有 Windows 桌面应用支持" : "登录 Windows 后在后台启动，托盘里显示状态", el("label", { class: "switch" }, autostartBox, el("span")))),
     card("更新", setting("Agent Nexus 版本", updateText, updateArea),
-      setting("自动更新", update.headless ? "这台设备没有桌面：默认自动更新（每 6 小时检查，发现新版本就安装并重启）"
-        : "每 6 小时检查一次，发现新版本自动安装并重启；关闭后只提醒", el("label", { class: "switch" }, autoUpdateBox, el("span")))),
+      setting("自动更新", update.headless ? "这台设备没有桌面：默认自动更新（每 5 分钟检查，发现新版本就安装并重启）"
+        : "每 5 分钟检查一次，发现新版本自动安装并重启；关闭后只提醒", el("label", { class: "switch" }, autoUpdateBox, el("span")))),
     card("本机",
       el("div", { class: "stack" },
         el("div", { class: "field" }, el("label", {}, "数据目录"), tokenField(info.root)),
