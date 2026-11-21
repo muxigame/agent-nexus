@@ -1,5 +1,5 @@
 // The local console (docs/ui-spec.md §4): shell, routing, polling. Runs in the Tauri window and any local browser.
-import { renderShell, createRouter, fetchJSON, el, mount, setTheme, restoreTheme, icon } from "/ui/ui.js";
+import { renderShell, createRouter, fetchJSON, el, mount, setTheme, restoreTheme, icon, cacheGets, prefetch } from "/ui/ui.js";
 import { mountInbox } from "/ui/inbox.js";
 import { hubHost } from "/ui/invite.js";
 import { overviewPage } from "/local/overview.js";
@@ -13,6 +13,9 @@ import { terminalPage } from "/ui/terminal.js";
 import { CLIENT_TERMINAL_API } from "/ui/terminal-config.js";
 
 restoreTheme();
+// What the gateway answers (devices, inbox, 插件库): pages show the last answer at once.
+const GATEWAY_GETS = ["/api/devices", "/api/inbox/threads", "/api/inbox/summary", "/api/plugin-repo"];
+cacheGets(GATEWAY_GETS);
 
 // "/cloud?invite=…" (the old join page) and "#/enroll?invite=…" (agentnexus:// deep links) land on #/cloud.
 if (location.pathname === "/cloud") {
@@ -132,7 +135,13 @@ const router = createRouter({
   "/settings": (route) => settingsPage(context("设置"), route),
 }, { fallback: "/" });
 
-refreshStatus().finally(() => router.start());
+function warm() {
+  if (cloudState?.state !== "connected" || !visible()) return;
+  for (const path of ["/api/devices", "/api/inbox/threads", "/api/plugin-repo"]) prefetch(path);
+}
+
+refreshStatus().finally(() => { router.start(); warm(); });
+setInterval(warm, 30000);
 setInterval(() => { if (visible()) refreshStatus(); }, 10000);
 window.addEventListener("mcpmvisibilitychange", () => { if (visible()) refreshStatus(); });
 document.addEventListener("visibilitychange", () => { if (visible()) refreshStatus(); });

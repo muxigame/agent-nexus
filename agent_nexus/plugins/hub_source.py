@@ -77,13 +77,28 @@ def _refusal(response) -> HubError:
                     response.status_code if 400 <= response.status_code < 500 else 502, **extra)
 
 
+#: The gateway is often far away (a new TLS connection to it costs seconds): one kept-alive
+#: client. (The console itself shows the last listing while it asks again: ui.js cacheGets.)
+_shared: dict[str, Any] = {}
+_shared_lock = __import__("threading").Lock()
+
+
+def _keepalive_client():
+    with _shared_lock:
+        if _shared.get("client") is None:
+            _shared["client"] = _client(15.0)
+        return _shared["client"]
+
+
 def fetch_listing(root: Path, *, timeout: float = 15.0) -> dict[str, Any]:
     import httpx
     base, token = link(root)
     try:
-        with _client(timeout) as http:
-            response = http.get(f"{base}/api/plugin-repo", headers={"Authorization": f"Bearer {token}"})
+        response = _keepalive_client().get(f"{base}/api/plugin-repo", headers={"Authorization": f"Bearer {token}"},
+                                           timeout=timeout)
     except httpx.HTTPError as exc:
+        with _shared_lock:
+            _shared["client"] = None  # a dead connection: the next call starts over
         raise HubError(f"连不上网关 {base}：{type(exc).__name__}", "hub_unreachable") from None
     if response.status_code == 404:
         raise HubError("这个网关还没有插件库（需要更新网关）", "unsupported_gateway", 409)

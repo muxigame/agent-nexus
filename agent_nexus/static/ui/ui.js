@@ -325,7 +325,67 @@ const ERROR_TEXT = {
  * - Errors throw ApiError(message, status, data) and toast the message unless {quiet: true}.
  * - 401 dispatches the "anx:unauthorized" window event (pages redirect to their login).
  */
-export async function fetchJSON(path, { method = "GET", body, headers = {}, quiet = false, signal } = {}) {
+// Answers that come from the gateway (overseas, ~0.3 s or more per round trip) are kept: a page
+// renders at once from the last answer while a fresh one is fetched in the background. Any
+// change (a non-GET request) forgets them all, so a page reloading after an action sees the truth.
+const swr = { prefixes: [], maxAge: 0, fresh: 0, store: new Map(), inflight: new Map(), key: "anx-swr" };
+
+/** Keep GET answers of these path prefixes: shown for up to ``maxAge`` ms, refetched when older than ``fresh`` ms. */
+export function cacheGets(prefixes, { maxAge = 120000, fresh = 3000 } = {}) {
+  Object.assign(swr, { prefixes, maxAge, fresh });
+  try {
+    const saved = JSON.parse(sessionStorage.getItem(swr.key) || "{}");
+    for (const [path, entry] of Object.entries(saved)) swr.store.set(path, entry);
+  } catch { /* no storage: memory only */ }
+}
+
+function swrSave() {
+  try { sessionStorage.setItem(swr.key, JSON.stringify(Object.fromEntries(swr.store))); } catch { /* full or blocked */ }
+}
+
+/** Fetch ``path`` into the cache now (the shell warms the gateway pages before they are opened). */
+export function prefetch(path) {
+  return swrFetch(path).catch(() => null);
+}
+
+function swrFetch(path) {
+  if (!swr.inflight.has(path)) {
+    const request = rawFetchJSON(path, { quiet: true }).then((data) => {
+      swr.store.set(path, { at: Date.now(), data });
+      swrSave();
+      return data;
+    }).finally(() => swr.inflight.delete(path));
+    swr.inflight.set(path, request);
+  }
+  return swr.inflight.get(path);
+}
+
+const clone = (data) => (typeof structuredClone === "function" ? structuredClone(data) : JSON.parse(JSON.stringify(data)));
+
+export async function fetchJSON(path, options = {}) {
+  const method = options.method || "GET";
+  if (method !== "GET") {
+    if (swr.store.size) { swr.store.clear(); swrSave(); }
+    return rawFetchJSON(path, options);
+  }
+  if (!options.signal && swr.prefixes.some((prefix) => path === prefix || path.startsWith(prefix + "/") || path.startsWith(prefix + "?"))) {
+    const entry = swr.store.get(path);
+    const age = entry ? Date.now() - entry.at : Infinity;
+    if (entry && age < swr.maxAge) {
+      if (age > swr.fresh) swrFetch(path).catch(() => {});
+      return clone(entry.data);
+    }
+    try {
+      return clone(await swrFetch(path));
+    } catch (error) {
+      if (!options.quiet) toast(error.message, { type: "bad" });
+      throw error;
+    }
+  }
+  return rawFetchJSON(path, options);
+}
+
+async function rawFetchJSON(path, { method = "GET", body, headers = {}, quiet = false, signal } = {}) {
   const init = { method, credentials: "same-origin", cache: "no-store", signal, headers: { Accept: "application/json", ...headers } };
   if (method !== "GET" && method !== "HEAD") init.headers["X-ANX"] = "1";
   if (body !== undefined) {

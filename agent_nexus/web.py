@@ -943,8 +943,6 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
     async def local_page(_request: Request) -> FileResponse:
         return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-store"})
 
-    async def classic_page(_request: Request) -> FileResponse:
-        return FileResponse(STATIC_DIR / "classic.html", headers={"Cache-Control": "no-store"})
 
     async def get_service(request: Request) -> JSONResponse:
         try:
@@ -1061,7 +1059,6 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
         Route("/api/cloud/join", cloud_join, methods=["POST"]),
         Route("/api/cloud/leave", cloud_leave, methods=["POST"]),
         Route("/cloud", local_page),
-        Route("/classic", classic_page),
         Route("/api/devices", list_devices),
         Route("/api/devices/{device_id}/alias", put_device_alias, methods=["PUT"]),
         Route("/api/devices/{device_id}/revoke", revoke_device, methods=["POST"]),

@@ -132,7 +132,6 @@ export async function settingsPage(ctx) {
     lockPasswordCard(),
     card("外观", setting("主题", "", themes)),
     card("高级",
-      setting("旧版控制台", "原来的标签页式控制台，日志查看更细", el("a", { class: "btn", href: "/classic" }, "打开", icon("external-link", { size: 14 }))),
       setting("退出", "停止所有插件并退出", quit))));
   renderUpdate(update);
 }
