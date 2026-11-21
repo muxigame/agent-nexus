@@ -164,6 +164,7 @@ def test_ubuntu_update_check_and_manual_install(tmp_path, monkeypatch):
     import httpx
 
     from agent_nexus import __version__, linux_update
+    monkeypatch.setattr(linux_update, "WINDOWS", False)  # the Ubuntu package, wherever the test runs
     monkeypatch.setattr(linux_update, "_gateway", lambda root: "https://hub.example.test")
     deb = {"id": "linux-deb", "version": "99.0.0", "filename": "agent-nexus_99.0.0_amd64.deb",
            "url": "https://cdn.example.test/agent-nexus_99.0.0_amd64.deb", "sha256": "0" * 64}
@@ -216,3 +217,34 @@ def test_check_without_a_gateway_records_the_reason(tmp_path, monkeypatch):
     result = linux_update.check(tmp_path)
     assert result["available"] is False and "网关" in result["error"]
     assert json.loads((tmp_path / ".anx" / "desktop-update.json").read_text(encoding="utf-8"))["error"]
+
+
+def test_windows_system_update_picks_the_installer_and_schedules_it(tmp_path, monkeypatch):
+    import httpx
+
+    from agent_nexus import linux_update
+    monkeypatch.setattr(linux_update, "WINDOWS", True)
+    monkeypatch.setattr(linux_update, "_gateway", lambda root: "https://hub.example.test")
+    items = [{"id": "linux-deb", "version": "99.0.0", "filename": "agent-nexus_99.0.0_amd64.deb", "url": "u1"},
+             {"id": "windows-x64", "version": "99.0.0", "filename": "agent-nexus_99.0.0_x64-setup.exe", "url": "u2",
+              "sha256": "0" * 64}]
+    monkeypatch.setattr(httpx, "get", lambda url, **_: Response({"items": items}))
+    found = linux_update.check(tmp_path)
+    assert found["available"] and found["deb"]["filename"].endswith("_x64-setup.exe")
+    package = tmp_path / "agent-nexus_99.0.0_x64-setup.exe"
+    package.write_bytes(b"MZ")
+    monkeypatch.setattr(linux_update, "_download", lambda deb: package)
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(command)
+        import subprocess
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(linux_update.subprocess, "run", run)
+    result = linux_update.apply(tmp_path)
+    assert result == {"installed": True, "version": "99.0.0", "restart": "system"}
+    create = next(c for c in calls if "/Create" in c)
+    assert create[create.index("/RU") + 1] == "SYSTEM"
+    assert "/S /AllUsers /UPDATE" in create[create.index("/TR") + 1]
+    assert any("/Run" in c for c in calls)

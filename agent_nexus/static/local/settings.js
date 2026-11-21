@@ -27,7 +27,7 @@ async function accountsCard() {
         toast(key === "mcp" ? `插件改为以 ${select.value} 运行（正在运行的插件已重启）` : `远程终端改为登录 ${select.value}`);
       } catch { select.value = data.accounts[key]; }
       select.disabled = false;
-    } }, data.users.map((user) => el("option", { value: user.name }, user.uid === 0 ? `${user.name}（管理员，不切换）` : user.name)));
+    } }, data.users.map((user) => el("option", { value: user.name }, user.label || (user.uid === 0 ? `${user.name}（管理员，不切换）` : user.name))));
     select.value = data.accounts[key];
     return setting(title, desc, select);
   });
@@ -47,7 +47,9 @@ export async function settingsPage(ctx) {
   }
   try { autostart = await fetchJSON("/api/app/autostart", { quiet: true }); } catch { autostart = { enabled: null }; }
 
-  const autostartBox = el("input", { type: "checkbox", role: "switch", checked: Boolean(autostart.enabled), disabled: autostart.enabled === null,
+  const system = Boolean(info.system_service);
+  const autostartBox = el("input", { type: "checkbox", role: "switch", checked: system || Boolean(autostart.enabled),
+    disabled: system || autostart.enabled === null,
     onchange: async (event) => {
       const box = event.currentTarget;
       try {
@@ -118,7 +120,8 @@ export async function settingsPage(ctx) {
 
   const accounts = await accountsCard();
   page.append(el("div", { class: "stack lg", style: { maxWidth: "820px" } },
-    card("启动", setting("开机自动启动", autostart.enabled === null ? "只有 Windows 桌面应用支持" : "登录 Windows 后在后台启动，托盘里显示状态", el("label", { class: "switch" }, autostartBox, el("span")))),
+    card("启动", setting("开机自动启动", system ? "核心是系统服务：开机即运行，不需要任何人登录；界面在登录后自动出现"
+      : autostart.enabled === null ? "只有 Windows 桌面应用支持" : "登录 Windows 后在后台启动，托盘里显示状态", el("label", { class: "switch" }, autostartBox, el("span")))),
     card("更新", setting("Agent Nexus 版本", updateText, updateArea),
       setting("自动更新", update.headless ? "这台设备没有桌面：默认自动更新（每 5 分钟检查，发现新版本就安装并重启）"
         : "每 5 分钟检查一次，发现新版本自动安装并重启；关闭后只提醒", el("label", { class: "switch" }, autoUpdateBox, el("span")))),
@@ -132,6 +135,6 @@ export async function settingsPage(ctx) {
     lockPasswordCard(),
     card("外观", setting("主题", "", themes)),
     card("高级",
-      setting("退出", "停止所有插件并退出", quit))));
+      system ? setting("重启核心服务", "停止所有插件后由系统服务立即重新启动", quit) : setting("退出", "停止所有插件并退出", quit))));
   renderUpdate(update);
 }

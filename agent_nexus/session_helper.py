@@ -12,6 +12,10 @@ to the core's socket::
 The core finds the helper of the *active* session (loginctl: Active=yes, x11/wayland, local) by
 the uid the kernel reports for the connection (SO_PEERCRED), and only pipes bytes: capture and
 input happen in the person's own session, with their own rights.
+
+Windows (the LocalSystem service): the same protocol over loopback TCP (the port is in
+``<root>/session.port``); a helper is known by its *session* (winsession.peer_session), which
+plays the uid's part, and the active session is the console's (else an active remote desktop).
 """
 from __future__ import annotations
 
@@ -29,7 +33,9 @@ from pathlib import Path
 
 log = logging.getLogger("agent_nexus.session")
 
+WINDOWS = sys.platform == "win32"
 SOCKET_DIR = Path(os.environ.get("ANX_SESSION_DIR") or "/run/agent-nexus")
+PORT_FILE = "session.port"
 SOCKET_NAME = "session.sock"
 MAGIC = b"ANX-SESSION/1 "
 ATTACH_TIMEOUT = 15.0
@@ -40,12 +46,17 @@ def socket_path() -> Path:
 
 
 def supported() -> bool:
-    """The core side: Linux, as root (a per-user core has its own display)."""
+    """The core side: Linux as root, Windows as LocalSystem (a per-user core has its own display)."""
+    if WINDOWS:
+        from . import winsession
+        return winsession.is_system()
     return sys.platform.startswith("linux") and hasattr(os, "geteuid") and os.geteuid() == 0
 
 
 def graphical_target() -> bool:
-    """A machine with a desktop: a display manager is running (a server has none)."""
+    """A machine with a desktop: a display manager is running (a server has none). Windows: always."""
+    if WINDOWS:
+        return True
     try:
         result = subprocess.run(["systemctl", "is-active", "--quiet", "display-manager"], timeout=5)
         return result.returncode == 0
@@ -55,6 +66,9 @@ def graphical_target() -> bool:
 
 def active_session() -> dict | None:
     """The local graphical session in front of the screen: {id, uid, user, type}, or None."""
+    if WINDOWS:
+        from . import winsession
+        return winsession.active_session()
     try:
         listing = subprocess.run(["loginctl", "list-sessions", "--no-legend"], capture_output=True, text=True,
                                  timeout=5).stdout
@@ -109,8 +123,28 @@ def session_environment(active: dict) -> dict | None:
     return best
 
 
+def _launch_windows(root: Path, active: dict) -> bool:
+    from . import winsession
+    python = Path(sys.executable)
+    windowless = python.with_name("pythonw.exe")
+    project = Path(__file__).resolve().parent.parent
+    try:
+        env = winsession.environment(active["uid"])
+        env.update(ANX_ROOT=str(root), PYTHONUTF8="1", PYTHONDONTWRITEBYTECODE="1")
+        winsession.spawn(active["uid"], [str(windowless if windowless.exists() else python), "-m",
+                                         "agent_nexus.session_helper"], project, env,
+                         flags=winsession.CREATE_NO_WINDOW)
+    except OSError as exc:
+        log.warning("could not start the session helper in session %s: %s", active["uid"], exc)
+        return False
+    log.info("started a session helper for %s (session %s)", active["user"], active["id"])
+    return True
+
+
 def launch_helper(root: Path, active: dict) -> bool:
     """Start the helper in the active session (when its autostart entry did not run)."""
+    if WINDOWS:
+        return _launch_windows(root, active)
     import pwd
     env = session_environment(active)
     python = Path(root) / ".venv/bin/python"
@@ -137,6 +171,9 @@ def launch_helper(root: Path, active: dict) -> bool:
 
 
 def _peer_uid(writer: asyncio.StreamWriter) -> int | None:
+    if WINDOWS:  # the session of the connecting process stands in for the uid
+        from . import winsession
+        return winsession.peer_session(writer.get_extra_info("peername"), writer.get_extra_info("sockname"))
     sock = writer.get_extra_info("socket")
     try:
         raw = sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
@@ -193,6 +230,13 @@ class SessionRegistry:
         self._active = active
 
     async def start(self) -> None:
+        if WINDOWS:
+            self._server = await asyncio.start_server(self._accept, host="127.0.0.1", port=0)
+            port = self._server.sockets[0].getsockname()[1]
+            self._port_file = Path(self.root or os.environ.get("ANX_ROOT") or ".") / PORT_FILE
+            self._port_file.write_text(str(port), encoding="ascii")
+            log.info("session helpers: listening on 127.0.0.1:%s", port)
+            return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         os.chmod(self.path.parent, 0o755)
         try:
@@ -295,9 +339,17 @@ class SessionRegistry:
 
 # --------------------------------------------------------------------------- helper side
 
+async def _connect():
+    """The core's socket (Linux) or loopback port (Windows: ``<ANX_ROOT>/session.port``)."""
+    if WINDOWS:
+        port = int((Path(os.environ.get("ANX_ROOT") or ".") / PORT_FILE).read_text(encoding="ascii").strip())
+        return await asyncio.open_connection("127.0.0.1", port)
+    return await asyncio.open_unix_connection(str(socket_path()))
+
+
 async def _serve_one(token: str, request: dict, name: str) -> None:
     from . import vnc
-    reader, writer = await asyncio.open_unix_connection(str(socket_path()))
+    reader, writer = await _connect()
     writer.write(MAGIC + json.dumps({"attach": token}).encode() + b"\n")
     await writer.drain()
     try:
@@ -316,16 +368,20 @@ async def _serve_one(token: str, request: dict, name: str) -> None:
 async def run_helper() -> None:
     from . import join as joining
     name = joining.local_hostname()
-    hello = {"session": os.environ.get("XDG_SESSION_ID", ""), "display": os.environ.get("DISPLAY", ""),
+    session = os.environ.get("XDG_SESSION_ID", "")
+    if WINDOWS:
+        from . import winsession
+        session = str(winsession.process_session(os.getpid()))
+    hello = {"session": session, "display": os.environ.get("DISPLAY", ""),
              "wayland": os.environ.get("WAYLAND_DISPLAY", ""), "pid": os.getpid()}
     tasks: set[asyncio.Task] = set()
     while True:
         try:
-            reader, writer = await asyncio.open_unix_connection(str(socket_path()))
-        except (FileNotFoundError, ConnectionError, OSError):
+            reader, writer = await _connect()
+        except (FileNotFoundError, ConnectionError, OSError, ValueError):
             await asyncio.sleep(5)  # the core is not running (yet), or restarting after an update
             continue
-        log.info("connected to the core at %s", socket_path())
+        log.info("connected to the core")
         writer.write(MAGIC + json.dumps({"hello": hello}).encode() + b"\n")
         await writer.drain()
         try:
@@ -344,6 +400,18 @@ async def run_helper() -> None:
 
 def _single_instance():
     """One helper per login: autostart, the window and the core may all start one."""
+    if WINDOWS:
+        import msvcrt
+        import tempfile
+        from . import winsession
+        session = winsession.process_session(os.getpid())
+        handle = open(os.path.join(tempfile.gettempdir(), f"agent-nexus-session-{session}.lock"), "a+")
+        try:
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        except OSError:
+            handle.close()
+            return None
+        return handle
     import fcntl
     directory = os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
     session_id = os.environ.get("XDG_SESSION_ID") or "x"
@@ -358,8 +426,8 @@ def _single_instance():
 
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
-    if hasattr(os, "geteuid") and os.geteuid() == 0:
-        print("agent-nexus session: run this in the desktop session (as the logged-in user), not as root",
+    if (hasattr(os, "geteuid") and os.geteuid() == 0) or supported():
+        print("agent-nexus session: run this in the desktop session (as the logged-in user), not as root/SYSTEM",
               file=sys.stderr)
         return 2
     lock = _single_instance()

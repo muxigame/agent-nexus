@@ -3,6 +3,9 @@ mod autostart;
 mod bootstrap;
 mod console_window;
 mod shutdown;
+#[cfg(target_os = "windows")]
+mod service;
+mod system;
 mod updates;
 mod verbs;
 fn main() { bootstrap::run(); }

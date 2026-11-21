@@ -33,6 +33,8 @@ LEGACY_ENV_OVERRIDE = "MCPM_DESKTOP_APP"
 
 def desktop_app() -> Path | None:
     """The built window, or ``None`` when there is none for this machine."""
+    if os.environ.get("ANX_SYSTEM_SERVICE") == "1":
+        return None  # the system service: windows belong to the people logged on, not to it
     override = env.get("DESKTOP_APP", warn=False)
     if override:
         path = Path(override)

@@ -165,7 +165,8 @@ def test_package_ships_the_system_unit_autostart_and_scripts():
 
 # -- 执行账户 --------------------------------------------------------------------------------
 
-def test_accounts_default_to_the_configured_default(tmp_path):
+def test_accounts_default_to_the_configured_default(tmp_path, monkeypatch):
+    monkeypatch.setattr(accounts, "WINDOWS", False)
     (tmp_path / "agent-nexus.json").write_text(json.dumps({"accounts": {"default": "me", "terminal": "ops"}}))
     assert accounts.configured(tmp_path) == {"default": "me", "mcp": "me", "terminal": "ops"}
     (tmp_path / "agent-nexus.json").write_text("{}")
@@ -173,6 +174,7 @@ def test_accounts_default_to_the_configured_default(tmp_path):
 
 
 def test_no_switch_unless_root_on_linux(tmp_path, monkeypatch):
+    monkeypatch.setattr(accounts, "WINDOWS", False)
     (tmp_path / "agent-nexus.json").write_text(json.dumps({"accounts": {"default": "me"}}))
     monkeypatch.setattr(accounts, "switching_supported", lambda: False)
     assert accounts.effective(tmp_path, "mcp") is None
@@ -183,7 +185,8 @@ def test_no_switch_unless_root_on_linux(tmp_path, monkeypatch):
     assert accounts.effective(tmp_path, "terminal") is None
 
 
-def test_direct_command_skips_uv_for_a_switched_account(tmp_path):
+def test_direct_command_skips_uv_for_a_switched_account(tmp_path, monkeypatch):
+    monkeypatch.setattr(accounts, "WINDOWS", False)
     argv = ["uv", "run", "--offline", "--python", "3.12", "python", "-m", "src.server", "--port", "1"]
     assert accounts.direct_command(argv, tmp_path) == argv  # no environment yet: uv builds it
     (tmp_path / ".venv/bin").mkdir(parents=True)
@@ -201,7 +204,39 @@ def test_account_environment_is_its_own():
     assert account.popen_args() == {"user": 1000, "group": 1000, "extra_groups": [1000, 27]}
 
 
+def test_windows_accounts_follow_the_user_at_the_screen(tmp_path, monkeypatch):
+    from agent_nexus import winsession
+    monkeypatch.setattr(accounts, "WINDOWS", True)
+    (tmp_path / "agent-nexus.json").write_text("{}")
+    assert accounts.configured(tmp_path) == {"default": "active", "mcp": "active", "terminal": "active"}
+    monkeypatch.setattr(accounts, "switching_supported", lambda: True)
+    monkeypatch.setattr(winsession, "active_session",
+                        lambda: {"id": "2", "uid": 2, "user": "me", "domain": "PC", "type": "console"})
+    monkeypatch.setattr(winsession, "environment",
+                        lambda session: {"USERPROFILE": r"C:\Users\me", "Path": r"C:\Users\me\bin", "TEMP": r"C:\Users\me\Temp"})
+    account = accounts.effective(tmp_path, "mcp")
+    assert account.session == 2 and account.principal == "PC\\me" and account.home == r"C:\Users\me"
+    assert account.popen_args() == {"session": 2}
+    env = account.env({"ANX_ROOT": r"C:\ProgramData\AgentNexus", "PATH": r"C:\tools;C:\Windows", "TEMP": r"C:\Windows\Temp"})
+    assert env["ANX_ROOT"] == r"C:\ProgramData\AgentNexus" and env["TEMP"] == r"C:\Users\me\Temp"
+    assert env["Path"].startswith(r"C:\tools;C:\Windows;") and env["Path"].endswith(r"C:\Users\me\bin")
+    (tmp_path / "agent-nexus.json").write_text(json.dumps({"accounts": {"mcp": "SYSTEM"}}))
+    assert accounts.effective(tmp_path, "mcp") is None
+    assert accounts.effective(tmp_path, "terminal").name == "me"
+    monkeypatch.setattr(winsession, "active_session", lambda: None)  # nobody logged on: SYSTEM
+    assert accounts.effective(tmp_path, "terminal") is None
+
+
+def test_windows_direct_command_uses_the_scripts_folder(tmp_path, monkeypatch):
+    monkeypatch.setattr(accounts, "WINDOWS", True)
+    (tmp_path / ".venv/Scripts").mkdir(parents=True)
+    (tmp_path / ".venv/Scripts/python.exe").write_text("")
+    argv = ["uv", "run", "python", "-m", "src.server"]
+    assert accounts.direct_command(argv, tmp_path) == [str(tmp_path / ".venv/Scripts/python.exe"), "-m", "src.server"]
+
+
 def test_save_rejects_unknown_accounts(tmp_path, monkeypatch):
+    monkeypatch.setattr(accounts, "WINDOWS", False)
     (tmp_path / "agent-nexus.json").write_text("{}")
     monkeypatch.setattr(accounts, "local_users", lambda: [{"name": "root", "uid": 0}, {"name": "me", "uid": 1000}])
     assert accounts.save(tmp_path, {"mcp": "me"})["mcp"] == "me"
@@ -212,13 +247,24 @@ def test_save_rejects_unknown_accounts(tmp_path, monkeypatch):
 # -- the session helper ---------------------------------------------------------------------
 
 unix_only = pytest.mark.skipif(not hasattr(socket, "SO_PEERCRED"), reason="needs Linux unix sockets")
+supported_platform = pytest.mark.skipif(not (hasattr(socket, "SO_PEERCRED") or sys.platform == "win32"),
+                                        reason="Linux unix sockets or Windows sessions")
 
 
-@unix_only
+def _my_identity():
+    """The uid (Linux) or the session (Windows) the registry knows this process by."""
+    if sys.platform == "win32":
+        from agent_nexus import winsession
+        return winsession.process_session(os.getpid())
+    return os.getuid()
+
+
+@supported_platform
 def test_registry_pipes_the_desktop_stream_to_the_active_sessions_helper(tmp_path, monkeypatch):
     sock = tmp_path / "s" / "session.sock"
     monkeypatch.setattr(session_helper, "socket_path", lambda: sock)
-    me = {"id": "7", "uid": os.getuid(), "user": "me", "type": "x11"}
+    monkeypatch.setenv("ANX_ROOT", str(tmp_path))
+    me = {"id": "7", "uid": _my_identity(), "user": "me", "type": "x11"}
 
     class FakeDesktop:
         def __init__(self, name):
@@ -235,7 +281,8 @@ def test_registry_pipes_the_desktop_stream_to_the_active_sessions_helper(tmp_pat
     monkeypatch.setenv("XDG_SESSION_ID", "7")
 
     async def scenario():
-        registry = session_helper.SessionRegistry(sock, active=lambda: me, launch=lambda root, active: False)
+        registry = session_helper.SessionRegistry(sock, root=tmp_path, active=lambda: me,
+                                                  launch=lambda root, active: False)
         await registry.start()
         helper = asyncio.create_task(session_helper.run_helper())
         for _ in range(100):
@@ -261,7 +308,7 @@ def test_registry_pipes_the_desktop_stream_to_the_active_sessions_helper(tmp_pat
     asyncio.run(scenario())
 
 
-@unix_only
+@supported_platform
 def test_registry_explains_when_nobody_is_logged_in(tmp_path):
     async def scenario():
         registry = session_helper.SessionRegistry(tmp_path / "x.sock", active=lambda: None)
@@ -286,6 +333,7 @@ def test_active_session_is_the_local_graphical_one(monkeypatch):
         return subprocess.CompletedProcess(command, 0, out, "")
 
     monkeypatch.setattr(session_helper.subprocess, "run", run)
+    monkeypatch.setattr(session_helper, "WINDOWS", False)
     assert session_helper.active_session() == {"id": "102", "uid": 1000, "user": "me", "type": "x11"}
     # older systemd without User=: the uid comes from list-sessions
     shown["102"] = shown["102"].replace("User=1000\n", "")

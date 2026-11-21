@@ -116,7 +116,18 @@ def manager_info(sup: Supervisor) -> dict[str, Any]:
         "pid": os.getpid(),
         "builtins": sup.cfg.builtins,
         "tray_visible": bool(getattr(sup, "tray_visible", False)),
+        # The core is the system service (Ubuntu root / Windows LocalSystem): it starts with the
+        # machine and its windows are per user; quitting it only restarts it.
+        "system_service": _system_service(),
     }
+
+
+def _system_service() -> bool:
+    from . import accounts
+    try:
+        return accounts.switching_supported()
+    except Exception:
+        return False
 
 
 def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, lifecycle: Any = None) -> LocalOnly:
@@ -172,6 +183,10 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
                 await p2p_state["sessions"].start()
             except OSError as exc:
                 log.warning("session helpers unavailable: %s", exc)
+        if sys.platform == "win32":
+            from . import accounts as anx_accounts
+            if anx_accounts.switching_supported():
+                tasks.append(asyncio.create_task(follow_active_session()))
         try:
             yield
         finally:
@@ -311,6 +326,33 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
         return JSONResponse(state)
 
     # -- 执行账户: who plugins and remote terminals run as, when the core is root (accounts.py) --
+    def restart_running_plugins() -> None:
+        """Running plugins start again as the account they should run as now."""
+        for name in list(sup.specs):
+            try:
+                if sup._alive(sup.rt[name]):
+                    sup.restart(name)
+            except Exception as exc:  # one plugin failing must not stop the rest
+                log.warning("restart %s after the account change: %s", name, exc)
+
+    async def follow_active_session() -> None:
+        """Windows system service: plugins follow the user at the screen (log on, log off, switch user)."""
+        from . import accounts as anx_accounts, winsession
+        last = await asyncio.to_thread(winsession.active_session)
+        if last is not None:  # an update closed the windows: bring back the one at the screen
+            await asyncio.to_thread(winsession.ensure_window, os.environ.get("ANX_GUI_EXE"), last["uid"])
+        while True:
+            await asyncio.sleep(5)
+            try:
+                now = await asyncio.to_thread(winsession.active_session)
+                if (now or {}).get("uid") != (last or {}).get("uid"):
+                    log.info("the active session changed (%s -> %s)", (last or {}).get("user"), (now or {}).get("user"))
+                    last = now
+                    if anx_accounts.configured(sup.cfg.root).get("mcp", anx_accounts.ACTIVE).upper() != "SYSTEM":
+                        await run_in_threadpool(restart_running_plugins)
+            except Exception as exc:
+                log.warning("following the active session: %s", exc)
+
     async def accounts_api(request: Request) -> JSONResponse:
         from . import accounts as anx_accounts
         if request.method == "PUT":
@@ -324,15 +366,7 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
             except ValueError as exc:
                 return JSONResponse({"error": str(exc)}, status_code=400)
             if before.get("mcp") != after.get("mcp"):
-                # Running plugins move to the new account now.
-                def restart_running():
-                    for name in list(sup.specs):
-                        try:
-                            if sup._alive(sup.rt[name]):
-                                sup.restart(name)
-                        except Exception as exc:  # one plugin failing must not stop the rest
-                            log.warning("restart %s after the account change: %s", name, exc)
-                await run_in_threadpool(restart_running)
+                await run_in_threadpool(restart_running_plugins)  # running plugins move to the new account now
         return JSONResponse({"supported": anx_accounts.switching_supported(),
                              "accounts": anx_accounts.configured(sup.cfg.root),
                              "users": await run_in_threadpool(anx_accounts.local_users)})

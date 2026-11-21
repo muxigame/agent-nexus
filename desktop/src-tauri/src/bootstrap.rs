@@ -19,7 +19,7 @@ use crate::{autostart, updates, verbs};
 const DEFAULT_URL: &str = "http://127.0.0.1:8399";
 const PAYLOAD: &[u8] = include_bytes!(env!("ANX_RUNTIME_ARCHIVE_PATH"));
 /// Configuration file names, preferred first (same rule as agent_nexus/paths.py).
-const CONFIG_NAMES: [&str; 2] = ["agent-nexus.json", "mcp-manager.json"];
+pub(crate) const CONFIG_NAMES: [&str; 2] = ["agent-nexus.json", "mcp-manager.json"];
 /// The manager's state file, then where a legacy (mcpm) runtime keeps it.
 const STATE_FILES: [&str; 2] = [".anx/run/anx-manager.state", ".mcp-manager/run/mcpm-manager.state"];
 const STARTUP_LOG: &str = ".anx/logs/startup.log";
@@ -201,9 +201,53 @@ fn default_root() -> Result<PathBuf, String> {
     Ok(PathBuf::from(local).join("AgentNexus"))
 }
 
-/// The root this shell serves: `--root`, else the usual discovery, else the default.
+/// The root this shell serves: `--root`, else the usual discovery, else the system service's
+/// root when installed for all users, else the per-user default.
 pub(crate) fn resolve_root() -> Result<PathBuf, String> {
-    find_root().map(Ok).unwrap_or_else(default_root)
+    find_root().map(Ok).unwrap_or_else(|| if crate::system::system_mode() { Ok(crate::system::system_root()) } else { default_root() })
+}
+
+/// `--root` for this process (the service and `--setup-system` serve the system root).
+pub(crate) fn set_root(root: PathBuf) {
+    let _ = ROOT_ARG.set(root);
+}
+
+/// `--setup-system`: unpack the runtime and build its environments in the system root.
+pub(crate) fn prepare_for_service(_root: &Path) -> Result<(), String> {
+    prepare_runtime()
+}
+
+/// The service: start the core (no tray: nobody sees session 0) from the system root.
+pub(crate) fn start_core(root: &Path) -> Result<Child, String> {
+    let project = match source_project(root) { Some(project) => project, None => install_runtime(root)? };
+    note_startup_log(root, &format!("service: runtime {}", project.display()));
+    let uv = ensure_uv(&project)?;
+    let log = root.join(STARTUP_LOG);
+    fs::create_dir_all(log.parent().unwrap()).map_err(|e| e.to_string())?;
+    if log.is_file() { let _ = fs::rename(&log, log.with_extension("log.1")); }
+    fs::write(&log, "").map_err(|e| e.to_string())?;
+    let child = spawn_manager(root, &project, &uv, &log, true)?;
+    note_startup_log(root, &format!("service: core started (pid {})", child.id()));
+    let started = Instant::now();
+    if let Ok(url) = configured_url(root) {
+        while started.elapsed() < Duration::from_secs(120) {
+            if ping(&url).is_some() { prune_runtimes(root); break; }
+            thread::sleep(Duration::from_secs(1));
+        }
+    }
+    Ok(child)
+}
+
+/// The service stops: ask the core to stop its plugins and exit, then end what is left.
+pub(crate) fn stop_core(root: &Path, child: &mut Child) {
+    if let Ok(url) = configured_url(root) { let _ = http(&url, "POST", "/api/manager/shutdown"); }
+    let deadline = Instant::now() + Duration::from_secs(25);
+    while Instant::now() < deadline {
+        if let Ok(Some(_)) = child.try_wait() { return; }
+        thread::sleep(Duration::from_millis(300));
+    }
+    #[cfg(target_os = "windows")]
+    crate::service::kill_tree(child.id());
 }
 
 /// The shell's own data folder (Tauri's app local data dir), holding `active-root`.
@@ -463,7 +507,7 @@ fn entry_point(project: &Path) -> (&'static str, &'static str) {
     else { ("mcpm.cli", "mcpm") }
 }
 
-fn spawn_manager(root: &Path, project: &Path, uv: &Path, log: &Path) -> Result<Child, String> {
+fn spawn_manager(root: &Path, project: &Path, uv: &Path, log: &Path, service: bool) -> Result<Child, String> {
     let project = project.to_path_buf();
     let (module, script) = entry_point(&project);
     let python = project.join(".venv/Scripts/python.exe");
@@ -481,7 +525,8 @@ fn spawn_manager(root: &Path, project: &Path, uv: &Path, log: &Path) -> Result<C
         value.args(["run", "--python", "3.12", "--project"]).arg(&project).arg(script);
         value
     };
-    command.arg("--root").arg(root).args(["serve", "--tray"]);
+    command.arg("--root").arg(root).arg("serve");
+    if !service { command.arg("--tray"); }
     let output = OpenOptions::new().create(true).append(true).open(log).map_err(|e| e.to_string())?;
     // An offline package ships its Python and package cache; uv must not go online for them.
     // They live in the runtime (versioned layout) or the root (portable layout).
@@ -490,8 +535,14 @@ fn spawn_manager(root: &Path, project: &Path, uv: &Path, log: &Path) -> Result<C
     // Both spellings: a legacy runtime only reads MCPM_*; agent-nexus prefers ANX_*.
     let exe = env::current_exe().map_err(|e| e.to_string())?;
     command.current_dir(root).env("ANX_ROOT", root).env("MCPM_ROOT", root).env("PYTHONUNBUFFERED", "1").env("PYTHONUTF8", "1")
-        .env("ANX_DESKTOP_APP", &exe).env("MCPM_DESKTOP_APP", &exe)
-        .env("PATH", format!("{};{}", tools.display(), env::var("PATH").unwrap_or_default()))
+        .env("PATH", format!("{};{}", tools.display(), env::var("PATH").unwrap_or_default()));
+    if service {
+        // The system service: no window of its own; the core updates the installation itself.
+        command.env("ANX_SYSTEM_SERVICE", "1").env("ANX_GUI_EXE", &exe);
+    } else {
+        command.env("ANX_DESKTOP_APP", &exe).env("MCPM_DESKTOP_APP", &exe);
+    }
+    command
         .stdin(Stdio::null()).stdout(Stdio::from(output.try_clone().map_err(|e| e.to_string())?)).stderr(Stdio::from(output));
     quiet(&mut command);
     command.spawn().map_err(|e| format!("无法启动运行环境：{e}"))
@@ -519,6 +570,21 @@ fn bootstrap(app: AppHandle, override_url: Option<Url>) {
             let root = resolve_root()?;
             fs::create_dir_all(&root).map_err(|e| format!("无法创建数据目录 {}：{e}", root.display()))?;
             *app.state::<StartupState>().root.lock().unwrap() = Some(root.clone());
+            if crate::system::system_mode() {
+                // Installed for all users: the core is the Windows service; this window only shows it.
+                let target = override_url.clone().unwrap_or(configured_url(&root)?);
+                *app.state::<StartupState>().target.lock().unwrap() = target.to_string();
+                loop {
+                    if app.state::<StartupState>().quit.load(Ordering::SeqCst) { return Ok(()); }
+                    if let Some(info) = ping(&target) { ready(&app, &target, info); return Ok(()); }
+                    let waited = started.elapsed().as_secs();
+                    if waited > 90 {
+                        return Err("Agent Nexus 核心服务没有响应。请在“服务”里启动 Agent Nexus，或重新安装。".into());
+                    }
+                    progress(&app, 3, "正在连接 Agent Nexus 核心服务…", Some(&root), "", false, waited);
+                    thread::sleep(Duration::from_secs(1));
+                }
+            }
             record_active_root(&root);
             let (project, versioned) = match source_project(&root) {
                 Some(project) => (project, false),
@@ -547,7 +613,7 @@ fn bootstrap(app: AppHandle, override_url: Option<Url>) {
             let state = app.state::<StartupState>();
             let mut process_slot = state.bootstrap_pid.lock().unwrap();
             if app.state::<StartupState>().quit.load(Ordering::SeqCst) { return Ok(()); }
-            let mut child = spawn_manager(&root, &project, &uv, &log)?;
+            let mut child = spawn_manager(&root, &project, &uv, &log, false)?;
             *process_slot = Some(child.id());
             drop(process_slot);
             loop {
@@ -606,6 +672,8 @@ fn ready(app: &AppHandle, target: &Url, info: Value) {
             if misses < 4 { continue; }
             misses = 0;
             let Some(root) = app.state::<StartupState>().root.lock().unwrap().clone() else { app.exit(0); return; };
+            // The service restarts its own core (updates included); the window just waits for it.
+            if crate::system::system_mode() { continue; }
             match manager_fate(&root) {
                 // A stalled manager is still the manager; starting a second one
                 // would only fight it for its ports.
@@ -697,6 +765,7 @@ pub(crate) fn resume_watchdog(app: &AppHandle) {
 
 fn quit(app: &AppHandle) {
     app.state::<StartupState>().quit.store(true, Ordering::SeqCst);
+    if crate::system::system_mode() { app.exit(0); return; }  // the window only; the service keeps the core
     let text = app.state::<StartupState>().target.lock().unwrap().clone();
     if let Ok(url) = text.parse::<Url>() { let _ = http(&url, "POST", "/api/manager/shutdown"); }
     if !app.state::<StartupState>().connected.load(Ordering::SeqCst) {
@@ -729,7 +798,8 @@ fn show_startup_tray(app: &AppHandle) {
 
 fn startup_tray(app: &AppHandle) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, "open", "打开 Agent Nexus / 重试启动", true, None::<&str>)?;
-    let exit = MenuItem::with_id(app, "quit", "退出管理器并停止所有服务", true, None::<&str>)?;
+    let label = if crate::system::system_mode() { "退出界面（核心服务继续运行）" } else { "退出管理器并停止所有服务" };
+    let exit = MenuItem::with_id(app, "quit", label, true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&open, &exit])?;
     TrayIconBuilder::with_id("startup-tray").icon(app.default_window_icon().unwrap().clone())
         .tooltip("Agent Nexus — 正在准备启动").menu(&menu).show_menu_on_left_click(false)
@@ -742,6 +812,24 @@ fn startup_tray(app: &AppHandle) -> tauri::Result<()> {
 
 pub fn run() {
     let args: Vec<String> = env::args().collect();
+    // System mode verbs (system.rs, service.rs): never forwarded to a running window.
+    #[cfg(target_os = "windows")]
+    if args.iter().any(|value| value == "--service") {
+        if let Err(error) = crate::service::run() { eprintln!("{error}"); std::process::exit(1); }
+        return;
+    }
+    if args.iter().any(|value| value == "--setup-system") {
+        let code = match crate::system::setup() { Ok(()) => 0, Err(error) => { say(&format!("--setup-system: {error}")); 1 } };
+        std::process::exit(code);
+    }
+    if args.iter().any(|value| value == "--remove-system") {
+        crate::system::remove();
+        std::process::exit(0);
+    }
+    if args.iter().any(|value| value == "--stop-service") {
+        crate::system::stop_service();
+        std::process::exit(0);
+    }
     if args.iter().any(|value| value == "--prepare-runtime") {
         if let Some(root) = verbs::parse(&args).root {
             let root = if root.is_absolute() { root } else { env::current_dir().map(|cwd| cwd.join(&root)).unwrap_or(root) };
@@ -782,7 +870,10 @@ pub fn run() {
             let args = env::args().collect::<Vec<_>>();
             if verbs::parse(&args).one_shot() { launch(app.handle(), &args, true); return Ok(()); }
             startup_tray(app.handle())?;
-            if let Ok(root) = resolve_root() { updates::schedule(app.handle().clone(), root); }
+            // Installed for all users, the core updates the installation itself (linux_update.py).
+            if !crate::system::system_mode() {
+                if let Ok(root) = resolve_root() { updates::schedule(app.handle().clone(), root); }
+            }
             launch(app.handle(), &args, true);
             Ok(())
         })

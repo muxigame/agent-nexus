@@ -263,6 +263,20 @@ def _spawn(argv: list[str], cwd: Path, env: dict[str, str], log, run_as: dict | 
         # run_as: the 执行账户 (accounts.mcp) when the core runs as root.
         return subprocess.Popen(argv, start_new_session=True, **common, **(run_as or {}))
     flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+    if run_as and run_as.get("session") is not None:
+        # The system service: the plugin runs as the user at the screen, in their session.
+        from . import winsession
+        held = winjob.job() is not None
+        proc = winsession.spawn(run_as["session"], argv, cwd, env, log,
+                                flags | winjob.CREATE_SUSPENDED if held else flags)
+        if held:
+            winjob.assign(int(proc._handle))
+            try:
+                psutil.Process(proc.pid).resume()
+            except psutil.Error:
+                proc.kill()
+                raise
+        return proc
     holder = winspawn.holder_pid()
     if holder is not None:
         try:
@@ -376,6 +390,8 @@ class Supervisor:
             env.update(anx_env.both("ROOT", str(self.cfg.root)))
             # The device plugin asks the owner through this manager (request_user_input, design §8.12).
             env["ANX_MANAGER_URL"] = self.cfg.base_url
+            for key in ("ANX_SYSTEM_SERVICE", "ANX_GUI_EXE"):  # the service's own, not its plugins'
+                env.pop(key, None)
             if compat_root.needed(self.cfg.root, spec):
                 # ...and only mcp-manager.json: give them the shadow root (design 4.5).
                 try:
@@ -389,6 +405,12 @@ class Supervisor:
             if account is not None:
                 argv = accounts.direct_command(argv, cwd)
                 env = account.env(env)
+                if account.session is None:
+                    # Linux: the account at the screen gets its display (notifications, its desktop apps).
+                    from . import session_helper
+                    active = session_helper.active_session()
+                    if active and active["uid"] == account.uid:
+                        env.update(session_helper.session_environment(active) or {})
                 accounts.hand_over(account, self.cfg.root / "plugin-data" / name, Path(spec.dir) / "logs",
                                    self.cfg.root / "secrets" / name)
                 accounts.traversable(self.cfg.root / "secrets")

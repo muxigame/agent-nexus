@@ -24,8 +24,16 @@ def probe() -> dict[str, dict[str, Any]]:
     return {}
 
 
+def _display_manager() -> bool:
+    """A desktop machine even when this process has no display (the core is a system service)."""
+    try:
+        return subprocess.run(["systemctl", "is-active", "--quiet", "display-manager"], timeout=5).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def form() -> str:
-    if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+    if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")) and not _display_manager():
         return "server"
     if any(Path("/sys/class/power_supply").glob("BAT*")):
         return "laptop"

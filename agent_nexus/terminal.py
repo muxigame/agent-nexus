@@ -221,9 +221,14 @@ class _Pty:
         self.loop, self.on_data, self.on_exit = loop, on_data, on_exit
         self.exit_code: int | None = None
         if WINDOWS:
-            from winpty import PtyProcess  # pywinpty; ConPTY on Windows 10 1809+
+            if run_as and run_as.get("session") is not None:
+                # The system service: the shell runs as the user at the screen (winsession.ConPty).
+                from .winsession import ConPty
+                self.proc = ConPty(run_as["session"], argv, cwd, env, cols, rows)
+            else:
+                from winpty import PtyProcess  # pywinpty; ConPTY on Windows 10 1809+
 
-            self.proc = PtyProcess.spawn(argv, cwd=cwd, env=env, dimensions=(rows, cols))
+                self.proc = PtyProcess.spawn(argv, cwd=cwd, env=env, dimensions=(rows, cols))
             threading.Thread(target=self._read_windows, daemon=True).start()
         else:
             import fcntl
@@ -263,7 +268,8 @@ class _Pty:
             except Exception:
                 break
             if data:
-                self.loop.call_soon_threadsafe(self.on_data, data.encode("utf-8", "replace"))
+                self.loop.call_soon_threadsafe(self.on_data, data if isinstance(data, bytes)
+                                               else data.encode("utf-8", "replace"))
         try:
             self.proc.wait()
         except Exception:
@@ -292,7 +298,8 @@ class _Pty:
 
     def write(self, data: bytes) -> None:
         if WINDOWS:
-            self.proc.write(data.decode("utf-8", "replace"))
+            from .winsession import ConPty
+            self.proc.write(data if isinstance(self.proc, ConPty) else data.decode("utf-8", "replace"))
         else:
             view = memoryview(data)
             deadline = time.monotonic() + 5
@@ -445,7 +452,8 @@ class Terminals:
         cwd = cwd if isinstance(cwd, str) and cwd and os.path.isdir(cwd) else home
         env = account.env() if account is not None else dict(os.environ)
         env.update(TERM="xterm-256color", COLORTERM="truecolor", AGENT_NEXUS_TERMINAL="1")
-        for key in ("VIRTUAL_ENV", "ANX_ROOT", "MCPM_ROOT", "UV_CACHE_DIR", "UV_PYTHON_INSTALL_DIR", "UV_PYTHON_PREFERENCE"):
+        for key in ("VIRTUAL_ENV", "ANX_ROOT", "MCPM_ROOT", "UV_CACHE_DIR", "UV_PYTHON_INSTALL_DIR", "UV_PYTHON_PREFERENCE",
+                    "ANX_SYSTEM_SERVICE", "ANX_GUI_EXE"):
             env.pop(key, None)
         run_as = account.popen_args() if account is not None else None
         session = _Session(sid=uuid4().hex, shell=shell)
@@ -465,7 +473,8 @@ class Terminals:
             session.event.set()
 
         try:
-            session.pty = await asyncio.to_thread(_Pty, shell.argv, cols, rows, cwd, env, loop, on_data, on_exit) \
+            session.pty = await asyncio.to_thread(_Pty, shell.argv, cols, rows, cwd, env, loop, on_data, on_exit,
+                                                  run_as) \
                 if WINDOWS else _Pty(shell.argv, cols, rows, cwd, env, loop, on_data, on_exit, run_as)
         except (OSError, ImportError) as exc:
             raise TermError(f"could not start {shell.name}: {exc}") from exc

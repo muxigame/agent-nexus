@@ -1,4 +1,9 @@
-"""In-app updates for the Ubuntu package (the Windows app updates itself through Tauri).
+"""In-app updates for the system packages: the Ubuntu .deb, and the Windows installer when the
+core is the system service ("为所有用户安装"; a per-user Windows app updates itself through Tauri).
+
+Windows: the installer (``agent-nexus_<v>_x64-setup.exe``, SHA-256 from the gateway) runs
+silently for all users from a one-time scheduled task as SYSTEM -- outside the service's process
+tree, since the installer stops the service -- and its post-install step restarts the service.
 
 * check: the joined gateway's public ``/api/downloads`` names the latest ``.deb`` with its
   SHA-256; the result goes to the same ``.anx/desktop-update.json`` the Windows shell writes,
@@ -29,8 +34,22 @@ class UpdateError(RuntimeError):
     pass
 
 
+WINDOWS = sys.platform == "win32"
+TASK = "AgentNexusUpdate"
+
+
+def windows_system() -> bool:
+    """The Windows core is the system service (agent-nexus.exe --service sets ANX_SYSTEM_SERVICE)."""
+    if not WINDOWS or os.environ.get("ANX_SYSTEM_SERVICE") != "1":
+        return False
+    from . import winsession
+    return winsession.is_system()
+
+
 def supported() -> bool:
-    """Running from the installed Ubuntu package."""
+    """Running from the installed Ubuntu package, or as the Windows system service."""
+    if WINDOWS:
+        return windows_system()
     return sys.platform.startswith("linux") and LAUNCHER.is_file() and shutil.which("dpkg-query") is not None
 
 
@@ -64,9 +83,14 @@ def check(root: Path) -> dict:
         response = httpx.get(f"{gateway}/api/downloads", timeout=20, trust_env=False)
         response.raise_for_status()
         items = response.json().get("items") or []
-        deb = next((i for i in items if i.get("id") == "linux-deb" or str(i.get("filename", "")).endswith("_amd64.deb")), None)
+        if WINDOWS:
+            deb = next((i for i in items if i.get("id") == "windows-x64"
+                        or str(i.get("filename", "")).endswith("_x64-setup.exe")), None)
+        else:
+            deb = next((i for i in items if i.get("id") == "linux-deb"
+                        or str(i.get("filename", "")).endswith("_amd64.deb")), None)
         if deb is None or not deb.get("version"):
-            raise UpdateError("网关没有提供 Ubuntu 安装包")
+            raise UpdateError("网关没有提供 Windows 安装包" if WINDOWS else "网关没有提供 Ubuntu 安装包")
         version = str(deb["version"])
         available = _version_key(version) > _version_key(__version__)
         data = {"available": available, "version": version, "checked_at": stamp,
@@ -80,7 +104,10 @@ def check(root: Path) -> dict:
 def _download(deb: dict) -> Path:
     import httpx
 
-    cache = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "agent-nexus"
+    if WINDOWS:
+        cache = Path(os.environ.get("ANX_ROOT") or os.environ.get("ProgramData", "C:/ProgramData")) / ".anx" / "updates"
+    else:
+        cache = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "agent-nexus"
     cache.mkdir(parents=True, exist_ok=True)
     name = Path(str(deb.get("filename") or "agent-nexus_amd64.deb")).name
     target = cache / name
@@ -141,6 +168,8 @@ def apply(root: Path, *, unattended: bool = False) -> dict:
     if not data.get("available") or not isinstance(deb, dict) or not deb.get("url"):
         raise UpdateError("没有可用的更新；先检查更新")
     package = _download(deb)
+    if WINDOWS:
+        return _apply_windows(Path(root), data, package)
     command = ["apt-get", "install", "-y", "--no-install-recommends", str(package)]
     manual = f"sudo apt install -y ./{package.name}  （在 {package.parent} 目录下执行）"
     prefix = _privileged(unattended)
@@ -153,3 +182,20 @@ def apply(root: Path, *, unattended: bool = False) -> dict:
         raise UpdateError(f"安装失败：{(result.stderr or result.stdout).strip()[-300:]}")
     _write(Path(root), {"available": False, "version": data.get("version"), "checked_at": data.get("checked_at")})
     return {"installed": True, "version": data.get("version"), "restart": _restart()}
+
+
+def _apply_windows(root: Path, data: dict, package: Path) -> dict:
+    """Run the installer for all users from a one-time SYSTEM task (it stops and restarts this service)."""
+    hidden = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    command = f'"{package}" /S /AllUsers /UPDATE'
+    when = time.strftime("%H:%M", time.localtime(time.time() + 120))
+    created = subprocess.run(["schtasks", "/Create", "/TN", TASK, "/TR", command, "/SC", "ONCE", "/ST", when,
+                              "/RU", "SYSTEM", "/RL", "HIGHEST", "/F"], capture_output=True, text=True,
+                             creationflags=hidden)
+    if created.returncode != 0:
+        raise UpdateError(f"无法安排安装任务：{(created.stderr or created.stdout).strip()[-200:]}")
+    started = subprocess.run(["schtasks", "/Run", "/TN", TASK], capture_output=True, text=True, creationflags=hidden)
+    if started.returncode != 0:
+        raise UpdateError(f"无法启动安装任务：{(started.stderr or started.stdout).strip()[-200:]}")
+    _write(root, {"available": False, "version": data.get("version"), "checked_at": data.get("checked_at")})
+    return {"installed": True, "version": data.get("version"), "restart": "system"}
