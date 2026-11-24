@@ -811,7 +811,9 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
         hub.extra_features = (*hub.extra_features, REMOTE_HUB_FEATURE)
         p2p_state["sidecar"] = p2p_mod.AgentSidecar(p2p_exe)
     if p2p_exe:
-        p2p_state["connector"] = p2p_mod.Connector(p2p_exe)
+        from .lifecycle import log_path as manager_log_path
+        p2p_state["connector"] = p2p_mod.Connector(
+            p2p_exe, log_dir=manager_log_path(sup.cfg.root).parent / "p2p-connect")
 
     async def p2p_config() -> dict | None:
         if not await hub.wait_available(HUB_RECONNECT_WAIT_S):

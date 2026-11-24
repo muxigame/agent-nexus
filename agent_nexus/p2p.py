@@ -148,11 +148,19 @@ class _Link:
         return not self.lost and self.process.returncode is None
 
 
+def _safe_name(target: str) -> str:
+    """A device id as a file name (ids are already tame; this only guards the path)."""
+    return "".join(c if c.isalnum() or c in "-._" else "_" for c in target)[:80] or "target"
+
+
 class Connector:
     """``muxi-p2p-agent connect`` processes, one per target device."""
 
-    def __init__(self, exe: str):
+    def __init__(self, exe: str, log_dir: Path | None = None):
         self.exe = exe
+        #: one file per target with the forwarder's own log of its last attempt (NAT type,
+        #: decoys, port sweep, candidates): what a failed punch is diagnosed from.
+        self.log_dir = log_dir
         self.links: dict[str, _Link] = {}
         self.locks: dict[str, asyncio.Lock] = {}
 
@@ -172,6 +180,8 @@ class Connector:
     async def _open(self, config: dict, target: str, headers: dict) -> _Link:
         env = {**os.environ, "MUXI_TCP_PUNCH": "1",
                "MUXI_CONTROL_PLANE_HEADERS": "\n".join(f"{k}: {v}" for k, v in headers.items())}
+        if self.log_dir is not None:
+            env["MUXI_LOG_FILE"] = str(self.log_dir / f"{_safe_name(target)}.log")
         process = await asyncio.create_subprocess_exec(
             self.exe, "connect", "--control-plane", config["control_plane"], "--server-id", target,
             "--reflector", ",".join(config.get("reflectors") or []), env=env,

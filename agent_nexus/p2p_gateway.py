@@ -118,7 +118,8 @@ class P2PGateway:
             if self._reflector is not None:
                 return
             from muxi_p2p_signaling.reflector import Reflector
-            self._reflector = await Reflector(self.bind, self.udp_ports, self.tcp_ports).start()
+            self._reflector = await Reflector(self.bind, self.udp_ports, self.tcp_ports,
+                                              addresses=self.reflector_hosts).start()
             log.info("p2p reflector listening: %s", self._reflector.bound)
 
     async def close(self) -> None:
