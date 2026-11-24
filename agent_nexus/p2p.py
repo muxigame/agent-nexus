@@ -179,18 +179,25 @@ class Connector:
             creationflags=NO_WINDOW)
         assert process.stdout is not None
         deadline = time.monotonic() + CONNECT_TIMEOUT_S
+        last = ""  # the forwarder's last progress line: where it was when it gave up
         try:
             while True:
                 remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise RuntimeError("打洞超时")
-                raw = await asyncio.wait_for(process.stdout.readline(), remaining)
+                try:
+                    if remaining <= 0:
+                        raise asyncio.TimeoutError
+                    raw = await asyncio.wait_for(process.stdout.readline(), remaining)
+                except asyncio.TimeoutError:
+                    raise RuntimeError(f"打洞超时（{CONNECT_TIMEOUT_S:.0f} 秒）" + (f"，停在：{last}" if last else "")) from None
                 if not raw:
-                    raise RuntimeError("打洞进程退出")
+                    raise RuntimeError("打洞进程退出" + (f"，最后：{last}" if last else ""))
                 try:
                     event = json.loads(raw)
                 except ValueError:
                     continue
+                if event.get("event") == "progress" and event.get("text"):
+                    last = str(event["text"])[:200]
+                    log.info("p2p connect %s: %s", target, last)
                 if event.get("event") == "ready":
                     link = _Link(process, int(event["port"]), str(event.get("route") or "P2P"))
                     asyncio.ensure_future(self._watch(link))
