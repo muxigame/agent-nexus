@@ -26,6 +26,9 @@ log = logging.getLogger(__name__)
 FEATURE = "p2p/1"
 
 
+#: Punch requests per source IP per 30 s (muxi_p2p_signaling's public default is 4).
+PUNCH_QUOTA = 30
+
 class P2PGateway:
     def __init__(self, config: dict, state_dir: Path, *, hub, store, device_credential, owner):
         settings = config.get("p2p") if isinstance(config.get("p2p"), dict) else {}
@@ -99,7 +102,10 @@ class P2PGateway:
         from fastapi import FastAPI
         from muxi_p2p_signaling import configure, router
 
-        configure(secret_provider=self.secret_for, access_guard=self.guard, diagnostics=False, relay_host="")
+        # Callers are devices the guard authenticated, often several behind one office NAT:
+        # a higher punch quota than the public default (4 per 30 s per IP).
+        configure(secret_provider=self.secret_for, access_guard=self.guard, diagnostics=False, relay_host="",
+                  punch_quota=PUNCH_QUOTA)
         app = FastAPI(title="Agent Nexus P2P signaling", docs_url=None, redoc_url=None, openapi_url=None)
         app.include_router(router)
         return app
