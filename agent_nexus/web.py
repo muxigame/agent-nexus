@@ -25,6 +25,9 @@ from .ui_assets import static_dir_route, ui_route, vendor_route
 
 STATIC_DIR = Path(__file__).parent / "static"
 ACTIONS = {"start", "stop", "restart"}
+#: How long a P2P request waits for a dropped gateway link to come back (a keepalive
+#: timeout reconnects in a few seconds) before it gives up.
+HUB_RECONNECT_WAIT_S = 10.0
 CONFIG_FIELDS: dict[str, type] = {"port": int, "autostart": bool, "autorestart": bool, "enabled": bool}
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 ICON_HEADERS = {
@@ -811,7 +814,9 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
         p2p_state["connector"] = p2p_mod.Connector(p2p_exe)
 
     async def p2p_config() -> dict | None:
-        if not (hub.available and P2P_FEATURE in hub.features):
+        if not await hub.wait_available(HUB_RECONNECT_WAIT_S):
+            raise remote.RemoteError(503, "与网关的连接正在重连，请稍后再试", "hub_reconnecting")
+        if P2P_FEATURE not in hub.features:
             return None
         if p2p_state["config"] is None:
             p2p_state["config"] = await hub.call("p2p_config", {}, timeout=20)

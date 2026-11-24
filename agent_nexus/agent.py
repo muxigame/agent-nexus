@@ -141,10 +141,20 @@ class HubLink:
         self.extra_features: tuple[str, ...] = ()
         #: Coroutine functions run after every (re)connect, e.g. the manager's lock report.
         self.on_attach: list[Any] = []
+        #: Set while attached; lets callers wait out a reconnect (keepalive timeouts
+        #: take a few seconds to heal) instead of failing at once.
+        self._attached = asyncio.Event()
 
     @property
     def available(self) -> bool:
         return self._send is not None and anx_features.HUB_CALL in self.features
+
+    async def wait_available(self, timeout: float) -> bool:
+        """``available``, waiting up to ``timeout`` seconds for a reconnect to finish."""
+        if not self.available:
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(self._attached.wait(), timeout)
+        return self.available
 
     def attach(self, send, anx: Any) -> None:
         self.features = anx_features.parse_features(anx)
@@ -152,6 +162,7 @@ class HubLink:
         name = anx.get("display_name") if isinstance(anx, dict) else None
         self.display_name = name if isinstance(name, str) and len(name) <= 255 else None
         self._send = send
+        self._attached.set()
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:  # attached outside a loop (tests); nothing to report from here
@@ -162,6 +173,7 @@ class HubLink:
 
     def detach(self) -> None:
         self._send = None
+        self._attached.clear()
         self.features = frozenset()
         for future in self._pending.values():
             if not future.done():
