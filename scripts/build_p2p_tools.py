@@ -7,7 +7,13 @@
   (self-contained, single file; needs the .NET 9 SDK).
 * MsQuic next to it, so QUIC hole punching works where the OS has none (Windows 10, Server 2019,
   Ubuntu without Microsoft's repository): ``msquic.dll`` from the NuGet package
-  Microsoft.Native.Quic.MsQuic.Schannel, ``libmsquic.so.2`` from Microsoft's Ubuntu package.
+  Microsoft.Native.Quic.MsQuic.OpenSSL, ``libmsquic.so.2`` from Microsoft's Ubuntu package.
+
+  The OpenSSL build, not the SChannel one: SChannel's TLS 1.3 only exists from Windows build
+  20145 (Windows 11 / Server 2022), and .NET refuses QUIC below that with an SChannel msquic
+  ("Current Windows version (10.0.19042) is not supported by QUIC") -- every Windows 10 fell back
+  to TCP punching. The OpenSSL build carries its own TLS, so .NET does not check the version
+  (MC shipped this build before the split; verified on Windows 10 20H2).
   Both downloads are pinned by version and SHA-256. MIT, see ``LICENSE-msquic.txt``.
 
 The build scripts take the folder from ``ANX_P2P_TOOLS``.
@@ -31,9 +37,9 @@ ROOT = Path(__file__).resolve().parents[1]
 PROJECT = ROOT / "third_party/muxi-p2p/agent/src/MuxiP2P.Agent/MuxiP2P.Agent.csproj"
 MSQUIC_VERSION = "2.6.4"
 DOWNLOADS = {
-    "win-x64": (f"https://api.nuget.org/v3-flatcontainer/microsoft.native.quic.msquic.schannel/{MSQUIC_VERSION}/"
-                f"microsoft.native.quic.msquic.schannel.{MSQUIC_VERSION}.nupkg",
-                "fd0dbcb39bb2069ec31d790a7fa0c1eb4866a3d766aa3752bfde6ccebb778842"),
+    "win-x64": (f"https://api.nuget.org/v3-flatcontainer/microsoft.native.quic.msquic.openssl/{MSQUIC_VERSION}/"
+                f"microsoft.native.quic.msquic.openssl.{MSQUIC_VERSION}.nupkg",
+                "370baf73845ac516a7acb53394ebf889ca947f7826a0e74f8f8c332b3627adb5"),
     "linux-x64": (f"https://packages.microsoft.com/ubuntu/22.04/prod/pool/main/libm/libmsquic/libmsquic_{MSQUIC_VERSION}_amd64.deb",
                   "c81352050683672eca2a7794c8129da73caca1556b1ce1ff2b7784dd24897227"),
 }
