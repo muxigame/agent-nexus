@@ -206,7 +206,9 @@ def test_ubuntu_update_check_and_manual_install(tmp_path, monkeypatch):
     linux_update.check(tmp_path)
     monkeypatch.delenv("DISPLAY", raising=False)
     monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
-    result = linux_update.apply(tmp_path)  # no desktop session: the command to run
+    # no root, no passwordless sudo (CI runners have one), no desktop session: the command to run
+    monkeypatch.setattr(linux_update, "_privileged", lambda unattended: None)
+    result = linux_update.apply(tmp_path)
     assert result["installed"] is False and "apt install" in result["manual"]
     assert (tmp_path / "cache" / "agent-nexus" / "agent-nexus_99.0.0_amd64.deb").read_bytes() == b"not the package"
 

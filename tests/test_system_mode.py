@@ -136,23 +136,23 @@ def test_migrate_copies_state_not_logs_and_sets_the_default_account(monkeypatch,
     (source / "agent-nexus.json").write_text(json.dumps({"cloud": {"enabled": True}}))
     module._migrate(source)
     system = tmp_path / "system"
-    assert (system / "secrets/cloud/device-token").read_text() == "token"
+    assert (system / "secrets/cloud/device-token").read_text(encoding="utf-8") == "token"
     assert (system / "plugin-data/device/state.json").is_file()
     assert (system / ".anx/lock.json").is_file()
     assert not (system / ".anx/logs").exists()
-    assert (system / "migrated-from").read_text().strip() == str(source)
+    assert (system / "migrated-from").read_text(encoding="utf-8").strip() == str(source)
     module._default_account("me")
     module._default_account("someone-else")  # an existing choice is kept
-    data = json.loads((system / "agent-nexus.json").read_text())
+    data = json.loads((system / "agent-nexus.json").read_text(encoding="utf-8"))
     assert data["accounts"] == {"default": "me"}
     assert data["cloud"] == {"enabled": True}
 
 
 def test_package_ships_the_system_unit_autostart_and_scripts():
-    unit = (PACKAGING / "agent-nexus.service").read_text()
+    unit = (PACKAGING / "agent-nexus.service").read_text(encoding="utf-8")
     assert "ANX_ROOT=/var/lib/agent-nexus" in unit and "WantedBy=multi-user.target" in unit
     assert "Restart=always" in unit
-    autostart = (PACKAGING / "agent-nexus-session.desktop").read_text()
+    autostart = (PACKAGING / "agent-nexus-session.desktop").read_text(encoding="utf-8")
     assert "Exec=/usr/bin/agent-nexus session" in autostart
     postinst = (PACKAGING / "postinst").read_bytes()
     assert b"\r\n" not in postinst
