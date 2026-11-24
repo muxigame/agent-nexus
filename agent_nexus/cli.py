@@ -78,6 +78,10 @@ def _uptime(seconds: int | None) -> str:
     return f"{h}h{m:02d}m" if h else f"{m}m{s:02d}s"
 
 
+#: How long the tray may take to end after the console stopped (cmd_serve).
+TRAY_STOP_GRACE_S = 15.0
+
+
 def cmd_serve(args: argparse.Namespace, cfg: ManagerConfig) -> int:
     if Api(cfg).alive():
         print(f"agent-nexus is already running at {cfg.base_url}")
@@ -133,13 +137,27 @@ def cmd_serve(args: argparse.Namespace, cfg: ManagerConfig) -> int:
             print(f"console could not listen on {cfg.base_url}", file=sys.stderr)
             return 1
 
+        tray_done = threading.Event()
+
         def stop_tray_with_console() -> None:
             http.join()
             life.note_exit("console HTTP server stopped")
             tray.stop()
+            # pystray's Windows message loop has been seen to keep running after stop(): the process
+            # then lingers with its tray icon and no console, and the next manager shows a second
+            # icon. Do not linger: stop the plugins, take the icon away and end the process.
+            if not tray_done.wait(TRAY_STOP_GRACE_S):
+                life.note_exit(f"tray did not stop within {TRAY_STOP_GRACE_S:.0f}s; ending the process")
+                try:
+                    sup.shutdown()
+                    tray.hide()
+                finally:
+                    life.finish()
+                    os._exit(0)
 
         threading.Thread(target=stop_tray_with_console, name="anx-http-watch", daemon=True).start()
         tray.run()
+        tray_done.set()
         life.note_exit("tray message loop ended")
         server.should_exit = True
         http.join(timeout=10)

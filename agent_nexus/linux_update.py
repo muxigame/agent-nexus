@@ -111,6 +111,9 @@ def _download(deb: dict) -> Path:
     cache.mkdir(parents=True, exist_ok=True)
     name = Path(str(deb.get("filename") or "agent-nexus_amd64.deb")).name
     target = cache / name
+    for old in cache.glob("agent-nexus_*"):  # earlier installers (~130 MB each) are not needed again
+        if old.name != name:
+            old.unlink(missing_ok=True)
     digest = hashlib.sha256()
     with httpx.stream("GET", deb["url"], timeout=120, follow_redirects=True, trust_env=False) as response:
         response.raise_for_status()

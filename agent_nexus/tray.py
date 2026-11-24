@@ -206,6 +206,13 @@ class Tray:
 
         self.icon.run(setup)
 
+    def hide(self) -> None:
+        """Take the icon out of the notification area now (before the process ends without a stop)."""
+        try:
+            self.icon.visible = False
+        except Exception:
+            pass
+
     def stop(self) -> None:
         self.sup.tray_visible = False
         self._stop.set()

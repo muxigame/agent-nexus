@@ -25,6 +25,25 @@ def test_previous_manager_that_died_is_reported(tmp_path, caplog):
     assert "ended without a clean exit" in caplog.text
 
 
+def test_a_previous_manager_that_never_finished_exiting_is_ended(tmp_path, caplog):
+    """A manager whose tray loop never ended lingers with a tray icon: the next one ends it."""
+    import subprocess
+    import sys
+
+    import psutil
+    lingering = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        write_state(tmp_path, pid=lingering.pid, create_time=psutil.Process(lingering.pid).create_time(),
+                    started=time.time() - 600, state="exited", requested=True, reason="console API")
+        with caplog.at_level(logging.WARNING, logger="agent_nexus.lifecycle"):
+            Lifecycle(tmp_path)._report_previous()
+        assert lingering.wait(10) is not None
+        assert "still running without its console" in caplog.text
+    finally:
+        if lingering.poll() is None:
+            lingering.kill()
+
+
 def test_requested_exit_is_recorded_for_the_desktop_app(tmp_path):
     life = Lifecycle(tmp_path)
     life.request_exit("tray menu")

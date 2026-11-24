@@ -109,7 +109,17 @@ class Lifecycle:
             previous = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return
-        if previous.get("state") == "running" and not _alive(previous):
+        if previous.get("pid") != os.getpid() and _alive(previous):
+            # This manager could take the console port, so that one serves nothing any more: it
+            # did not finish exiting (a tray loop that never ended) and would only leave a second
+            # tray icon behind.
+            log.warning("previous manager (pid %s, %s) is still running without its console; ending it",
+                        previous.get("pid"), previous.get("state"))
+            try:
+                psutil.Process(int(previous["pid"])).kill()
+            except (psutil.Error, KeyError, TypeError, ValueError) as exc:
+                log.warning("could not end the previous manager: %s", exc)
+        elif previous.get("state") == "running" and not _alive(previous):
             log.warning("previous manager (pid %s, started %s) ended without a clean exit; last heartbeat %s. "
                         "It was killed or crashed natively; see anx-faults.log for a native traceback.",
                         previous.get("pid"), _stamp(previous.get("started")), _stamp(previous.get("heartbeat")))
