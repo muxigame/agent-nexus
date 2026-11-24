@@ -111,11 +111,11 @@ def test_update_state_file(tmp_path):
 def test_update_mode_auto_notify_off(monkeypatch):
     from agent_nexus import auto_update
     monkeypatch.setattr(auto_update, "headless", lambda: False)
-    assert desktop.update_mode({}) == ("notify", None)
+    assert desktop.update_mode({}) == ("auto", None)
     assert desktop.update_mode({"desktop": {"update": {"mode": "off"}}}) == ("off", None)
-    assert desktop.update_mode({"desktop": {"update": {"mode": "auto"}}}) == ("auto", None)
+    assert desktop.update_mode({"desktop": {"update": {"mode": "notify"}}}) == ("notify", None)
     mode, warning = desktop.update_mode({"desktop": {"update": {"mode": "weird"}}})
-    assert mode == "notify" and "weird" in warning
+    assert mode == "auto" and "weird" in warning
     monkeypatch.setattr(auto_update, "headless", lambda: True)  # no desktop: nobody to click
     assert desktop.update_mode({}) == ("auto", None)
 

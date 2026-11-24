@@ -410,6 +410,9 @@ def build_cloud_app(config: dict, root: Path):
     # Remote terminal: GET /api/devices/{id}/terminal and its WebSocket (term/1 devices).
     from .terminal_bridge import TerminalBridge
     app.router.routes[0:0] = TerminalBridge(console, device_credential=device_credential).routes()
+    # File transfer through the gateway when no tunnel can be punched (files/1 devices).
+    from .files_bridge import FilesBridge
+    app.router.routes[0:0] = FilesBridge(console, device_credential=device_credential).routes()
     # P2P tunnels between devices (muxi-p2p): signaling under /p2p, the reflector, tunnel tokens.
     from .p2p_gateway import P2PGateway
     p2p = P2PGateway(config, state_db_path(config, root).parent, hub=hub, store=store,

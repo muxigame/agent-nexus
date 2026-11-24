@@ -11,6 +11,12 @@ nothing on this machine -- not even another local program -- gets a shell throug
 
 After the line both sides speak frames: ``type (1 byte) | length (4 bytes, big endian) | payload``.
 Types: 0 data, 1 resize ``{"cols","rows"}``, 2 ready ``{...}``, 3 exit ``{"code"}``, 4 error ``{"error"}``.
+
+``files`` (``file_share.py``): the hello carries ``op``.
+``list`` ``{"path"}`` -> ready ``{listing}``.
+``get`` ``{"path", "offset"}`` -> ready ``{"name", "size"}``, data frames, exit ``{"code": 0}``.
+``put`` ``{"dir", "name", "size"}`` -> ready ``{"id", ...}``; the caller sends data frames and then
+exit; the reply is exit ``{"code": 0, "path", "size"}`` (or error).
 """
 from __future__ import annotations
 
@@ -31,7 +37,7 @@ TICKET_TTL_S = 60.0
 MAX_LINE = 4096
 MAX_FRAME = 1024 * 1024
 DATA, RESIZE, READY, EXIT, ERROR = 0, 1, 2, 3, 4
-SERVICES = ("terminal", "desktop")
+SERVICES = ("terminal", "desktop", "files")
 
 
 def frame(kind: int, payload: bytes | dict) -> bytes:
@@ -52,9 +58,10 @@ def hello(service: str, ticket: str, **extra: Any) -> bytes:
 
 
 class RemoteHub:
-    def __init__(self, terminals, *, desktop=None):
+    def __init__(self, terminals, *, desktop=None, files=None):
         self.terminals = terminals
         self.desktop = desktop
+        self.files = files
         self.tickets: dict[str, tuple[float, str, str]] = {}  # ticket -> (expires, service, caller)
         self.server: asyncio.base_events.Server | None = None
         self.port = 0
@@ -62,7 +69,8 @@ class RemoteHub:
     # -- tickets (reverse RPC from the gateway)
     async def issue(self, params: dict) -> dict:
         service = str(params.get("service") or "")
-        if service not in SERVICES or (service == "desktop" and self.desktop is None):
+        if service not in SERVICES or (service == "desktop" and self.desktop is None) \
+                or (service == "files" and self.files is None):
             return {"error": f"this device does not offer {service or 'that service'}"}
         now = time.monotonic()
         self.tickets = {k: v for k, v in self.tickets.items() if v[0] > now}
@@ -105,6 +113,8 @@ class RemoteHub:
                 await self._terminal(request, reader, writer)
             elif service == "desktop" and self.desktop is not None:
                 await self.desktop.serve(request, reader, writer)
+            elif service == "files" and self.files is not None:
+                await self._files(request, reader, writer)
         except (asyncio.IncompleteReadError, asyncio.TimeoutError, ConnectionError, ValueError):
             pass
         except Exception:
@@ -156,6 +166,65 @@ class RemoteHub:
                     await task
             with contextlib.suppress(Exception):
                 await self.terminals.close({"sid": sid})
+
+    async def _files(self, request: dict, reader, writer) -> None:
+        from .file_share import STREAM_CHUNK, FileShareError
+
+        files = self.files
+        op = str(request.get("op") or "")
+
+        async def fail(message: str) -> None:
+            writer.write(frame(ERROR, {"error": message}))
+            await writer.drain()
+
+        try:
+            if op == "list":
+                writer.write(frame(READY, await asyncio.to_thread(files.list, request)))
+                await writer.drain()
+            elif op == "get":
+                path, size = await asyncio.to_thread(files.stat_file, request)
+                offset = max(0, int(request.get("offset") or 0))
+                writer.write(frame(READY, {"name": path.name, "size": size, "offset": offset}))
+                await writer.drain()
+                handle = await asyncio.to_thread(open, path, "rb")
+                try:
+                    await asyncio.to_thread(handle.seek, offset)
+                    while True:
+                        data = await asyncio.to_thread(handle.read, STREAM_CHUNK)
+                        if not data:
+                            break
+                        writer.write(frame(DATA, data))
+                        await writer.drain()
+                finally:
+                    handle.close()
+                writer.write(frame(EXIT, {"code": 0}))
+                await writer.drain()
+            elif op == "put":
+                started = await asyncio.to_thread(files.begin, request)
+                writer.write(frame(READY, started))
+                await writer.drain()
+                upload = {"id": started["id"]}
+                done = False
+                try:
+                    while True:
+                        kind, payload = await read_frame(reader)
+                        if kind == DATA:
+                            await asyncio.to_thread(files.write_bytes, upload, payload)
+                        elif kind == EXIT:
+                            result = await asyncio.to_thread(files.finish, upload)
+                            done = True
+                            writer.write(frame(EXIT, {"code": 0, **result}))
+                            await writer.drain()
+                            return
+                finally:
+                    if not done:
+                        files.abort(upload)
+            else:
+                await fail(f"unknown files op {op!r}")
+        except FileShareError as exc:
+            await fail(str(exc))
+        except OSError as exc:
+            await fail(f"{type(exc).__name__}: {exc}")
 
     def handlers(self) -> dict:
         return {"remote_ticket": self.issue}

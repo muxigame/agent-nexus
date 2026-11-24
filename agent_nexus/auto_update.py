@@ -1,13 +1,14 @@
 """Automatic updates of the client (``desktop.update.mode``: ``auto`` / ``notify`` / ``off``).
 
-* ``auto``: check 2 minutes after start and every 5 minutes, and install what is found -- the
-  Windows app through its updater (``agent-nexus.exe --check-update`` / ``--apply-update``), the
-  Ubuntu package with apt (as root, or with passwordless sudo; never a password prompt).
-* ``notify`` (desktop default): the settings page shows the update, installing is a click.
+* ``auto`` (the default everywhere): check 2 minutes after start and every 5 minutes, and
+  install what is found -- the Windows app through its updater (``agent-nexus.exe
+  --check-update`` / ``--apply-update``, a silent installer: no window), the Ubuntu package
+  with apt (as root, or with passwordless sudo; never a password prompt).
+* ``notify``: the settings page shows the update, installing is a click.
 * ``off``: no checks.
 
-A device without a desktop (an Ubuntu server running the service) defaults to ``auto``:
-nobody is there to click.
+The default used to be ``notify`` on a desktop. Devices of one network must run versions that
+understand each other (P2P, file transfer), and a desktop nobody clicks on fell behind for days.
 """
 from __future__ import annotations
 
@@ -43,7 +44,7 @@ def mode(root: Path) -> str:
     value = (((_config(root).get("desktop") or {}).get("update") or {}).get("mode"))
     if value in MODES:
         return value
-    return "auto" if headless() else "notify"
+    return "auto"
 
 
 def set_mode(root: Path, value: str) -> str:

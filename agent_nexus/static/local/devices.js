@@ -2,6 +2,7 @@
 // 在本机终端打开, 吊销 and 删除 -- as this device, unless it is locked.
 import { el, mount, icon, iconHTML, fetchJSON, toast, modal, confirmDialog, emptyState, errorState, pill, relTime } from "/ui/ui.js";
 import { osMark } from "/ui/os-icons.js";
+import { openFiles } from "/local/files.js";
 
 function avatar(device) {
   const mark = osMark(device.os_family);
@@ -73,6 +74,8 @@ export async function devicesPage(ctx) {
   function row(device, locked, remote) {
     const canTerminal = device.online && device.terminal && remote && !locked;
     const canDesktop = device.online && device.desktop && remote && !locked;
+    const canFiles = device.online && device.files && remote && !locked;
+    const whyFiles = locked ? "这台设备已锁定" : !device.online ? "设备不在线" : !device.files ? "对方客户端不支持文件传输（需 0.8.8 以上）" : !remote ? "网关需要 0.8.8 以上" : "";
     const whyDesktop = locked ? "这台设备已锁定" : !device.online ? "设备不在线" : !device.desktop ? "对方没有可共享的桌面（无桌面服务器只有终端），或客户端低于 0.5.0" : "";
     const why = locked ? "这台设备已锁定" : !device.online ? "设备不在线" : !device.terminal ? "对方客户端不支持远程终端（需 0.3.0 以上）" : !remote ? "网关需要 0.4.0 以上" : "";
     return el("div", { class: "list-item", dataset: { device: device.device_id } },
@@ -87,6 +90,9 @@ export async function devicesPage(ctx) {
           href: canDesktop ? `#/desktop/${encodeURIComponent(device.device_id)}` : null,
           title: canDesktop ? "查看并控制对方桌面（打洞直连）" : whyDesktop, "aria-disabled": canDesktop ? null : "true" },
           icon("monitor", { size: 14 }), "远程桌面") : null,
+        el("button", { class: `btn btn-sm ${canFiles ? "" : "disabled"}`, type: "button",
+          title: canFiles ? "浏览、下载对方的文件，或发送文件过去" : whyFiles, "aria-disabled": canFiles ? null : "true",
+          onclick: () => { if (canFiles) openFiles(device); } }, icon("folder-open", { size: 14 }), "文件"),
         el("a", { class: `btn btn-sm ${canTerminal ? "" : "disabled"}`, href: canTerminal ? `#/terminal/${encodeURIComponent(device.device_id)}` : null,
           title: canTerminal ? "在这个窗口里打开终端" : why, "aria-disabled": canTerminal ? null : "true" }, icon("terminal", { size: 14 }), "终端"),
         el("button", { class: "btn btn-ghost btn-sm btn-icon", type: "button", "aria-label": "更多操作", html: iconHTML("ellipsis", { size: 16 }),

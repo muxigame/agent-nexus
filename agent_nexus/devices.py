@@ -172,6 +172,8 @@ class Devices:
             # remote-hub/1 + desktop/1: a P2P tunnel agent, and a desktop to share.
             p2p=bool(peer is not None and "remote-hub/1" in getattr(peer, "features", ())),
             desktop=bool(peer is not None and "desktop/1" in getattr(peer, "features", ())),
+            # files/1: send and fetch files (P2P, else relayed by the gateway).
+            files=bool(peer is not None and "files/1" in getattr(peer, "features", ())),
             # What the device publishes now (names, descriptions, tool counts; never URLs).
             plugins=[{"name": name, "description": str(mcp.get("description") or "")[:300],
                       "tools": len(mcp.get("tools") or []), "error": bool(mcp.get("error"))}

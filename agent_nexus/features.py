@@ -48,7 +48,9 @@ PLUGIN_REPO = "plugin_repo/1"
 TERM = "term/1"
 #: Device features announced only when the process can serve them.
 #: ``desktop/1``: the remote hub also serves the built-in VNC (a device with a desktop).
-AGENT_OPTIONAL_FEATURES: tuple[str, ...] = (PLUGIN_REPO, TERM, "remote-hub/1", "desktop/1")
+#: ``files/1``: file transfer: ``fx_*`` reverse RPC (the relay) and the remote hub's ``files`` service.
+FILES = "files/1"
+AGENT_OPTIONAL_FEATURES: tuple[str, ...] = (PLUGIN_REPO, TERM, "remote-hub/1", "desktop/1", FILES)
 ASK = "ask/1"
 INBOX = "inbox/1"
 WAKE = "wake/1"

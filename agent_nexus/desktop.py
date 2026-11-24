@@ -92,13 +92,12 @@ _update_cache: dict[Path, tuple[float, dict]] = {}
 
 
 def update_mode(config: dict | None) -> tuple[str, str | None]:
-    """``desktop.update.mode``: ``auto``, ``notify`` or ``off``; unset means ``auto`` on a device
-    without a desktop (agent_nexus/auto_update.py) and ``notify`` elsewhere."""
+    """``desktop.update.mode``: ``auto``, ``notify`` or ``off``; unset (or unknown) means ``auto``
+    (agent_nexus/auto_update.py)."""
     value = (((config or {}).get("desktop") or {}).get("update") or {}).get("mode")
     if value in ("auto", "notify", "off"):
         return value, None
-    from .auto_update import headless
-    default = "auto" if headless() else "notify"
+    default = "auto"
     if value is None:
         return default, None
     return default, f"unknown desktop.update.mode {value!r}; using \"{default}\""

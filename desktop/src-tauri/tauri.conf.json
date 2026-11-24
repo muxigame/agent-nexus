@@ -46,7 +46,7 @@
         "https://muxigame-prod-static-cn.oss-cn-hangzhou.aliyuncs.com/agent-nexus/latest.json"
       ],
       "windows": {
-        "installMode": "passive"
+        "installMode": "quiet"
       }
     },
     "deep-link": {

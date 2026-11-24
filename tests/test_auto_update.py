@@ -10,6 +10,8 @@ from agent_nexus import auto_update, desktop, linux_update
 def test_switch_is_saved_in_the_config(tmp_path, monkeypatch):
     monkeypatch.setattr(auto_update, "headless", lambda: False)
     (tmp_path / "agent-nexus.json").write_text(json.dumps({"manager": {"port": 1}}), encoding="utf-8")
+    assert auto_update.mode(tmp_path) == "auto"  # the default on a desktop too
+    assert auto_update.set_mode(tmp_path, "notify") == "notify"
     assert auto_update.mode(tmp_path) == "notify"
     assert auto_update.set_mode(tmp_path, "auto") == "auto"
     data = json.loads((tmp_path / "agent-nexus.json").read_text(encoding="utf-8"))

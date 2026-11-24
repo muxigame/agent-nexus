@@ -476,6 +476,110 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
             return
         await remote.p2p_desktop(socket, port, ticket)
 
+    # -- file transfer with another device: P2P first, else the gateway relays ---------------
+    from . import file_transfer
+    #: device id -> monotonic time of its last failed punch: skip P2P for a while, so that
+    #: browsing folders does not wait for a 20-second punch on every click
+    files_p2p_failed: dict[str, float] = {}
+    FILES_P2P_RETRY_S = 120.0
+
+    async def files_link(device_id: str) -> tuple[tuple[int, str, str] | None, str]:
+        """((port, route, ticket) or None, route label)."""
+        import time as _time
+        failed = files_p2p_failed.get(device_id)
+        if failed is not None and _time.monotonic() - failed < FILES_P2P_RETRY_S:
+            return None, "网关中转（直连刚失败过，稍后再试直连）"
+        try:
+            link = await p2p_link(device_id, "files")
+        except Exception as exc:  # any failure: the relay still works
+            files_p2p_failed[device_id] = _time.monotonic()
+            reason = exc.message if isinstance(exc, remote.RemoteError) else str(exc)
+            log.info("p2p files to %s unavailable (%s); using the gateway relay", device_id, reason)
+            return None, f"网关中转（直连失败：{reason[:80]}）"
+        files_p2p_failed.pop(device_id, None)
+        return link, link[1]
+
+    def files_error(exc: Exception) -> JSONResponse:
+        if isinstance(exc, LockError):
+            return lock_error(exc)
+        if isinstance(exc, remote.RemoteError):
+            return JSONResponse(exc.body(), status_code=exc.status)
+        return JSONResponse({"error": f"{type(exc).__name__}: {exc}"}, status_code=502)
+
+    async def remote_files_list(request: Request) -> JSONResponse:
+        device_id = request.path_params["device_id"]
+        path = request.query_params.get("path", "")
+        try:
+            lock.require_unlocked()
+            link, route = await files_link(device_id)
+            if link is not None:
+                try:
+                    listing = await file_transfer.p2p_list(link[0], link[2], path)
+                    return JSONResponse({**listing, "route": route})
+                except file_transfer.TransferError as exc:
+                    if exc.status == 422:  # the other side answered: a real error, not the path
+                        raise
+                    route = f"网关中转（直连中断：{exc.message[:60]}）"
+                except (OSError, asyncio.TimeoutError, asyncio.IncompleteReadError) as exc:
+                    route = f"网关中转（直连中断：{type(exc).__name__}）"
+            listing = await file_transfer.relay_list(sup.cfg.root, device_id, path)
+            return JSONResponse({**listing, "route": route})
+        except Exception as exc:
+            return files_error(exc)
+
+    async def remote_files_download(request: Request):
+        from urllib.parse import quote as _quote
+        device_id = request.path_params["device_id"]
+        path = request.query_params.get("path", "")
+        try:
+            lock.require_unlocked()
+            link, route = await files_link(device_id)
+            opened = None
+            if link is not None:
+                try:
+                    opened = await file_transfer.p2p_get(link[0], link[2], path)
+                except file_transfer.TransferError as exc:
+                    if exc.status == 422:
+                        raise
+                    route = f"网关中转（直连中断：{exc.message[:60]}）"
+                except (OSError, asyncio.TimeoutError, asyncio.IncompleteReadError) as exc:
+                    route = f"网关中转（直连中断：{type(exc).__name__}）"
+            if opened is None:
+                opened = await file_transfer.relay_get(sup.cfg.root, device_id, path)
+        except Exception as exc:
+            return files_error(exc)
+        meta, chunks = opened
+        name = meta.get("name") or "download"
+        headers = {"Content-Disposition": f"attachment; filename*=UTF-8''{_quote(name)}",
+                   "Content-Length": str(int(meta.get("size") or 0)), "X-ANX-Route": _quote(route),
+                   "Cache-Control": "no-store"}
+        return StreamingResponse(chunks, media_type="application/octet-stream", headers=headers)
+
+    async def remote_files_upload(request: Request) -> JSONResponse:
+        device_id = request.path_params["device_id"]
+        query = request.query_params
+        name = query.get("name", "")
+        try:
+            size = int(query["size"]) if query.get("size") not in (None, "") else None
+        except ValueError:
+            size = None
+        try:
+            lock.require_unlocked()
+            link, route = await files_link(device_id)
+            body = request.stream()
+            if link is not None:
+                # Once the body starts flowing it cannot be replayed: no fallback after this point.
+                result = await file_transfer.p2p_put(link[0], link[2], query.get("dir", ""), name, size, body)
+            else:
+                result = await file_transfer.relay_put(sup.cfg.root, device_id, query.get("dir", ""), name, size, body)
+            return JSONResponse({**result, "route": route})
+        except (OSError, asyncio.TimeoutError, asyncio.IncompleteReadError) as exc:
+            files_p2p_failed[device_id] = __import__("time").monotonic()
+            return JSONResponse({"error": f"直连传输中断（{type(exc).__name__}），请重试：会改走网关中转"},
+                                status_code=502)
+        except Exception as exc:
+            return files_error(exc)
+
     async def remote_terminal_external(request: Request) -> JSONResponse:
         body = await json_body(request) or {}
         try:
@@ -783,6 +887,15 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
         hub.handlers.update(terminals.handlers())
         hub.extra_features = (*hub.extra_features, anx_terminal.FEATURE)
 
+    # -- file transfer (files/1): this device's files for the others, relay and P2P --
+    from . import file_share as anx_file_share
+    file_share = None
+    if getattr(sup.cfg, "files", True):
+        from . import accounts as anx_accounts_files
+        file_share = anx_file_share.FileShare(account=lambda: anx_accounts_files.effective(sup.cfg.root, "terminal"))
+        hub.handlers.update(file_share.handlers())
+        hub.extra_features = (*hub.extra_features, anx_file_share.FEATURE)
+
     # -- P2P tunnels (muxi-p2p): this device's remote hub + tunnel agent, and connect-side links --
     from . import p2p as p2p_mod
     from .features import P2P as P2P_FEATURE
@@ -803,7 +916,7 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
                 desktop_service = vnc.DesktopService(joining.local_hostname())
         if desktop_service is None:
             log.info("remote desktop not offered here: %s", desktop_why or "turned off")
-        remote_hub = RemoteHub(terminals, desktop=desktop_service)
+        remote_hub = RemoteHub(terminals, desktop=desktop_service, files=file_share)
         if desktop_service is not None:
             hub.extra_features = (*hub.extra_features, "desktop/1")
         p2p_state["hub"] = remote_hub
@@ -1168,6 +1281,9 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
         Route("/api/remote/devices/{device_id}/terminal/external", remote_terminal_external, methods=["POST"]),
         WebSocketRoute("/api/remote/devices/{device_id}/terminal/ws", remote_terminal_socket),
         Route("/api/remote/devices/{device_id}/desktop/prepare", remote_desktop_prepare, methods=["POST"]),
+        Route("/api/remote/devices/{device_id}/files", remote_files_list),
+        Route("/api/remote/devices/{device_id}/files/download", remote_files_download),
+        Route("/api/remote/devices/{device_id}/files/upload", remote_files_upload, methods=["POST"]),
         WebSocketRoute("/api/remote/devices/{device_id}/desktop/ws", remote_desktop_socket),
         vendor_route("novnc", STATIC_DIR / "vendor" / "novnc"),
     ]
