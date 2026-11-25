@@ -65,7 +65,7 @@ class MeshManager:
         self.routes: dict[str, str] = {}         # relay -> tunnel route
         self.errors: dict[str, str] = {}
         self.backoff: dict[str, tuple[float, float]] = {}  # relay -> (retry at, current delay)
-        self.measured_at = 0.0
+        self.measured_at = float("-inf")  # never: monotonic() starts near 0 on a freshly booted machine
         self.warmed: dict[str, float] = {}
         self.pinned: set[str] = set()
         self.task: asyncio.Task | None = None
@@ -86,7 +86,7 @@ class MeshManager:
     def wake(self) -> None:
         """The network changed (or a link broke): retry everything now."""
         self.backoff.clear()
-        self.measured_at = 0.0
+        self.measured_at = float("-inf")  # never: monotonic() starts near 0 on a freshly booted machine
 
     async def _loop(self) -> None:
         await asyncio.sleep(FIRST_TICK_S)

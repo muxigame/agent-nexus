@@ -46,3 +46,25 @@ def test_relayed_link_keeps_its_relay_and_stale_reports_drop():
     assert devices.topology()["edges"][0]["via"] == "r"
     hub.peers["a"].links_at = time.monotonic() - devices.LINKS_TTL_S - 1
     assert devices.topology()["edges"] == []
+
+
+def test_gateway_finds_its_own_place(monkeypatch):
+    import socket
+    devices, _hub = directory("a")
+    looked = []
+
+    class Locator:
+        def warm(self):
+            pass
+
+        def lookup(self, ip):
+            looked.append(ip)
+            return {"label": "美国 加利福尼亚", "lat": 34.05, "lon": -118.24} if ip == "198.51.100.7" else None
+
+    monkeypatch.setattr(socket, "getaddrinfo", lambda host, *a: [(0, 0, 0, "", ("198.51.100.7", 0))] if host == "gw.example" else [])
+    devices.locator, devices.gateway_host = Locator(), "gw.example:443"
+    assert devices.gateway_geo()["lat"] == 34.05
+    assert devices.gateway_geo()["lon"] == -118.24 and looked == ["198.51.100.7"]  # cached
+    assert devices.topology()["gateway"]["geo"]["label"] == "美国 加利福尼亚"
+    devices.gateway_host, devices._gateway_geo = None, (float("-inf"), None)
+    assert devices.gateway_geo() is None

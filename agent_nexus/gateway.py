@@ -642,7 +642,7 @@ class Gateway:
                 raise RoutingError("locked: 这台设备已锁定，解锁后才能操作其他设备")
             if action == "list":
                 if self.enrollment is not None:
-                    return {"devices": self.devices.console_list()}
+                    return {"devices": self.devices.console_list(), "gateway": {"geo": self.devices.gateway_geo()}}
                 return {"devices": self.devices.list(include_offline=bool(args.get("include_offline", True)))}
             if action == "topology":
                 return self.devices.topology()

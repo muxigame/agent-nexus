@@ -26,7 +26,7 @@ function presencePill(device, gatewayRtt) {
 function savedView() {
   try {
     const value = localStorage.getItem("anx.devices.view");
-    return value === "topology" || value === "map" ? value : "list";
+    return ["topology", "map", "globe"].includes(value) ? value : "list";
   } catch { return "list"; }
 }
 
@@ -69,7 +69,7 @@ export async function devicesPage(ctx) {
   async function load() {
     let data;
     try {
-      const pictured = view === "topology" || view === "map";
+      const pictured = view !== "list";
       const [devices, conns, network] = await Promise.all([
         fetchJSON("/api/devices", { quiet: true }),
         fetchJSON("/api/remote/connections", { quiet: true }).catch(() => ({})),
@@ -90,7 +90,7 @@ export async function devicesPage(ctx) {
   async function setView(next) {
     view = next;
     drawn = "";
-    if (next === "map") await loadWorld();
+    if (next === "map" || next === "globe") await loadWorld();
     try { localStorage.setItem("anx.devices.view", next); } catch { /* private mode */ }
     if (last) render(last);
     if (scope === "global" && next !== "list") load();  // the network picture comes from the gateway
@@ -107,7 +107,7 @@ export async function devicesPage(ctx) {
     const option = (key, label, glyph) => el("button", { type: "button", "aria-pressed": view === key ? "true" : "false",
       onclick: () => setView(key) }, icon(glyph, { size: 14 }), label);
     const views = el("div", { class: "segmented", role: "group", "aria-label": "显示方式" },
-      option("list", "列表", "list"), option("topology", "拓扑", "network"), option("map", "地图", "map"));
+      option("list", "列表", "list"), option("topology", "拓扑", "network"), option("map", "地图", "map"), option("globe", "地球", "globe"));
     if (view === "list") return views;
     const lens = (key, label, title) => el("button", { type: "button", "aria-pressed": scope === key ? "true" : "false", title,
       onclick: () => setScope(key) }, label);
@@ -131,17 +131,19 @@ export async function devicesPage(ctx) {
 
   function render(data) {
     last = data;
-    const { devices = [], lock = {}, remote = true, conns = {}, network = null } = data;
+    const { devices = [], lock = {}, remote = true, conns = {}, network = null, gateway: listed = {} } = data;
     const links = conns.devices || {};
     const locked = !!lock.locked;
     const global = scope === "global" && network && !network.error;
     const me = devices.find((d) => d.self);
     const picture = global
-      ? { devices: network.devices || devices, edges: network.edges || [], gateway: conns.gateway || {}, scope: "global" }
-      : { devices, edges: localEdges(conns, me?.device_id, devices), gateway: conns.gateway || {}, mesh: conns.mesh, scope: "local" };
+      ? { devices: network.devices || devices, edges: network.edges || [], scope: "global",
+          gateway: { ...(conns.gateway || {}), geo: network.gateway?.geo || listed.geo || null } }
+      : { devices, edges: localEdges(conns, me?.device_id, devices), mesh: conns.mesh, scope: "local",
+          gateway: { ...(conns.gateway || {}), geo: listed.geo || null } };
     // a refresh that changes nothing in the picture keeps it (and its animations, open panel)
     const signature = `${view}|${scope}|${locked}|${remote}|${topologySignature(picture)}`;
-    const pictured = view === "topology" || view === "map";
+    const pictured = view !== "list";
     if (pictured && signature === drawn && holder.querySelector(".topo")) return;
     drawn = pictured ? signature : "";
     const others = devices.filter((d) => !d.self);
@@ -161,7 +163,7 @@ export async function devicesPage(ctx) {
       scope === "global" && network?.error && view !== "list" ? el("div", { class: "banner info" }, icon("info", { size: 18 }),
         el("div", { class: "banner-body" }, el("div", { class: "banner-title" }, "暂时看不到全网连接"),
           el("div", { class: "muted" }, network.error.message || "网关需要 0.8.18 以上"))) : null,
-      others.length && (view === "topology" || view === "map") ? el("section", { class: "card" }, el("div", { class: "card-body" },
+      others.length && view !== "list" ? el("section", { class: "card" }, el("div", { class: "card-body" },
         topology(picture, {
           can: (device) => abilities(device, locked, remote),
           terminal: (device) => { location.hash = `#/terminal/${encodeURIComponent(device.device_id)}`; },
@@ -169,7 +171,7 @@ export async function devicesPage(ctx) {
           desktop: (device) => { location.hash = `#/desktop/${encodeURIComponent(device.device_id)}`; },
           connect: (device) => connect(device),
           locate: locked ? null : (device, location) => locate(device, location),
-        }, { layout: view === "map" ? "map" : "rings", onChange: () => { drawn = ""; render(last); } })))
+        }, { layout: view === "topology" ? "rings" : view })))
       : others.length ? el("div", { class: "list" }, others.map((device) => row(device, locked, remote, links[device.device_id])))
         : el("section", { class: "card" }, el("div", { class: "card-body" }, emptyState({ icon: "monitor", title: "网关里还没有其他设备",
           text: "在网关控制台或“连接云端”页生成邀请码，让其他电脑加入。", compact: true }))));
@@ -281,7 +283,7 @@ export async function devicesPage(ctx) {
     load();
   }
 
-  if (view === "map") await loadWorld();
+  if (view === "map" || view === "globe") await loadWorld();
   await load();
   ctx.every(10000, load);
   window.addEventListener("anx:lockchange", load);

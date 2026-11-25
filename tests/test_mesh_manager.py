@@ -73,10 +73,10 @@ def test_member_keeps_the_two_nearest_relays_pinned_and_warmed():
 def test_home_relays_change_only_for_a_clearly_nearer_one():
     manager, connector, _ = run_mesh({"r1": 40.0, "r22": 50.0, "r333": 60.0})
     assert manager.home == ["r1", "r22"]
-    manager.measured_at = 0  # force a re-measure
+    manager.measured_at = float("-inf")  # force a re-measure (0 is not enough right after boot)
     manager, _, _ = run_mesh({"r1": 40.0, "r22": 50.0, "r333": 45.0}, manager=manager)
     assert manager.home == ["r1", "r22"]  # 45 is not clearly better than 50
-    manager.measured_at = 0
+    manager.measured_at = float("-inf")
     manager, connector, _ = run_mesh({"r1": 40.0, "r22": 50.0, "r333": 20.0}, manager=manager)
     assert manager.home == ["r333", "r1"] and connector.pinned == {"r333", "r1"}
 

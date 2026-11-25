@@ -5,7 +5,10 @@ import { el, mount, icon, fetchJSON, toast, errorState, skeletonRows } from "/ui
 import { topology, topologySignature, loadWorld } from "/ui/topology.js";
 
 function savedView() {
-  try { return localStorage.getItem("anx.console.topology") === "map" ? "map" : "rings"; } catch { return "rings"; }
+  try {
+    const value = localStorage.getItem("anx.console.topology");
+    return value === "map" || value === "globe" ? value : "rings";
+  } catch { return "rings"; }
 }
 
 function summary(devices, edges) {
@@ -30,15 +33,16 @@ export async function topologyPage(ctx) {
   let last = null;
   const holder = el("div", { class: "stack lg" }, skeletonRows(3));
   const option = (key, label, glyph) => el("button", { type: "button", "aria-pressed": view === key ? "true" : "false",
+    dataset: { view: key },
     onclick: async () => {
       view = key; drawn = "";
       try { localStorage.setItem("anx.console.topology", key); } catch { /* private mode */ }
-      for (const b of switcher.children) b.setAttribute("aria-pressed", b === switcher.children[key === "map" ? 1 : 0] ? "true" : "false");
-      if (key === "map") await loadWorld();
+      for (const b of switcher.children) b.setAttribute("aria-pressed", b.dataset.view === key ? "true" : "false");
+      if (key !== "rings") await loadWorld();
       if (last) render(last);
     } }, icon(glyph, { size: 14 }), label);
   const switcher = el("div", { class: "segmented", role: "group", "aria-label": "显示方式" },
-    option("rings", "拓扑", "network"), option("map", "地图", "map"));
+    option("rings", "拓扑", "network"), option("map", "地图", "map"), option("globe", "地球", "globe"));
   mount(page,
     el("div", { class: "page-head" }, el("div", { class: "titles" }, el("h1", {}, "拓扑"),
       el("p", {}, "所有设备之间实际在用的连接，由各设备每 30 秒上报。连接按需建立：没打开过终端、文件或桌面的两台设备之间没有连线是正常的。")),
@@ -56,7 +60,8 @@ export async function topologyPage(ctx) {
 
   function render(data) {
     last = data;
-    const picture = { devices: data.devices || [], edges: data.edges || [], gateway: { origin: data.origin, online: true }, scope: "global" };
+    const picture = { devices: data.devices || [], edges: data.edges || [], scope: "global",
+      gateway: { origin: data.origin, online: true, geo: data.gateway?.geo || null } };
     const signature = `${view}|${topologySignature(picture)}`;
     if (signature === drawn && holder.querySelector(".topo")) return;
     drawn = signature;
@@ -67,7 +72,7 @@ export async function topologyPage(ctx) {
           can: (device) => ({ terminal: device.online && device.terminal, why: !device.online ? "设备不在线" : "设备不支持远程终端" }),
           terminal: (device) => { location.hash = `#/terminal/${encodeURIComponent(device.device_id)}`; },
           locate,
-        }, { layout: view === "map" ? "map" : "rings", onChange: () => { drawn = ""; render(last); } }))));
+        }, { layout: view }))));
   }
 
   async function load() {
@@ -78,7 +83,7 @@ export async function topologyPage(ctx) {
     }
   }
 
-  if (view === "map") await loadWorld();
+  if (view !== "rings") await loadWorld();
   await load();
   ctx.every(10000, load);
 }

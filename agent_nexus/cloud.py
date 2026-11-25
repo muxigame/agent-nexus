@@ -423,6 +423,9 @@ def build_cloud_app(config: dict, root: Path):
     from .geoip import GeoLocator
     facade.devices.locator = GeoLocator(state_db_path(config, root).parent,
                                         ip_of=p2p.device_ip if p2p.enabled else None)
+    from urllib.parse import urlsplit as _split
+    facade.devices.gateway_host = (p2p.reflector_hosts[0] if p2p.reflector_hosts
+                                   else _split(str(config.get("public_url") or "")).hostname)
     if p2p.enabled:
         try:
             from starlette.routing import Mount

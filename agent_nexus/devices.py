@@ -117,6 +117,9 @@ class Devices:
 
     #: geoip.GeoLocator (gateway with p2p): where each device roughly is, for the map view
     locator = None
+    #: the gateway's own public host (its reflector address, else public_url): where it is on the map
+    gateway_host: str | None = None
+    _gateway_geo: tuple = (float("-inf"), None)
 
     def set_location(self, value: Any, location: Any) -> dict:
         agent_id = self.resolve(value)
@@ -160,6 +163,32 @@ class Devices:
     #: ``devices.enrolled_via`` as the console shows it.
     ENROLLED_VIA = {"legacy_env": "agents_map", "agents_map": "agents_map", "agent_groups": "agent_groups",
                     "invite": "invite"}
+
+    def gateway_geo(self) -> dict | None:
+        """Where the gateway itself is: its public host, resolved here, looked up in ip2region.
+
+        Cached for an hour (five minutes while unknown); DNS is the system resolver, the lookup
+        is the same offline database the devices use.
+        """
+        if self.locator is None or not self.gateway_host:
+            return None
+        at, geo = self._gateway_geo
+        now = time.monotonic()
+        if now - at < (3600 if geo else 300):
+            return geo
+        import socket
+        try:
+            host = self.gateway_host.split(":")[0] if self.gateway_host.count(":") == 1 else self.gateway_host
+            ip = socket.getaddrinfo(host, None, socket.AF_INET)[0][4][0]
+        except (OSError, IndexError):
+            ip = None
+        try:
+            self.locator.warm()
+            geo = self.locator.lookup(ip)
+        except Exception:
+            geo = None
+        self._gateway_geo = (now, geo)
+        return geo
 
     def _geo(self, agent_id: str, stored: dict) -> dict | None:
         if self.locator is None:
@@ -266,7 +295,7 @@ class Devices:
             edge["reported_by"] = sorted(set(edge["reported_by"]))
             result.append(edge)
         result.sort(key=lambda e: (e["a"], e["b"], e["kind"]))
-        return {"devices": self.console_list(), "edges": result}
+        return {"devices": self.console_list(), "edges": result, "gateway": {"geo": self.gateway_geo()}}
 
     def console_list(self) -> list[dict]:
         known = self._known()
