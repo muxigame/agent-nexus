@@ -50,7 +50,9 @@ TERM = "term/1"
 #: ``desktop/1``: the remote hub also serves the built-in VNC (a device with a desktop).
 #: ``files/1``: file transfer: ``fx_*`` reverse RPC (the relay) and the remote hub's ``files`` service.
 FILES = "files/1"
-AGENT_OPTIONAL_FEATURES: tuple[str, ...] = (PLUGIN_REPO, TERM, "remote-hub/1", "desktop/1", FILES)
+#: ``relay/1`` (device): forwards other devices' remote-hub streams (docs/relay-mesh.md).
+RELAY = "relay/1"
+AGENT_OPTIONAL_FEATURES: tuple[str, ...] = (PLUGIN_REPO, TERM, "remote-hub/1", "desktop/1", FILES, RELAY)
 ASK = "ask/1"
 INBOX = "inbox/1"
 WAKE = "wake/1"

@@ -174,6 +174,8 @@ class Devices:
             desktop=bool(peer is not None and "desktop/1" in getattr(peer, "features", ())),
             # files/1: send and fetch files (P2P, else relayed by the gateway).
             files=bool(peer is not None and "files/1" in getattr(peer, "features", ())),
+            # relay/1: forwards other devices' streams (docs/relay-mesh.md).
+            relay=bool(peer is not None and "relay/1" in getattr(peer, "features", ())),
             # What the device publishes now (names, descriptions, tool counts; never URLs).
             plugins=[{"name": name, "description": str(mcp.get("description") or "")[:300],
                       "tools": len(mcp.get("tools") or []), "error": bool(mcp.get("error"))}

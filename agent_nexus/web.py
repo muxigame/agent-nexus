@@ -397,15 +397,10 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
         relay_note = "网关中转"
         connector = p2p_state["connector"]
         if connector is not None and query.get("route") != "relay":
-            # Direct first: a ticket from the device, then the P2P tunnel to its remote hub.
+            # Direct first (or through a relay device), then the gateway relay.
             try:
-                config = await p2p_config()
-                if config is None:
-                    raise RuntimeError("网关未开启直连")
-                ticket = await hub.call("remote_ticket", {"device_id": device_id, "service": "terminal"}, timeout=20)
-                _origin, agent_id, token = remote.credentials(sup.cfg.root)
-                port, route = await connector.port_for(config, ticket["server_id"], remote.headers(agent_id, token))
-                await remote.p2p_terminal(socket, port, ticket["ticket"], query, route)
+                path, route, ticket = await p2p_link(device_id, "terminal")
+                await remote.p2p_terminal(socket, path, ticket, query, route)
                 return
             except Exception as exc:  # any failure: the relay still works
                 log.info("p2p terminal to %s unavailable (%s); using the gateway relay", device_id, exc)
@@ -418,22 +413,124 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
                 await socket.send_text(json.dumps({"type": "error", "error": exc.message}, ensure_ascii=False))
                 await socket.close(code=4404)
 
-    async def p2p_link(device_id: str, service: str) -> tuple[int, str, str]:
-        """(loopback port, route, ticket) for a stream to ``device_id``'s remote hub."""
+    async def tunnel_port(device_id: str) -> tuple[int, str]:
+        """(loopback port, route) of this device's P2P tunnel to ``device_id`` (built on demand)."""
         connector = p2p_state["connector"]
         if connector is None:
             raise remote.RemoteError(409, "这台电脑缺少直连组件（muxi-p2p-agent）", "no_p2p")
         config = await p2p_config()
         if config is None:
             raise remote.RemoteError(409, "网关未开启直连（需要 0.5.0 以上）", "no_p2p")
-        ticket = await hub.call("remote_ticket", {"device_id": device_id, "service": service}, timeout=20)
         _origin, agent_id, token = remote.credentials(sup.cfg.root)
         try:
-            port, route = await connector.port_for(config, ticket["server_id"], remote.headers(agent_id, token))
+            return await connector.port_for(config, device_id, remote.headers(agent_id, token))
         except (RuntimeError, OSError, asyncio.TimeoutError) as exc:
-            connector.forget(ticket["server_id"])
+            connector.forget(device_id)
             raise remote.RemoteError(502, f"无法直连：{exc}", "p2p_failed") from None
-        return port, route, ticket["ticket"]
+
+    async def relay_connect(target: str, via: str, caller: str):
+        """On a relay: the onward stream for the ``relay`` service (to the target, or the next relay)."""
+        hop = via or target
+        port, _route = await tunnel_port(hop)
+        reader, writer = await asyncio.wait_for(asyncio.open_connection("127.0.0.1", port), 10)
+        if not via:
+            return reader, writer
+        try:
+            ticket = await hub.call("remote_ticket", {"device_id": via, "service": "relay"}, timeout=20)
+            writer.write(rh_hello("relay", ticket["ticket"], target=target))
+            await writer.drain()
+            kind, payload = await asyncio.wait_for(rh_read_frame(reader), 45)
+            if kind != rh_READY:
+                raise ConnectionError(json.loads(payload).get("error", "next relay refused") if kind == rh_ERROR
+                                      else "next relay: bad answer")
+        except BaseException:
+            writer.close()
+            raise
+        return reader, writer
+
+    #: on a relay: member -> monotonic time of its last warm request
+    relay_members: dict[str, float] = {}
+    RELAY_MEMBER_TTL_S = 900.0
+
+    async def relay_warm(member: str) -> None:
+        """A member chose this relay: a standing tunnel back to it, kept while it keeps asking."""
+        import time as _time
+        await tunnel_port(member)
+        connector = p2p_state["connector"]
+        relay_members[member] = _time.monotonic()
+        connector.pin(member)
+
+        def expire() -> None:
+            if _time.monotonic() - relay_members.get(member, 0) >= RELAY_MEMBER_TTL_S - 1:
+                relay_members.pop(member, None)
+                connector.unpin(member)
+        asyncio.get_running_loop().call_later(RELAY_MEMBER_TTL_S, expire)
+
+    async def mesh_warm(relay_id: str) -> None:
+        """Member side: ask a home relay to keep a tunnel back to us."""
+        me = joining.cloud_config(sup.cfg.root).get("agent_id")
+        port, _route = await tunnel_port(relay_id)
+        ticket = await hub.call("remote_ticket", {"device_id": relay_id, "service": "relay"}, timeout=20)
+        reader, writer = await asyncio.wait_for(asyncio.open_connection("127.0.0.1", port), 10)
+        try:
+            writer.write(rh_hello("relay", ticket["ticket"], target=me, warm=True))
+            await writer.drain()
+            kind, payload = await asyncio.wait_for(rh_read_frame(reader), 50)
+            if kind != rh_READY:
+                raise ConnectionError(json.loads(payload).get("error", "warm refused") if kind == rh_ERROR else "bad answer")
+        finally:
+            writer.close()
+
+    async def mesh_devices() -> list[dict]:
+        listing = await hub.call("device_admin", {"op": "list"}, timeout=20)
+        return list((listing or {}).get("devices", []))
+
+    #: relay device id -> monotonic time it last failed us (skip it for a while)
+    relay_failed: dict[str, float] = {}
+    RELAY_RETRY_S = 120.0
+
+    async def relay_candidates(exclude: set[str]) -> list[dict]:
+        """Online relay devices, the ones we already have a tunnel to first."""
+        import time as _time
+        listing = await hub.call("device_admin", {"op": "list"}, timeout=20)
+        connector = p2p_state["connector"]
+        now = _time.monotonic()
+        rows = [d for d in (listing or {}).get("devices", [])
+                if d.get("relay") and d.get("online") and d.get("device_id") not in exclude
+                and now - relay_failed.get(d.get("device_id"), -1e9) > RELAY_RETRY_S]
+        linked = set(getattr(connector, "links", {}) or {})
+        mesh = p2p_state.get("mesh")
+        order = {r: i for i, r in enumerate(mesh.preferred())} if mesh is not None else {}
+        rows.sort(key=lambda d: (order.get(d.get("device_id"), len(order)),
+                                 d.get("device_id") not in linked, d.get("device_id")))
+        return rows
+
+    async def p2p_link(device_id: str, service: str) -> tuple["Path", str, str]:
+        """(path, route, ticket) for a stream to ``device_id``'s remote hub: direct, else via a relay."""
+        ticket = await hub.call("remote_ticket", {"device_id": device_id, "service": service}, timeout=20)
+        try:
+            port, route = await tunnel_port(ticket["server_id"])
+            return HubPath(port), route, ticket["ticket"]
+        except remote.RemoteError as direct:
+            if direct.code == "no_p2p":
+                raise
+            failure = direct
+        import time as _time
+        me = joining.cloud_config(sup.cfg.root).get("agent_id")
+        for relay in await relay_candidates({device_id, me}):
+            relay_id = relay["device_id"]
+            try:
+                port, _route = await tunnel_port(relay_id)
+                relay_ticket = await hub.call("remote_ticket", {"device_id": relay_id, "service": "relay"}, timeout=20)
+            except Exception as exc:
+                relay_failed[relay_id] = _time.monotonic()
+                log.info("relay %s unavailable for %s: %s", relay_id, device_id, exc)
+                continue
+            name = relay.get("display_name") or relay_id
+            route = f"经 {name} 中转（端到端加密；直连失败：{failure.message[:60]}）"
+            return (HubPath(port, relay_ticket=relay_ticket["ticket"], target=device_id, label=name),
+                    route, ticket["ticket"])
+        raise failure
 
     async def remote_desktop_prepare(request: Request) -> JSONResponse:
         """Build (or reuse) the tunnel first, so the page can say which route it got."""
@@ -446,14 +543,10 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
             config = await p2p_config()
             if config is None:
                 raise remote.RemoteError(409, "网关未开启直连（需要 0.5.0 以上）", "no_p2p")
-            _origin, agent_id, token = remote.credentials(sup.cfg.root)
             device_id = request.path_params["device_id"]
-            try:
-                _port, route = await connector.port_for(config, device_id, remote.headers(agent_id, token))
-            except (RuntimeError, OSError, asyncio.TimeoutError) as exc:
-                connector.forget(device_id)
-                raise remote.RemoteError(502, f"无法直连：{exc}", "p2p_failed") from None
-            return JSONResponse({"route": route})
+            # Only the route matters here; the ticket is thrown away (terminal: every device has one).
+            path, route, _ticket = await p2p_link(device_id, "terminal")
+            return JSONResponse({"route": route, "relayed": path.relayed})
         except LockError as exc:
             return lock_error(exc)
         except remote.RemoteError as exc:
@@ -932,6 +1025,8 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
     from . import p2p as p2p_mod
     from .features import P2P as P2P_FEATURE
     from .remote_hub import FEATURE as REMOTE_HUB_FEATURE, RemoteHub
+    from .remote_hub import Path as HubPath, hello as rh_hello, read_frame as rh_read_frame
+    from .remote_hub import READY as rh_READY, ERROR as rh_ERROR
 
     p2p_exe = p2p_mod.binary(sup.cfg.root)
     p2p_state: dict[str, Any] = {"config": None, "sidecar": None, "connector": None, "hub": None, "sessions": None}
@@ -948,7 +1043,14 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
                 desktop_service = vnc.DesktopService(joining.local_hostname())
         if desktop_service is None:
             log.info("remote desktop not offered here: %s", desktop_why or "turned off")
-        remote_hub = RemoteHub(terminals, desktop=desktop_service, files=file_share)
+        relay_on = getattr(sup.cfg, "relay", "auto") == "on"
+        remote_hub = RemoteHub(terminals, desktop=desktop_service, files=file_share,
+                               relay=(lambda target, via, caller: relay_connect(target, via, caller)) if relay_on else None)
+        if relay_on:
+            remote_hub.relay_warm = lambda member: relay_warm(member)
+            from .features import RELAY as RELAY_FEATURE
+            hub.extra_features = (*hub.extra_features, RELAY_FEATURE)
+            log.info("relay: forwarding other devices' streams (relay.mode = on)")
         if desktop_service is not None:
             hub.extra_features = (*hub.extra_features, "desktop/1")
         p2p_state["hub"] = remote_hub
@@ -987,6 +1089,31 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
             log.warning("p2p tunnel agent not started: %s", exc)
 
     hub.on_attach.append(start_tunnel_agent)
+
+    # -- relay mesh (docs/relay-mesh.md): standing tunnels to the nearest relays --
+    if p2p_state["connector"] is not None and getattr(sup.cfg, "mesh", True):
+        from .mesh import MeshManager
+        p2p_state["mesh"] = MeshManager(
+            me=lambda: joining.cloud_config(sup.cfg.root).get("agent_id") or "",
+            is_relay=getattr(sup.cfg, "relay", "auto") == "on",
+            list_devices=mesh_devices, tunnel_port=tunnel_port, warm=mesh_warm,
+            connector=p2p_state["connector"])
+
+        async def start_mesh() -> None:
+            mesh = p2p_state.get("mesh")
+            try:
+                if mesh is not None and await p2p_config() is not None:
+                    mesh.start()
+            except Exception as exc:
+                log.info("relay mesh not started: %s", exc)
+
+        hub.on_attach.append(start_mesh)
+
+    async def mesh_status(_request: Request) -> JSONResponse:
+        mesh = p2p_state.get("mesh")
+        if mesh is None:
+            return JSONResponse({"enabled": False})
+        return JSONResponse({"enabled": True, **mesh.status()})
 
     async def repo_listing() -> tuple[dict | None, JSONResponse | None]:
         try:
@@ -1311,6 +1438,7 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
         Route("/api/lock", lock_api, methods=["GET", "POST"]),
         Route("/api/accounts", accounts_api, methods=["GET", "PUT"]),
         Route("/api/lock/password", lock_api, methods=["PUT"]),
+        Route("/api/mesh", mesh_status),
         Route("/api/remote/devices/{device_id}/terminal", remote_terminal_info),
         Route("/api/remote/devices/{device_id}/terminal/external", remote_terminal_external, methods=["POST"]),
         WebSocketRoute("/api/remote/devices/{device_id}/terminal/ws", remote_terminal_socket),

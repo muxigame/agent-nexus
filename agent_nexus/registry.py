@@ -182,6 +182,9 @@ class ManagerConfig:
     terminal: bool = True
     #: ``desktop.enabled``: whether other devices may view and control this desktop (default on).
     desktop: bool = True
+    #: ``relay.mode``: forward other devices' streams (docs/relay-mesh.md): on / off / auto.
+    #: ``auto`` is off for now; it will pick well-reachable, always-on machines.
+    relay: str = "auto"
 
     @property
     def path(self) -> Path:
@@ -216,6 +219,9 @@ def load_manager_config(root: Path) -> ManagerConfig:
         cfg.terminal = not (isinstance(terminal, dict) and terminal.get("enabled") is False)
         desktop = data.get("desktop")
         cfg.desktop = not (isinstance(desktop, dict) and desktop.get("enabled") is False)
+        relay = data.get("relay")
+        if isinstance(relay, dict) and relay.get("mode") in ("on", "off", "auto"):
+            cfg.relay = relay["mode"]
     return cfg
 
 

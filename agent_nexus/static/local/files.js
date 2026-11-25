@@ -23,8 +23,11 @@ function join(dir, name, sep) {
 
 function routeTag(route) {
   if (!route) return null;
-  const direct = !route.startsWith("网关中转");
-  return el("span", { class: `pill ${direct ? "ok" : "warn"}`, title: route }, direct ? "P2P 直连" : "网关中转");
+  if (route.startsWith("网关中转")) return el("span", { class: "pill warn", title: route }, "网关中转");
+  // 经某台设备中转（中转组网，端到端加密）："经 X 中转（…）" 只显示前半句
+  const relayed = route.match(/^经 (.+?) 中转/);
+  if (relayed) return el("span", { class: "pill ok", title: route }, `经 ${relayed[1]} 中转`);
+  return el("span", { class: "pill ok", title: route }, "P2P 直连");
 }
 
 export function openFiles(device) {

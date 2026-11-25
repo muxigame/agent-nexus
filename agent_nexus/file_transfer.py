@@ -25,9 +25,7 @@ class TransferError(remote.RemoteError):
 # -- P2P ------------------------------------------------------------------------------------
 
 async def _open(port: int, ticket: str, request: dict):
-    reader, writer = await asyncio.wait_for(asyncio.open_connection("127.0.0.1", port), 10)
-    writer.write(rh.hello("files", ticket, **request))
-    await writer.drain()
+    reader, writer = await rh.as_path(port).open("files", ticket, **request)
     kind, payload = await asyncio.wait_for(rh.read_frame(reader), 30)
     if kind == rh.ERROR:
         writer.close()

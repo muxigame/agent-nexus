@@ -140,16 +140,14 @@ async def p2p_terminal(local, port: int, ticket: str, query: dict, route: str) -
 
     from . import remote_hub as rh
 
-    reader, writer = await asyncio.wait_for(asyncio.open_connection("127.0.0.1", port), 10)
+    def number(name, default):
+        try:
+            return int(query.get(name) or default)
+        except (TypeError, ValueError):
+            return default
+    reader, writer = await rh.as_path(port).open("terminal", ticket, shell=str(query.get("shell") or ""),
+                                                 cols=number("cols", 120), rows=number("rows", 32))
     try:
-        def number(name, default):
-            try:
-                return int(query.get(name) or default)
-            except (TypeError, ValueError):
-                return default
-        writer.write(rh.hello("terminal", ticket, shell=str(query.get("shell") or ""),
-                              cols=number("cols", 120), rows=number("rows", 32)))
-        await writer.drain()
         await local.send_text(json.dumps({"type": "route", "route": route, "p2p": True}, ensure_ascii=False))
 
         async def down():
@@ -209,10 +207,8 @@ async def p2p_desktop(local, port: int, ticket: str) -> None:
 
     from . import remote_hub as rh
 
-    reader, writer = await asyncio.wait_for(asyncio.open_connection("127.0.0.1", port), 10)
+    reader, writer = await rh.as_path(port).open("desktop", ticket)
     try:
-        writer.write(rh.hello("desktop", ticket))
-        await writer.drain()
         kind, payload = await asyncio.wait_for(rh.read_frame(reader), 20)
         if kind != rh.READY:
             reason = json.loads(payload).get("error", "remote desktop refused") if kind == rh.ERROR else "remote desktop refused"

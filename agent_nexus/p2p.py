@@ -168,6 +168,14 @@ class Connector:
         self.log_dir = log_dir
         self.links: dict[str, _Link] = {}
         self.locks: dict[str, asyncio.Lock] = {}
+        #: standing tunnels (relay mesh): never closed for being idle, only when dead
+        self.pinned: set[str] = set()
+
+    def pin(self, target: str) -> None:
+        self.pinned.add(target)
+
+    def unpin(self, target: str) -> None:
+        self.pinned.discard(target)
 
     async def port_for(self, config: dict, target: str, headers: dict) -> tuple[int, str]:
         """A loopback port whose connections are streams to ``target``; raises OSError/RuntimeError."""
@@ -235,7 +243,7 @@ class Connector:
     def reap(self) -> None:
         now = time.monotonic()
         for target, link in list(self.links.items()):
-            if not link.alive or now - link.used > IDLE_S:
+            if not link.alive or (now - link.used > IDLE_S and target not in self.pinned):
                 self.links.pop(target, None)
                 self._kill(link)
 

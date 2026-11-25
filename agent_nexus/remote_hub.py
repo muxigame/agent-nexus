@@ -17,6 +17,17 @@ Types: 0 data, 1 resize ``{"cols","rows"}``, 2 ready ``{...}``, 3 exit ``{"code"
 ``get`` ``{"path", "offset"}`` -> ready ``{"name", "size"}``, data frames, exit ``{"code": 0}``.
 ``put`` ``{"dir", "name", "size"}`` -> ready ``{"id", ...}``; the caller sends data frames and then
 exit; the reply is exit ``{"code": 0, "path", "size"}`` (or error).
+
+Through a relay (docs/relay-mesh.md) the caller first opens the relay's ``relay`` service::
+
+    ANX-REMOTE/1 {"service": "relay", "ticket": "<relay's ticket>", "target": "<device>", "via": "<relay>"?}
+
+and the relay splices the stream onto the target's hub (or the next relay) byte for byte. The
+session inside is end-to-end encrypted (``e2e.py``) and starts with::
+
+    ANX-REMOTE/2 {"service": "...", "tid": "<sha256(ticket)[:32]>", ...}
+
+so the relay never sees the ticket or the content.
 """
 from __future__ import annotations
 
@@ -28,16 +39,26 @@ import logging
 import secrets
 import struct
 import time
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Awaitable, Callable
+
+from . import e2e
 
 log = logging.getLogger(__name__)
 FEATURE = "remote-hub/1"
 MAGIC = b"ANX-REMOTE/1 "
+MAGIC2 = b"ANX-REMOTE/2 "
+#: round-trip probe through a tunnel (relay mesh); answered without a ticket, says nothing
+PING, PONG = b"ANX-PING\n", b"ANX-PONG\n"
 TICKET_TTL_S = 60.0
 MAX_LINE = 4096
 MAX_FRAME = 1024 * 1024
 DATA, RESIZE, READY, EXIT, ERROR = 0, 1, 2, 3, 4
-SERVICES = ("terminal", "desktop", "files")
+SERVICES = ("terminal", "desktop", "files", "relay")
+#: streams one relay forwards at the same time
+RELAY_MAX_STREAMS = 32
+#: (target, via, caller) -> reader/writer onto the target's hub (or the next relay)
+RelayConnect = Callable[[str, str, str], Awaitable[tuple[asyncio.StreamReader, asyncio.StreamWriter]]]
 
 
 def frame(kind: int, payload: bytes | dict) -> bytes:
@@ -57,11 +78,100 @@ def hello(service: str, ticket: str, **extra: Any) -> bytes:
     return MAGIC + json.dumps({"service": service, "ticket": ticket, **extra}).encode("utf-8") + b"\n"
 
 
+def hello2(service: str, ticket: str, **extra: Any) -> bytes:
+    """The end-to-end hello: the ticket stays secret, only its digest is sent."""
+    return MAGIC2 + json.dumps({"service": service, "tid": e2e.ticket_id(ticket), **extra}).encode("utf-8") + b"\n"
+
+
+class RouteError(ConnectionError):
+    """The relay could not reach the target (the target itself was not asked yet)."""
+
+
+@dataclass
+class Path:
+    """How to reach a device's hub: straight through a tunnel, or through a relay.
+
+    ``port`` is the local end of a P2P tunnel -- to the target itself, or to the first relay
+    when ``relay_ticket`` is set (then ``target``/``via`` tell the relay where to go on).
+    """
+    port: int
+    relay_ticket: str = ""
+    target: str = ""
+    via: str = ""
+    label: str = ""
+
+    @property
+    def relayed(self) -> bool:
+        return bool(self.relay_ticket)
+
+    async def open(self, service: str, ticket: str, **extra: Any):
+        """A reader/writer pair with the hello for ``service`` already sent."""
+        reader, writer = await asyncio.wait_for(asyncio.open_connection("127.0.0.1", self.port), 10)
+        if not self.relayed:
+            writer.write(hello(service, ticket, **extra))
+            await writer.drain()
+            return reader, writer
+        try:
+            writer.write(hello("relay", self.relay_ticket, target=self.target, via=self.via))
+            await writer.drain()
+            kind, payload = await asyncio.wait_for(read_frame(reader), 45)
+            if kind != READY:
+                message = json.loads(payload).get("error", "relay refused") if kind == ERROR else "relay: bad answer"
+                raise RouteError(message)
+        except BaseException:
+            writer.close()
+            raise
+        secure_reader, secure_writer = e2e.wrap(reader, writer, ticket, e2e.CALLER)
+        writer.write(hello2(service, ticket, **extra))  # plain line, then everything is sealed
+        await writer.drain()
+        return secure_reader, secure_writer
+
+
+def as_path(route: "int | Path") -> Path:
+    """Callers may still pass a bare tunnel port."""
+    return route if isinstance(route, Path) else Path(int(route))
+
+
+async def splice(a_reader, a_writer, b_reader, b_writer, chunk: int = 256 * 1024) -> int:
+    """Copy both ways until either side ends; returns the bytes moved."""
+    moved = 0
+
+    async def pump(reader, writer):
+        nonlocal moved
+        try:
+            while True:
+                data = await reader.read(chunk)
+                if not data:
+                    break
+                moved += len(data)
+                writer.write(data)
+                await writer.drain()
+        except (ConnectionError, OSError, asyncio.IncompleteReadError):
+            pass
+        finally:
+            with contextlib.suppress(Exception):
+                writer.close()
+
+    tasks = [asyncio.create_task(pump(a_reader, b_writer)), asyncio.create_task(pump(b_reader, a_writer))]
+    try:
+        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+    return moved
+
+
 class RemoteHub:
-    def __init__(self, terminals, *, desktop=None, files=None):
+    def __init__(self, terminals, *, desktop=None, files=None, relay: RelayConnect | None = None):
         self.terminals = terminals
         self.desktop = desktop
         self.files = files
+        #: set on a relay device: connects onward for the ``relay`` service
+        self.relay = relay
+        #: set on a relay device: keep a standing tunnel to a member that chose us (``warm``)
+        self.relay_warm: Callable[[str], Awaitable[None]] | None = None
+        self.relaying = 0
         self.tickets: dict[str, tuple[float, str, str]] = {}  # ticket -> (expires, service, caller)
         self.server: asyncio.base_events.Server | None = None
         self.port = 0
@@ -70,7 +180,7 @@ class RemoteHub:
     async def issue(self, params: dict) -> dict:
         service = str(params.get("service") or "")
         if service not in SERVICES or (service == "desktop" and self.desktop is None) \
-                or (service == "files" and self.files is None):
+                or (service == "files" and self.files is None) or (service == "relay" and self.relay is None):
             return {"error": f"this device does not offer {service or 'that service'}"}
         now = time.monotonic()
         self.tickets = {k: v for k, v in self.tickets.items() if v[0] > now}
@@ -83,6 +193,13 @@ class RemoteHub:
         if entry is None or entry[0] < time.monotonic() or entry[1] != service:
             return None
         return entry[2]
+
+    def _find(self, tid: str) -> str | None:
+        """The ticket whose digest an end-to-end hello names."""
+        for ticket in self.tickets:
+            if secrets.compare_digest(e2e.ticket_id(ticket), tid):
+                return ticket
+        return None
 
     # -- the loopback server
     async def start(self) -> int:
@@ -99,17 +216,31 @@ class RemoteHub:
     async def _serve(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
             line = await asyncio.wait_for(reader.readline(), 15)
-            if not line.startswith(MAGIC) or len(line) > MAX_LINE:
+            pings = 0
+            while line == PING and pings < 16:
+                pings += 1
+                writer.write(PONG)
+                await writer.drain()
+                line = await asyncio.wait_for(reader.readline(), 15)
+            if pings:
                 return
-            request = json.loads(line[len(MAGIC):])
+            if len(line) > MAX_LINE or not (line.startswith(MAGIC) or line.startswith(MAGIC2)):
+                return
+            secure = line.startswith(MAGIC2)
+            request = json.loads(line[len(MAGIC2 if secure else MAGIC):])
             service = str(request.get("service") or "")
-            caller = self._redeem(str(request.get("ticket") or ""), service)
+            ticket = self._find(str(request.get("tid") or "")) if secure else str(request.get("ticket") or "")
+            caller = self._redeem(ticket or "", service)
             if caller is None:
                 writer.write(frame(ERROR, {"error": "ticket invalid or expired"}))
                 await writer.drain()
                 return
-            log.info("remote %s session from %s", service, caller or "?")
-            if service == "terminal":
+            if secure:
+                reader, writer = e2e.wrap(reader, writer, ticket, e2e.TARGET)
+            log.info("remote %s session from %s%s", service, caller or "?", " (end-to-end, relayed)" if secure else "")
+            if service == "relay" and self.relay is not None and not secure:
+                await self._relay(request, caller, reader, writer)
+            elif service == "terminal":
                 await self._terminal(request, reader, writer)
             elif service == "desktop" and self.desktop is not None:
                 await self.desktop.serve(request, reader, writer)
@@ -122,6 +253,44 @@ class RemoteHub:
         finally:
             with contextlib.suppress(Exception):
                 writer.close()
+
+    async def _relay(self, request: dict, caller: str, reader, writer) -> None:
+        target = str(request.get("target") or "")
+        via = str(request.get("via") or "")
+        if not target:
+            writer.write(frame(ERROR, {"error": "relay: no target"}))
+            await writer.drain()
+            return
+        if request.get("warm"):
+            # a member made us one of its home relays: keep a tunnel back to it standing
+            if self.relay_warm is not None:
+                try:
+                    await asyncio.wait_for(self.relay_warm(target), 40)
+                except Exception as exc:
+                    writer.write(frame(ERROR, {"error": f"relay: cannot reach {target}: {str(exc)[:120]}"}))
+                    await writer.drain()
+                    return
+            writer.write(frame(READY, {"warm": target}))
+            await writer.drain()
+            return
+        if self.relaying >= RELAY_MAX_STREAMS:
+            writer.write(frame(ERROR, {"error": "relay: busy"}))
+            await writer.drain()
+            return
+        self.relaying += 1
+        try:
+            try:
+                onward_reader, onward_writer = await asyncio.wait_for(self.relay(target, via, caller), 40)
+            except Exception as exc:
+                writer.write(frame(ERROR, {"error": f"relay: cannot reach {via or target}: {str(exc)[:120]}"}))
+                await writer.drain()
+                return
+            writer.write(frame(READY, {"relay": target}))
+            await writer.drain()
+            moved = await splice(reader, writer, onward_reader, onward_writer)
+            log.info("relayed %s -> %s%s: %d bytes", caller or "?", target, f" via {via}" if via else "", moved)
+        finally:
+            self.relaying -= 1
 
     async def _terminal(self, request: dict, reader, writer) -> None:
         opened = await self.terminals.open({"shell": request.get("shell") or "", "cols": request.get("cols"),
