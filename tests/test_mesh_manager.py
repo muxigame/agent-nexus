@@ -102,3 +102,15 @@ def test_ping_through_a_hub_needs_no_ticket():
             await hub.close()
 
     assert asyncio.run(run()) >= 0
+
+
+def test_an_offline_home_relay_is_dropped_and_the_slot_refilled():
+    manager, connector, _ = run_mesh({"r1": 10.0, "r22": 50.0})
+    assert manager.home == ["r1", "r22"]
+    # r1 goes offline (no longer in the device list); r333 appears
+    offline = [{"device_id": "r22", "relay": True, "online": True},
+               {"device_id": "r333", "relay": True, "online": True},
+               {"device_id": "r1", "relay": True, "online": False}]
+    manager, connector, _ = run_mesh({"r1": 10.0, "r22": 50.0, "r333": 30.0}, manager=manager, devices=offline)
+    assert manager.home == ["r333", "r22"]
+    assert "r1" not in manager.rtt and connector.pinned == {"r333", "r22"}

@@ -134,9 +134,13 @@ class MeshManager:
             self.home = [r for r in relays if r in self.rtt]
             self._pin(set(self.home))
             return
+        # a relay that went offline is no relay of ours: forget what we measured of it
+        for gone in [r for r in self.rtt if r not in relays]:
+            self.rtt.pop(gone, None)
         now = time.monotonic()
         remeasure = now - self.measured_at > REMEASURE_S or not self.home \
-            or any(h not in relays for h in self.home)
+            or any(h not in relays for h in self.home) \
+            or (len(self.home) < HOME_RELAYS and any(r not in self.rtt and self._ready(r) for r in relays))
         if remeasure:
             for relay in relays:
                 if self._ready(relay):
@@ -160,7 +164,7 @@ class MeshManager:
     def _choose(self, measured: list[str]) -> list[str]:
         """The nearest HOME_RELAYS, keeping a current one unless another is clearly nearer."""
         ranked = sorted(measured, key=lambda r: self.rtt[r])
-        keep = [h for h in self.home if h in self.rtt]
+        keep = [h for h in self.home if h in measured]
         for candidate in ranked:
             if len(keep) < HOME_RELAYS:
                 if candidate not in keep:
