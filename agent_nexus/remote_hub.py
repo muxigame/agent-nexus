@@ -48,8 +48,11 @@ log = logging.getLogger(__name__)
 FEATURE = "remote-hub/1"
 MAGIC = b"ANX-REMOTE/1 "
 MAGIC2 = b"ANX-REMOTE/2 "
-#: round-trip probe through a tunnel (relay mesh); answered without a ticket, says nothing
-PING, PONG = b"ANX-PING\n", b"ANX-PONG\n"
+#: round-trip probe through a tunnel (relay mesh); answered without a ticket, says nothing.
+#: Padded on purpose: the tunnel agent holds a new stream until its first 12+ bytes arrived
+#: (it sniffs for a bandwidth-test request), and a bare 9-byte line would just sit there.
+PING = b"ANX-PING/1 " + b"-" * 32 + b"\n"
+PONG = b"ANX-PONG\n"
 TICKET_TTL_S = 60.0
 MAX_LINE = 4096
 MAX_FRAME = 1024 * 1024
@@ -217,7 +220,7 @@ class RemoteHub:
         try:
             line = await asyncio.wait_for(reader.readline(), 15)
             pings = 0
-            while line == PING and pings < 16:
+            while line.startswith(b"ANX-PING") and pings < 16:
                 pings += 1
                 writer.write(PONG)
                 await writer.drain()

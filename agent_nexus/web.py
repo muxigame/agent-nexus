@@ -505,16 +505,21 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
                                  d.get("device_id") not in linked, d.get("device_id")))
         return rows
 
-    async def p2p_link(device_id: str, service: str) -> tuple["Path", str, str]:
-        """(path, route, ticket) for a stream to ``device_id``'s remote hub: direct, else via a relay."""
+    async def p2p_link(device_id: str, service: str, direct: bool = True) -> tuple["Path", str, str]:
+        """(path, route, ticket) for a stream to ``device_id``'s remote hub: direct, else via a relay.
+
+        ``direct=False`` goes through a relay straight away (``route=mesh`` on the API: diagnosis).
+        """
         ticket = await hub.call("remote_ticket", {"device_id": device_id, "service": service}, timeout=20)
-        try:
-            port, route = await tunnel_port(ticket["server_id"])
-            return HubPath(port), route, ticket["ticket"]
-        except remote.RemoteError as direct:
-            if direct.code == "no_p2p":
-                raise
-            failure = direct
+        failure = remote.RemoteError(502, "按要求不直连", "p2p_skipped")
+        if direct:
+            try:
+                port, route = await tunnel_port(ticket["server_id"])
+                return HubPath(port), route, ticket["ticket"]
+            except remote.RemoteError as exc:
+                if exc.code == "no_p2p":
+                    raise
+                failure = exc
         import time as _time
         me = joining.cloud_config(sup.cfg.root).get("agent_id")
         for relay in await relay_candidates({device_id, me}):
@@ -576,14 +581,14 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
     files_p2p_failed: dict[str, float] = {}
     FILES_P2P_RETRY_S = 120.0
 
-    async def files_link(device_id: str) -> tuple[tuple[int, str, str] | None, str]:
-        """((port, route, ticket) or None, route label)."""
+    async def files_link(device_id: str, route: str = "") -> tuple[tuple | None, str]:
+        """((path, route, ticket) or None, route label). ``route``: "mesh" = through a relay only."""
         import time as _time
         failed = files_p2p_failed.get(device_id)
-        if failed is not None and _time.monotonic() - failed < FILES_P2P_RETRY_S:
+        if route != "mesh" and failed is not None and _time.monotonic() - failed < FILES_P2P_RETRY_S:
             return None, "网关中转（直连刚失败过，稍后再试直连）"
         try:
-            link = await p2p_link(device_id, "files")
+            link = await p2p_link(device_id, "files", direct=route != "mesh")
         except Exception as exc:  # any failure: the relay still works
             files_p2p_failed[device_id] = _time.monotonic()
             reason = exc.message if isinstance(exc, remote.RemoteError) else str(exc)
@@ -617,7 +622,7 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
         path = request.query_params.get("path", "")
         try:
             lock.require_unlocked()
-            link, route = await files_link(device_id)
+            link, route = await files_link(device_id, request.query_params.get("route", ""))
             if link is not None:
                 try:
                     listing = await file_transfer.p2p_list(link[0], link[2], path)
@@ -641,7 +646,7 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
         path = request.query_params.get("path", "")
         try:
             lock.require_unlocked()
-            link, route = await files_link(device_id)
+            link, route = await files_link(device_id, request.query_params.get("route", ""))
             opened = None
             if link is not None:
                 try:
@@ -683,7 +688,7 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
 
         try:
             lock.require_unlocked()
-            link, route = await files_link(device_id)
+            link, route = await files_link(device_id, request.query_params.get("route", ""))
             if link is not None:
                 try:
                     result = await file_transfer.p2p_put(link[0], link[2], query.get("dir", ""), name, size, body())

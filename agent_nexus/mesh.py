@@ -19,8 +19,7 @@ from typing import Any, Awaitable, Callable
 
 log = logging.getLogger(__name__)
 
-PING = b"ANX-PING\n"
-PONG = b"ANX-PONG\n"
+from .remote_hub import PING, PONG
 HOME_RELAYS = 2
 TICK_S = 60.0
 FIRST_TICK_S = 20.0
@@ -114,7 +113,7 @@ class MeshManager:
             port, route = await self.tunnel_port(relay)
             rtt = await ping(port)
         except Exception as exc:
-            self._failed(relay, str(getattr(exc, "message", None) or exc))
+            self._failed(relay, str(getattr(exc, "message", None) or exc) or type(exc).__name__)
             return None
         self.backoff.pop(relay, None)
         self.errors.pop(relay, None)
