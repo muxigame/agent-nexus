@@ -499,6 +499,19 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
         files_p2p_failed.pop(device_id, None)
         return link, link[1]
 
+    def files_drop(device_id: str) -> None:
+        """A P2P transfer broke: drop that tunnel and use the relay for a while.
+
+        The connector keeps a tunnel while its local process lives, which says nothing about
+        the far end: after the peer's agent restarts, the cached tunnel is dead and every
+        transfer on it fails at once. Forgetting it makes the next attempt punch anew.
+        """
+        import time as _time
+        files_p2p_failed[device_id] = _time.monotonic()
+        connector = p2p_state["connector"]
+        if connector is not None:
+            connector.forget(device_id)
+
     def files_error(exc: Exception) -> JSONResponse:
         if isinstance(exc, LockError):
             return lock_error(exc)
@@ -519,8 +532,10 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
                 except file_transfer.TransferError as exc:
                     if exc.status == 422:  # the other side answered: a real error, not the path
                         raise
+                    files_drop(device_id)
                     route = f"网关中转（直连中断：{exc.message[:60]}）"
                 except (OSError, asyncio.TimeoutError, asyncio.IncompleteReadError) as exc:
+                    files_drop(device_id)
                     route = f"网关中转（直连中断：{type(exc).__name__}）"
             listing = await file_transfer.relay_list(sup.cfg.root, device_id, path)
             return JSONResponse({**listing, "route": route})
@@ -541,8 +556,10 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
                 except file_transfer.TransferError as exc:
                     if exc.status == 422:
                         raise
+                    files_drop(device_id)
                     route = f"网关中转（直连中断：{exc.message[:60]}）"
                 except (OSError, asyncio.TimeoutError, asyncio.IncompleteReadError) as exc:
+                    files_drop(device_id)
                     route = f"网关中转（直连中断：{type(exc).__name__}）"
             if opened is None:
                 opened = await file_transfer.relay_get(sup.cfg.root, device_id, path)
@@ -563,20 +580,35 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
             size = int(query["size"]) if query.get("size") not in (None, "") else None
         except ValueError:
             size = None
+        started = False
+
+        async def body():
+            nonlocal started
+            async for chunk in request.stream():
+                started = True
+                yield chunk
+
         try:
             lock.require_unlocked()
             link, route = await files_link(device_id)
-            body = request.stream()
             if link is not None:
-                # Once the body starts flowing it cannot be replayed: no fallback after this point.
-                result = await file_transfer.p2p_put(link[0], link[2], query.get("dir", ""), name, size, body)
-            else:
-                result = await file_transfer.relay_put(sup.cfg.root, device_id, query.get("dir", ""), name, size, body)
+                try:
+                    result = await file_transfer.p2p_put(link[0], link[2], query.get("dir", ""), name, size, body())
+                    return JSONResponse({**result, "route": route})
+                except (OSError, asyncio.TimeoutError, asyncio.IncompleteReadError,
+                        file_transfer.TransferError) as exc:
+                    if isinstance(exc, file_transfer.TransferError) and exc.status == 422:
+                        raise
+                    files_drop(device_id)
+                    # Once the body started flowing it cannot be replayed; before that (a dead
+                    # tunnel fails at the handshake) the relay can still take the whole upload.
+                    if started:
+                        return JSONResponse({"error": f"直连传输中断（{type(exc).__name__}），请重试：会改走网关中转"},
+                                            status_code=502)
+                    log.info("p2p upload to %s broke before any data (%s); using the gateway relay", device_id, exc)
+                    route = f"网关中转（直连中断：{type(exc).__name__}）"
+            result = await file_transfer.relay_put(sup.cfg.root, device_id, query.get("dir", ""), name, size, body())
             return JSONResponse({**result, "route": route})
-        except (OSError, asyncio.TimeoutError, asyncio.IncompleteReadError) as exc:
-            files_p2p_failed[device_id] = __import__("time").monotonic()
-            return JSONResponse({"error": f"直连传输中断（{type(exc).__name__}），请重试：会改走网关中转"},
-                                status_code=502)
         except Exception as exc:
             return files_error(exc)
 
@@ -922,7 +954,9 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
         p2p_state["hub"] = remote_hub
         hub.handlers.update(remote_hub.handlers())
         hub.extra_features = (*hub.extra_features, REMOTE_HUB_FEATURE)
-        p2p_state["sidecar"] = p2p_mod.AgentSidecar(p2p_exe)
+        from .lifecycle import log_path as sidecar_log_path
+        p2p_state["sidecar"] = p2p_mod.AgentSidecar(
+            p2p_exe, log_file=sidecar_log_path(sup.cfg.root).parent / "p2p-agent.log")
     if p2p_exe:
         from .lifecycle import log_path as manager_log_path
         p2p_state["connector"] = p2p_mod.Connector(

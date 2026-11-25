@@ -59,8 +59,11 @@ def _free_port(preferred: int) -> int:
 class AgentSidecar:
     """Keeps ``muxi-p2p-agent`` running for this device while the gateway link is up."""
 
-    def __init__(self, exe: str):
+    def __init__(self, exe: str, log_file: Path | None = None):
         self.exe = exe
+        #: the agent's own log (both halves of a punch are needed to debug it; its stdout only
+        #: reaches our debug log)
+        self.log_file = log_file
         self.process: asyncio.subprocess.Process | None = None
         self.task: asyncio.Task | None = None
         self.config: dict | None = None
@@ -85,6 +88,8 @@ class AgentSidecar:
                 "--control-plane", config["control_plane"], "--server-id", config["server_id"],
                 "--reflector", ",".join(config.get("reflectors") or [])]
         env = {**os.environ, "MUXI_TUNNEL_TOKEN": config["token"], "MUXI_TCP_PUNCH": "1"}
+        if self.log_file is not None:
+            env["MUXI_AGENT_LOG"] = str(self.log_file)
         while True:
             started = time.monotonic()
             try:
