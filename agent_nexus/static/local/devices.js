@@ -3,6 +3,23 @@
 import { el, mount, icon, iconHTML, fetchJSON, toast, modal, confirmDialog, emptyState, errorState, pill, relTime } from "/ui/ui.js";
 import { osMark } from "/ui/os-icons.js";
 import { openFiles } from "/local/files.js";
+import { topology } from "/local/topology.js";
+
+/** How this device reaches another one right now (/api/remote/connections). */
+function connPill(device, conn) {
+  if (!device.online || device.self) return null;
+  if (!conn) return el("span", { class: "pill neutral", title: "还没有建立连接：打开终端、文件或桌面时自动选路（直连 → 经中转 → 网关中转），之后三者共用这条连接" }, "未连接");
+  const rtt = conn.rtt_ms != null ? ` · ${conn.rtt_ms}ms` : "";
+  if (conn.state === "direct") return el("span", { class: "pill ok", title: conn.route }, (conn.pinned ? "常驻直连" : "直连") + rtt);
+  if (conn.state === "relay") return el("span", { class: "pill info", title: conn.route }, `经 ${conn.via} 中转`);
+  if (conn.state === "punching") return el("span", { class: "pill warn pulse", title: conn.route }, "打洞中");
+  if (conn.state === "gateway") return el("span", { class: "pill warn", title: conn.route }, "网关中转");
+  return null;
+}
+
+function savedView() {
+  try { return localStorage.getItem("anx.devices.view") === "topology" ? "topology" : "list"; } catch { return "list"; }
+}
 
 function avatar(device) {
   const mark = osMark(device.os_family);
@@ -36,10 +53,17 @@ export async function devicesPage(ctx) {
   const holder = el("div", { class: "stack lg" });
   mount(page, head, holder);
 
+  let view = savedView();
+  let last = null;
+
   async function load() {
     let data;
     try {
-      data = await fetchJSON("/api/devices", { quiet: true });
+      const [devices, conns] = await Promise.all([
+        fetchJSON("/api/devices", { quiet: true }),
+        fetchJSON("/api/remote/connections", { quiet: true }).catch(() => ({})),
+      ]);
+      data = { ...devices, conns };
     } catch (error) {
       if (error.status === 409) {
         mount(holder, el("section", { class: "card" }, el("div", { class: "card-body" }, emptyState({
@@ -51,7 +75,23 @@ export async function devicesPage(ctx) {
     render(data);
   }
 
-  function render({ devices = [], lock = {}, remote = true }) {
+  function setView(next) {
+    view = next;
+    try { localStorage.setItem("anx.devices.view", next); } catch { /* private mode */ }
+    if (last) render(last);
+  }
+
+  function switcher() {
+    const option = (key, label, glyph) => el("button", { type: "button", "aria-pressed": view === key ? "true" : "false",
+      onclick: () => setView(key) }, icon(glyph, { size: 14 }), label);
+    return el("div", { class: "segmented", role: "group", "aria-label": "显示方式" },
+      option("list", "列表", "list"), option("topology", "拓扑", "network"));
+  }
+
+  function render(data) {
+    last = data;
+    const { devices = [], lock = {}, remote = true, conns = {} } = data;
+    const links = conns.devices || {};
     const locked = !!lock.locked;
     const others = devices.filter((d) => !d.self);
     const me = devices.find((d) => d.self);
@@ -66,12 +106,46 @@ export async function devicesPage(ctx) {
         el("div", { class: "stack grow", style: { gap: 0 } }, el("span", { class: "title" }, me.display_name, el("span", { class: "tag", style: { marginLeft: "8px" } }, "本机")),
           el("span", { class: "sub mono" }, me.device_id)),
         pill(locked ? "revoked" : "online", locked ? "已锁定" : "未锁定"))) : null,
-      others.length ? el("div", { class: "list" }, others.map((device) => row(device, locked, remote)))
+      others.length ? el("div", { class: "row", style: { justifyContent: "space-between", alignItems: "center" } },
+        el("span", { class: "muted" }, meshSummary(conns)), switcher()) : null,
+      others.length && view === "topology" ? el("section", { class: "card" }, el("div", { class: "card-body" },
+        topology({ devices, conns }, (device) => { setView("list"); focusRow(device.device_id); })))
+      : others.length ? el("div", { class: "list" }, others.map((device) => row(device, locked, remote, links[device.device_id])))
         : el("section", { class: "card" }, el("div", { class: "card-body" }, emptyState({ icon: "monitor", title: "网关里还没有其他设备",
           text: "在网关控制台或“连接云端”页生成邀请码，让其他电脑加入。", compact: true }))));
   }
 
-  function row(device, locked, remote) {
+  function meshSummary(conns) {
+    const mesh = conns.mesh;
+    if (!mesh || !mesh.enabled) return "";
+    if (mesh.role === "relay") return "本机是中转设备，转发其他设备的加密流量";
+    const home = (mesh.home || []).map((h) => `${nameOf(h.device_id)}（${h.rtt_ms}ms）`);
+    return home.length ? `家中转：${home.join("、")}` : "正在选择家中转…";
+  }
+
+  function nameOf(id) {
+    return (last?.devices || []).find((d) => d.device_id === id)?.display_name || id;
+  }
+
+  function focusRow(id) {
+    requestAnimationFrame(() => {
+      const node = holder.querySelector(`[data-device="${CSS.escape(id)}"]`);
+      if (!node) return;
+      node.scrollIntoView({ block: "center", behavior: "smooth" });
+      node.classList.add("flash");
+      setTimeout(() => node.classList.remove("flash"), 1600);
+    });
+  }
+
+  async function connect(device) {
+    try {
+      const result = await fetchJSON(`/api/remote/devices/${encodeURIComponent(device.device_id)}/connect`, { method: "POST" });
+      toast(`已连上 ${device.display_name}：${(result.route || "").split("（")[0]}`);
+    } catch { /* toasted */ }
+    load();
+  }
+
+  function row(device, locked, remote, conn) {
     const canTerminal = device.online && device.terminal && remote && !locked;
     const canDesktop = device.online && device.desktop && remote && !locked;
     const canFiles = device.online && device.files && remote && !locked;
@@ -86,6 +160,7 @@ export async function devicesPage(ctx) {
           !device.online && device.last_connected_at ? ` · ${relTime(device.last_seen_at)}在线` : "")),
       el("div", { class: "meta row", style: { gap: "6px" } },
         pill(state(device)),
+        connPill(device, conn),
         device.desktop || device.platform !== "linux" ? el("a", { class: `btn btn-sm ${canDesktop ? "" : "disabled"}`,
           href: canDesktop ? `#/desktop/${encodeURIComponent(device.device_id)}` : null,
           title: canDesktop ? "查看并控制对方桌面（打洞直连）" : whyDesktop, "aria-disabled": canDesktop ? null : "true" },
@@ -98,6 +173,7 @@ export async function devicesPage(ctx) {
         el("button", { class: "btn btn-ghost btn-sm btn-icon", type: "button", "aria-label": "更多操作", html: iconHTML("ellipsis", { size: 16 }),
           onclick: (event) => menu(event.currentTarget, [
             { label: "在本机终端打开", icon: "external-link", disabled: !canTerminal, onClick: () => external(device) },
+            { label: "预先建立连接", icon: "plug", disabled: !canTerminal, onClick: () => connect(device) },
             { label: device.revoked ? "已吊销" : "吊销", icon: "circle-x", danger: true, disabled: locked || device.revoked, onClick: () => revoke(device) },
             { label: "删除", icon: "trash", danger: true, disabled: locked || device.online, onClick: () => remove(device) },
           ]) })));

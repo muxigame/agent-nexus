@@ -405,6 +405,7 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
             except Exception as exc:  # any failure: the relay still works
                 log.info("p2p terminal to %s unavailable (%s); using the gateway relay", device_id, exc)
                 relay_note = f"网关中转（直连失败：{str(exc)[:80]}）"
+                note_route(device_id, "gateway", relay_note)
                 connector.forget(device_id)
         try:
             await remote.proxy_terminal(socket, sup.cfg.root, device_id, query, relay_note)
@@ -505,21 +506,39 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
                                  d.get("device_id") not in linked, d.get("device_id")))
         return rows
 
-    async def p2p_link(device_id: str, service: str, direct: bool = True) -> tuple["Path", str, str]:
-        """(path, route, ticket) for a stream to ``device_id``'s remote hub: direct, else via a relay.
+    #: target -> the direct punch running in the background (see p2p_link)
+    direct_pending: dict[str, asyncio.Task] = {}
+    #: target -> monotonic time its last direct punch failed: streams go through a relay at once
+    #: (no 3-second wait, no new punch) for DIRECT_RETRY_S
+    direct_failed: dict[str, float] = {}
+    DIRECT_RETRY_S = 120.0
+    #: device id -> what its last stream actually used (the 设备 page shows it)
+    route_seen: dict[str, dict] = {}
 
-        ``direct=False`` goes through a relay straight away (``route=mesh`` on the API: diagnosis).
-        """
-        ticket = await hub.call("remote_ticket", {"device_id": device_id, "service": service}, timeout=20)
-        failure = remote.RemoteError(502, "按要求不直连", "p2p_skipped")
-        if direct:
-            try:
-                port, route = await tunnel_port(ticket["server_id"])
-                return HubPath(port), route, ticket["ticket"]
-            except remote.RemoteError as exc:
-                if exc.code == "no_p2p":
-                    raise
-                failure = exc
+    def note_route(device_id: str, kind: str, route: str, via: str = "") -> None:
+        import time as _time
+        route_seen[device_id] = {"kind": kind, "route": route, "via": via, "at": _time.time()}
+    #: how long a request waits for a direct tunnel before taking a relay; LAN, IPv6 and cone
+    #: NATs connect well within it, a symmetric pair needs 2-20 s and goes through a relay meanwhile
+    DIRECT_GRACE_S = 3.0
+
+    def direct_task(target: str) -> asyncio.Task:
+        task = direct_pending.get(target)
+        if task is None or task.done():
+            task = asyncio.ensure_future(tunnel_port(target))
+
+            def settled(t: asyncio.Task) -> None:
+                import time as _time
+                failed = t.cancelled() or t.exception() is not None  # also retrieves the exception
+                if failed:
+                    direct_failed[target] = _time.monotonic()
+                else:
+                    direct_failed.pop(target, None)
+            task.add_done_callback(settled)
+            direct_pending[target] = task
+        return task
+
+    async def relay_path(device_id: str, ticket: str, note: str) -> tuple | None:
         import time as _time
         me = joining.cloud_config(sup.cfg.root).get("agent_id")
         for relay in await relay_candidates({device_id, me}):
@@ -532,10 +551,58 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
                 log.info("relay %s unavailable for %s: %s", relay_id, device_id, exc)
                 continue
             name = relay.get("display_name") or relay_id
-            route = f"经 {name} 中转（端到端加密；直连失败：{failure.message[:60]}）"
-            return (HubPath(port, relay_ticket=relay_ticket["ticket"], target=device_id, label=name),
-                    route, ticket["ticket"])
-        raise failure
+            route = f"经 {name} 中转（端到端加密；{note}）"
+            note_route(device_id, "relay", route, name)
+            return (HubPath(port, relay_ticket=relay_ticket["ticket"], target=device_id, label=name), route, ticket)
+        return None
+
+    async def p2p_link(device_id: str, service: str, direct: bool = True) -> tuple["Path", str, str]:
+        """(path, route, ticket) for a stream to ``device_id``'s remote hub.
+
+        A direct tunnel when there is one. Otherwise the punch starts in the background and the
+        request waits ``DIRECT_GRACE_S`` for it; if it is not through by then the stream goes
+        through a relay at once and the punch carries on, so the next stream is direct.
+        ``direct=False`` (``route=mesh`` on the API, for diagnosis) takes a relay straight away.
+        """
+        ticket = await hub.call("remote_ticket", {"device_id": device_id, "service": service}, timeout=20)
+        target = ticket["server_id"]
+        if not direct:
+            relayed = await relay_path(device_id, ticket["ticket"], "按要求不直连")
+            if relayed is None:
+                raise remote.RemoteError(502, "没有可用的中转设备", "no_relay")
+            return relayed
+        import time as _time
+        connector = p2p_state["connector"]
+        link = connector.links.get(target) if connector is not None else None
+        if link is not None and link.alive:  # the connection already there: every service shares it
+            port, route = await tunnel_port(target)
+            note_route(device_id, "direct", route)
+            return HubPath(port), route, ticket["ticket"]
+        pending = direct_pending.get(target)
+        recently_failed = _time.monotonic() - direct_failed.get(target, -1e9) < DIRECT_RETRY_S
+        if recently_failed and (pending is None or pending.done()):
+            # the punch failed a moment ago: no new punch, no wait, the relay right away
+            relayed = await relay_path(device_id, ticket["ticket"], "直连刚失败过，稍后再试直连")
+            if relayed is not None:
+                return relayed
+        task = direct_task(target)
+        await asyncio.wait({task}, timeout=DIRECT_GRACE_S)
+        if not task.done():
+            relayed = await relay_path(device_id, ticket["ticket"], "直连在后台打洞，打通后新连接自动走直连")
+            if relayed is not None:
+                return relayed
+        try:
+            port, route = await asyncio.shield(task)
+            note_route(device_id, "direct", route)
+            return HubPath(port), route, ticket["ticket"]
+        except remote.RemoteError as exc:
+            if exc.code == "no_p2p":
+                raise
+            failure = exc
+        relayed = await relay_path(device_id, ticket["ticket"], f"直连失败：{failure.message[:60]}")
+        if relayed is None:
+            raise failure
+        return relayed
 
     async def remote_desktop_prepare(request: Request) -> JSONResponse:
         """Build (or reuse) the tunnel first, so the page can say which route it got."""
@@ -582,19 +649,16 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
     FILES_P2P_RETRY_S = 120.0
 
     async def files_link(device_id: str, route: str = "") -> tuple[tuple | None, str]:
-        """((path, route, ticket) or None, route label). ``route``: "mesh" = through a relay only."""
-        import time as _time
-        failed = files_p2p_failed.get(device_id)
-        if route != "mesh" and failed is not None and _time.monotonic() - failed < FILES_P2P_RETRY_S:
-            return None, "网关中转（直连刚失败过，稍后再试直连）"
+        """((path, route, ticket) or None, route label): the shared route selection (direct, or a
+        relay device); None means the gateway relays. ``route``: "mesh" = through a relay only."""
         try:
             link = await p2p_link(device_id, "files", direct=route != "mesh")
-        except Exception as exc:  # any failure: the relay still works
-            files_p2p_failed[device_id] = _time.monotonic()
+        except Exception as exc:  # no direct tunnel and no relay device: the gateway still works
             reason = exc.message if isinstance(exc, remote.RemoteError) else str(exc)
             log.info("p2p files to %s unavailable (%s); using the gateway relay", device_id, reason)
-            return None, f"网关中转（直连失败：{reason[:80]}）"
-        files_p2p_failed.pop(device_id, None)
+            label = f"网关中转（直连和中转设备都不可用：{reason[:80]}）"
+            note_route(device_id, "gateway", label)
+            return None, label
         return link, link[1]
 
     def files_drop(device_id: str) -> None:
@@ -606,6 +670,7 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
         """
         import time as _time
         files_p2p_failed[device_id] = _time.monotonic()
+        direct_failed[device_id] = _time.monotonic()
         connector = p2p_state["connector"]
         if connector is not None:
             connector.forget(device_id)
@@ -1114,6 +1179,65 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
 
         hub.on_attach.append(start_mesh)
 
+    #: device id -> (monotonic time, round trip ms) through its direct tunnel
+    rtt_cache: dict[str, tuple[float, float]] = {}
+
+    async def remote_connections(_request: Request) -> JSONResponse:
+        """This device's connection to every other one, for the 设备 page and its topology view."""
+        import time as _time
+        from .mesh import ping as mesh_ping
+        connector = p2p_state["connector"]
+        mesh = p2p_state.get("mesh")
+        now = _time.monotonic()
+        devices: dict[str, dict] = {}
+        direct: dict[str, int] = {}
+        for target, link in list(getattr(connector, "links", {}).items()):
+            if link.alive:
+                devices[target] = {"state": "direct", "route": link.route,
+                                   "pinned": target in getattr(connector, "pinned", set())}
+                direct[target] = link.port
+        for target, task in direct_pending.items():
+            if not task.done() and target not in devices:
+                devices[target] = {"state": "punching", "route": "正在打洞直连"}
+        for target, seen in route_seen.items():
+            if target not in devices and _time.time() - seen["at"] < 600 and seen["kind"] in ("relay", "gateway"):
+                devices[target] = {"state": seen["kind"], "route": seen["route"], "via": seen.get("via", "")}
+
+        async def measure(target: str, port: int) -> None:
+            cached = rtt_cache.get(target)
+            if cached and now - cached[0] < 20:
+                devices[target]["rtt_ms"] = round(cached[1])
+                return
+            try:
+                ms = await mesh_ping(port, count=1, timeout=2.0)
+            except Exception:
+                return
+            rtt_cache[target] = (now, ms)
+            devices[target]["rtt_ms"] = round(ms)
+
+        await asyncio.gather(*(measure(t, port) for t, port in direct.items()))
+        origin = ""
+        with contextlib.suppress(Exception):
+            origin = remote.credentials(sup.cfg.root)[0]
+        return JSONResponse({"me": joining.cloud_config(sup.cfg.root).get("agent_id"),
+                             "gateway": {"origin": origin, "online": hub.available},
+                             "relay": getattr(sup.cfg, "relay", "auto") == "on",
+                             "mesh": mesh.status() if mesh is not None else None,
+                             "devices": devices})
+
+    async def remote_connect(request: Request) -> JSONResponse:
+        """Build (or reuse) the connection to a device now, so the first 终端 / 文件 / 桌面 is instant."""
+        try:
+            lock.require_unlocked()
+            path, route, _ticket = await p2p_link(request.path_params["device_id"], "terminal")
+            return JSONResponse({"route": route, "relayed": path.relayed})
+        except LockError as exc:
+            return lock_error(exc)
+        except remote.RemoteError as exc:
+            return JSONResponse(exc.body(), status_code=exc.status)
+        except Exception as exc:
+            return JSONResponse({"error": str(exc)[:200]}, status_code=502)
+
     async def mesh_status(_request: Request) -> JSONResponse:
         mesh = p2p_state.get("mesh")
         if mesh is None:
@@ -1444,6 +1568,8 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
         Route("/api/accounts", accounts_api, methods=["GET", "PUT"]),
         Route("/api/lock/password", lock_api, methods=["PUT"]),
         Route("/api/mesh", mesh_status),
+        Route("/api/remote/connections", remote_connections),
+        Route("/api/remote/devices/{device_id}/connect", remote_connect, methods=["POST"]),
         Route("/api/remote/devices/{device_id}/terminal", remote_terminal_info),
         Route("/api/remote/devices/{device_id}/terminal/external", remote_terminal_external, methods=["POST"]),
         WebSocketRoute("/api/remote/devices/{device_id}/terminal/ws", remote_terminal_socket),
