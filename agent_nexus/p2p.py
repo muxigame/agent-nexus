@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -32,10 +33,25 @@ IDLE_S = 600.0
 NO_WINDOW = getattr(__import__("subprocess"), "CREATE_NO_WINDOW", 0)
 
 
+ANDROID_LIBS_ENV = "ANX_ANDROID_NATIVE_LIBS"   # the APK's nativeLibraryDir, set by the Android app
+ANDROID_EXE = "libmuxip2p.so"                  # Android only runs lib*.so files extracted there
+# .NET's OpenSSL shim on bionic dlopens these exact names (not .so.3; without them it gets the
+# system's BoringSSL and aborts on a missing symbol). The app ships OpenSSL for Python under its
+# own names, so they are linked in a writable folder put first on LD_LIBRARY_PATH.
+ANDROID_SSL_LINKS = {
+    "libssl.so": "libssl_python.so", "libcrypto.so": "libcrypto_python.so",
+    "libssl.so.3": "libssl_python.so", "libcrypto.so.3": "libcrypto_python.so",
+}
+
+
 def binary(root: Path | None = None) -> str | None:
     explicit = os.environ.get("ANX_MUXI_P2P")
     if explicit and Path(explicit).is_file():
         return explicit
+    native = os.environ.get(ANDROID_LIBS_ENV)
+    if native:
+        exe = Path(native) / ANDROID_EXE
+        return str(exe) if exe.is_file() else None
     for base in ([Path(root) / "tools"] if root else []) + [Path(sys.prefix).parent / "tools", Path(__file__).resolve().parents[1] / "tools"]:
         if (base / EXE).is_file():
             return str(base / EXE)
@@ -54,6 +70,60 @@ def _free_port(preferred: int) -> int:
                 continue
             return probe.getsockname()[1]
     return preferred
+
+
+def android_ssl_links(native: str, env: dict) -> str | None:
+    """A writable folder holding :data:`ANDROID_SSL_LINKS` into ``native``; None if none could be made.
+
+    Links are rewritten when they point elsewhere: an app update moves nativeLibraryDir.
+    """
+    import tempfile
+    candidates = [env.get("ANX_ANDROID_LINK_DIR"), env.get("TMPDIR"), env.get("HOME"), tempfile.gettempdir()]
+    for parent in filter(None, candidates):
+        folder = Path(parent) / "anx-p2p-libs"
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            for name, target in ANDROID_SSL_LINKS.items():
+                link, source = folder / name, str(Path(native) / target)
+                if link.is_symlink() and os.readlink(link) == source:
+                    continue
+                if link.is_symlink() or link.exists():
+                    link.unlink()
+                link.symlink_to(source)
+            return str(folder)
+        except OSError as error:
+            log.debug("p2p: cannot link OpenSSL in %s: %s", folder, error)
+    log.warning("p2p: no writable folder for the OpenSSL links; QUIC will fall back to TCP")
+    return None
+
+
+def child_env(exe: str, base: dict | None = None, *, platform: str | None = None) -> dict:
+    """The environment for a muxi-p2p-agent process.
+
+    On macOS the QUIC stack needs libmsquic and OpenSSL, shipped next to the binary. msquic is
+    found there, but .NET's OpenSSL shim (statically linked into the single-file agent) looks for
+    ``libssl.3.dylib`` by name, and macOS does not search the executable's folder for that: the
+    client side aborted in InitializeOpenSSLShim right after a successful punch (seen on an
+    arm64 Mac). With the folder on DYLD_LIBRARY_PATH the same build completes the QUIC handshake.
+
+    On Android (``ANX_ANDROID_NATIVE_LIBS``) libmsquic.so and the app's OpenSSL sit in the APK's
+    nativeLibraryDir; the OpenSSL links (:func:`android_ssl_links`) and that folder go first on
+    LD_LIBRARY_PATH. Checked on a headset with ``libmuxip2p.so selftest``.
+    """
+    env = dict(os.environ if base is None else base)
+    native = env.get(ANDROID_LIBS_ENV)
+    if native:
+        folders = [folder for folder in (android_ssl_links(native, env), native) if folder]
+        current = env.get("LD_LIBRARY_PATH", "")
+        env["LD_LIBRARY_PATH"] = ":".join(folders + ([current] if current else []))
+        return env
+    if (platform or sys.platform) == "darwin":
+        from pathlib import PurePosixPath  # macOS paths (also when tested elsewhere); binary() gives it absolute
+        folder = str(PurePosixPath(exe).parent)
+        current = env.get("DYLD_LIBRARY_PATH", "")
+        if folder not in current.split(":"):
+            env["DYLD_LIBRARY_PATH"] = f"{folder}:{current}" if current else folder
+    return env
 
 
 class AgentSidecar:
@@ -87,7 +157,7 @@ class AgentSidecar:
                 "--target", f"127.0.0.1:{self.target_port}",
                 "--control-plane", config["control_plane"], "--server-id", config["server_id"],
                 "--reflector", ",".join(config.get("reflectors") or [])]
-        env = {**os.environ, "MUXI_TUNNEL_TOKEN": config["token"], "MUXI_TCP_PUNCH": "1"}
+        env = {**child_env(self.exe), "MUXI_TUNNEL_TOKEN": config["token"], "MUXI_TCP_PUNCH": "1"}
         if self.log_file is not None:
             env["MUXI_AGENT_LOG"] = str(self.log_file)
         while True:
@@ -191,15 +261,25 @@ class Connector:
             return link.port, link.route
 
     async def _open(self, config: dict, target: str, headers: dict) -> _Link:
-        env = {**os.environ, "MUXI_TCP_PUNCH": "1",
+        env = {**child_env(self.exe), "MUXI_TCP_PUNCH": "1",
                "MUXI_CONTROL_PLANE_HEADERS": "\n".join(f"{k}: {v}" for k, v in headers.items())}
+        # the forwarder's own log (MUXI_LOG_FILE), and its stderr next to it: a native abort
+        # (e.g. a crypto library that does not load) writes there and nowhere else
+        stderr = subprocess.DEVNULL
         if self.log_dir is not None:
             env["MUXI_LOG_FILE"] = str(self.log_dir / f"{_safe_name(target)}.log")
-        process = await asyncio.create_subprocess_exec(
-            self.exe, "connect", "--control-plane", config["control_plane"], "--server-id", target,
-            "--reflector", ",".join(config.get("reflectors") or []), env=env,
-            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
-            creationflags=NO_WINDOW)
+            with contextlib.suppress(OSError):
+                self.log_dir.mkdir(parents=True, exist_ok=True)
+                stderr = open(self.log_dir / f"{_safe_name(target)}.stderr.log", "wb")
+        try:
+            process = await asyncio.create_subprocess_exec(
+                self.exe, "connect", "--control-plane", config["control_plane"], "--server-id", target,
+                "--reflector", ",".join(config.get("reflectors") or []), env=env,
+                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=stderr,
+                creationflags=NO_WINDOW)
+        finally:
+            if stderr is not subprocess.DEVNULL:
+                stderr.close()  # the child has its own copy
         assert process.stdout is not None
         deadline = time.monotonic() + CONNECT_TIMEOUT_S
         last = ""  # the forwarder's last progress line: where it was when it gave up

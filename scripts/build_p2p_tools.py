@@ -17,6 +17,21 @@
   Both downloads are pinned by version and SHA-256. MIT, see ``LICENSE-msquic.txt``.
 
 The build scripts take the folder from ``ANX_P2P_TOOLS``.
+
+Android (``--rid linux-bionic-arm64``, run on Linux x64; the APK build takes the folder from
+``ANX_ANDROID_P2P_TOOLS``):
+
+* ``libmuxip2p.so``: the agent as a NativeAOT executable for bionic, linked with the NDK's clang.
+  Android only executes files from the app's ``nativeLibraryDir``, and only ``lib*.so`` names are
+  extracted there, hence the name. ``InvariantGlobalization``: bionic has no ICU for .NET.
+* ``libmsquic.so``: msquic built from its pinned tag with quictls linked in statically (needs only
+  libc/libm/libdl), for API 29 (msquic uses ``glob``, which bionic has from 28).
+
+Needs the .NET 9 SDK, the NDK (``ANDROID_NDK_ROOT``, else ``$ANDROID_HOME/ndk/27.3.13750724``),
+``git``, ``cmake``, ``make`` and ``perl`` (all on GitHub's ubuntu-latest). At run time .NET's
+OpenSSL shim opens ``libssl.so`` / ``libcrypto.so`` by those exact names (not ``.so.3``), so the app
+links them to its own OpenSSL in a folder on ``LD_LIBRARY_PATH`` (see agent_nexus.p2p.child_env).
+``libmuxip2p.so selftest`` checks the lot on a device without any credentials.
 """
 from __future__ import annotations
 
@@ -24,6 +39,7 @@ import argparse
 import hashlib
 import io
 import lzma
+import os
 import shutil
 import subprocess
 import sys
@@ -80,9 +96,69 @@ def msquic(rid: str) -> tuple[str, bytes, bytes]:
         return "libmsquic.so.2", tar.extractfile(library).read(), b"MIT License\n\nCopyright (c) Microsoft Corporation.\n"
 
 
+ANDROID_RID = "linux-bionic-arm64"
+NDK_VERSION = "27.3.13750724"
+ANDROID_API = 29
+MSQUIC_REPO = "https://github.com/microsoft/msquic.git"
+
+
+def ndk_root() -> Path:
+    explicit = os.environ.get("ANDROID_NDK_ROOT") or os.environ.get("ANDROID_NDK_HOME")
+    candidates = [Path(explicit)] if explicit else []
+    for sdk in (os.environ.get("ANDROID_HOME"), os.environ.get("ANDROID_SDK_ROOT")):
+        if sdk:
+            candidates.append(Path(sdk) / "ndk" / NDK_VERSION)
+    for path in candidates:
+        if (path / "build/cmake/android.toolchain.cmake").is_file():
+            return path
+    raise SystemExit(f"Android NDK {NDK_VERSION} not found: set ANDROID_NDK_ROOT or install it under $ANDROID_HOME/ndk/")
+
+
+def build_android(dotnet: str, out: Path) -> None:
+    ndk = ndk_root()
+    llvm = ndk / "toolchains/llvm/prebuilt/linux-x86_64/bin"
+    env = {**os.environ, "ANDROID_NDK_ROOT": str(ndk), "PATH": f"{llvm}{os.pathsep}{os.environ['PATH']}"}
+    for tool in ("git", "cmake", "make", "perl"):
+        if not shutil.which(tool):
+            raise SystemExit(f"{tool} is required for the Android build")
+    out.mkdir(parents=True)
+    with tempfile.TemporaryDirectory(prefix="anx-p2p-android-") as scratch:
+        scratch = Path(scratch)
+        subprocess.run([
+            dotnet, "publish", str(PROJECT), "-c", "Release", "-r", ANDROID_RID, "-o", str(scratch / "agent"), "-nologo",
+            "-p:PublishAot=true", "-p:PublishSingleFile=false", "-p:SelfContained=true",
+            "-p:DisableUnsupportedError=true", "-p:PublishAotUsingRuntimePack=true",
+            "-p:CppCompilerAndLinker=aarch64-linux-android24-clang", "-p:ObjCopyName=llvm-objcopy",
+            "-p:StripSymbols=true", "-p:InvariantGlobalization=true",
+        ], check=True, env=env)
+        shutil.copy2(scratch / "agent/muxi-p2p-agent", out / "libmuxip2p.so")
+
+        source = scratch / "msquic"
+        subprocess.run(["git", "clone", "-q", "--depth", "1", "--branch", f"v{MSQUIC_VERSION}", MSQUIC_REPO, str(source)], check=True, env=env)
+        subprocess.run(["git", "-C", str(source), "submodule", "update", "--init", "--depth", "1",
+                        "submodules/quictls", "submodules/clog"], check=True, env=env)
+        build = source / "build-android"
+        subprocess.run([
+            "cmake", "-S", str(source), "-B", str(build), "-G", "Unix Makefiles",
+            f"-DCMAKE_TOOLCHAIN_FILE={ndk}/build/cmake/android.toolchain.cmake",
+            "-DANDROID_ABI=arm64-v8a", f"-DANDROID_PLATFORM=android-{ANDROID_API}", "-DCMAKE_BUILD_TYPE=Release",
+            "-DQUIC_TLS_LIB=quictls", "-DQUIC_BUILD_SHARED=on",
+            "-DQUIC_BUILD_TEST=off", "-DQUIC_BUILD_TOOLS=off", "-DQUIC_BUILD_PERF=off",
+        ], check=True, env=env)
+        subprocess.run(["make", "-C", str(build), f"-j{os.cpu_count() or 4}", "msquic"], check=True, env=env)
+        subprocess.run([str(llvm / "llvm-strip"), "-o", str(out / "libmsquic.so"),
+                        str(build / "bin/Release/libmsquic.so")], check=True, env=env)
+        license_text = (source / "LICENSE").read_bytes()
+        quictls = source / "submodules/quictls/LICENSE.txt"
+        if quictls.is_file():
+            license_text += b"\n\n--- quictls (OpenSSL), linked into libmsquic.so ---\n\n" + quictls.read_bytes()
+    (out / "LICENSE-msquic.txt").write_bytes(
+        b"MsQuic " + MSQUIC_VERSION.encode() + b" (https://github.com/microsoft/msquic)\n\n" + license_text)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--rid", choices=sorted(DOWNLOADS), required=True)
+    parser.add_argument("--rid", choices=sorted([*DOWNLOADS, ANDROID_RID]), required=True)
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
     if not PROJECT.is_file():
@@ -90,6 +166,11 @@ def main() -> int:
     dotnet = shutil.which("dotnet") or sys.exit("the .NET 9 SDK (dotnet) is required")
     out = args.out.resolve()
     shutil.rmtree(out, ignore_errors=True)
+    if args.rid == ANDROID_RID:
+        build_android(dotnet, out)
+        for path in sorted(out.iterdir()):
+            print(f"{path.name:24} {path.stat().st_size:>10}  {hashlib.sha256(path.read_bytes()).hexdigest()[:16]}")
+        return 0
     with tempfile.TemporaryDirectory(prefix="anx-p2p-") as scratch:
         subprocess.run([dotnet, "publish", str(PROJECT), "-c", "Release", "-r", args.rid, "-o", scratch, "-nologo"], check=True)
         out.mkdir(parents=True)
