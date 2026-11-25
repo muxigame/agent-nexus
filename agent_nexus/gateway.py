@@ -643,6 +643,8 @@ class Gateway:
                 return {"devices": self.devices.list(include_offline=bool(args.get("include_offline", True)))}
             if action == "set_alias":
                 return {"device": self.devices.set_alias(args.get("device_id"), args.get("alias"))}
+            if action == "set_location":
+                return {"device": self.devices.set_location(args.get("device_id"), args.get("location"))}
             if action == "delete":
                 return {"deleted": self.devices.delete(args.get("device_id"))}
             if action in ("revoke", "invite_create", "invite_list", "invite_revoke") and self.enrollment is not None:

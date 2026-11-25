@@ -3,6 +3,9 @@
 // reaches each one right now; traffic dots run along live connections (faster when the round
 // trip is shorter). Hovering a device lights up its paths and shows a card; clicking it opens
 // an action panel (终端, 文件, 远程桌面, 建立连接) -- the page passes the actions in.
+//
+// layout "map": the same picture on a world map, each device where the gateway located it
+// (ip2region, or where the owner dragged it); dragging a device fixes its position.
 import { el, icon } from "/ui/ui.js";
 import { osMark } from "/ui/os-icons.js";
 
@@ -40,7 +43,7 @@ function flowSeconds(rtt) {
 export function topologySignature({ devices = [], conns = {} }) {
   const links = conns.devices || {};
   return JSON.stringify([
-    devices.map((d) => [d.device_id, d.online, d.relay, d.self, d.revoked]),
+    devices.map((d) => [d.device_id, d.online, d.relay, d.self, d.revoked, d.geo?.lat, d.geo?.lon, d.geo?.source]),
     Object.entries(links).map(([id, l]) => [id, l.state, l.via, l.rtt_ms == null ? null : Math.round(l.rtt_ms / 10)]),
     conns.gateway?.online, (conns.mesh?.home || []).map((h) => h.device_id),
   ]);
@@ -50,8 +53,52 @@ export function topologySignature({ devices = [], conns = {} }) {
  * @param {object} data     {devices (from /api/devices), conns (from /api/remote/connections)}
  * @param {object} actions  {can(device) -> {terminal, files, desktop, why}, terminal, files, desktop, connect}
  */
-export function topology({ devices = [], conns = {} }, actions = {}) {
+// -- map projection (Mercator, fitted to the located devices)
+const RAD = Math.PI / 180;
+const mercY = (lat) => Math.log(Math.tan(Math.PI / 4 + Math.max(-80, Math.min(80, lat)) * RAD / 2));
+
+function fitProjection(points, W, H, margin) {
+  let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+  for (const [lat, lon] of points) {
+    x0 = Math.min(x0, lon * RAD); x1 = Math.max(x1, lon * RAD);
+    y0 = Math.min(y0, mercY(lat)); y1 = Math.max(y1, mercY(lat));
+  }
+  if (!points.length) { x0 = 70 * RAD; x1 = 140 * RAD; y0 = mercY(15); y1 = mercY(50); }
+  // never zoom into one city: at least ~24 degrees of longitude and the matching height
+  const minX = 24 * RAD, minY = minX * (H - 2 * margin) / (W - 2 * margin);
+  const xc = (x0 + x1) / 2, yc = (y0 + y1) / 2;
+  const sx = Math.max(x1 - x0, minX) * 1.25, sy = Math.max(y1 - y0, minY) * 1.35;
+  const scale = Math.min((W - 2 * margin) / sx, (H - 2 * margin) / sy);
+  const cx = W / 2, cy = H / 2;
+  return {
+    project: (lat, lon) => [cx + (lon * RAD - xc) * scale, cy - (mercY(lat) - yc) * scale],
+    invert: (x, y) => {
+      const lon = (xc + (x - cx) / scale) / RAD;
+      const my = yc - (y - cy) / scale;
+      return [(2 * Math.atan(Math.exp(my)) - Math.PI / 2) / RAD, lon];
+    },
+  };
+}
+
+function worldPaths(world, projection) {
+  const group = svg("g", { class: "topo-land" });
+  for (const ring of world?.rings || []) {
+    let d = "", last = null;
+    for (let i = 0; i < ring.length; i += 2) {
+      const lon = ring[i], lat = ring[i + 1];
+      const [x, y] = projection.project(lat, lon);
+      const jump = last !== null && Math.abs(lon - last) > 180; // the antimeridian: lift the pen
+      d += `${d && !jump ? "L" : "M"}${x.toFixed(1)},${y.toFixed(1)}`;
+      last = lon;
+    }
+    if (d) group.append(svg("path", { d: d + "Z" }));
+  }
+  return group;
+}
+
+export function topology({ devices = [], conns = {}, world = null }, actions = {}, { layout = "rings" } = {}) {
   const W = 800, H = 500, cx = W / 2, cy = H / 2 - 6;
+  const isMap = layout === "map";
   const me = devices.find((d) => d.self);
   const others = devices.filter((d) => !d.self && !d.revoked);
   const byId = Object.fromEntries(devices.map((d) => [d.device_id, d]));
@@ -61,21 +108,74 @@ export function topology({ devices = [], conns = {} }, actions = {}) {
     .sort((a, b) => (b.online - a.online) || (a.display_name || "").localeCompare(b.display_name || ""));
 
   const pos = {};
-  if (me) pos[me.device_id] = [cx, cy];
+  const far = new Set();  // map: devices outside the fitted region, pinned to the edge
   const gatewayAt = [W - 74, 50];
-  relays.forEach((d, i) => {
-    const angle = Math.PI * (1.15 + 0.7 * ((i + 0.5) / relays.length)); // upper arc
-    pos[d.device_id] = [cx + 160 * Math.cos(angle), cy + 112 * Math.sin(angle)];
-  });
-  rest.forEach((d, i) => {
-    const angle = -0.12 * Math.PI + 1.24 * Math.PI * ((i + 0.5) / Math.max(rest.length, 1)); // lower arc
-    pos[d.device_id] = [cx + 335 * Math.cos(angle), cy + 195 * Math.sin(angle)];
-  });
-
-  // -- backdrop: soft rings for the two tiers
-  const backdrop = svg("g", { class: "topo-rings" },
-    svg("ellipse", { cx, cy, rx: 160, ry: 112 }),
-    svg("ellipse", { cx, cy, rx: 335, ry: 195 }));
+  let backdrop, projection = null;
+  if (!isMap) {
+    if (me) pos[me.device_id] = [cx, cy];
+    relays.forEach((d, i) => {
+      const angle = Math.PI * (1.15 + 0.7 * ((i + 0.5) / relays.length)); // upper arc
+      pos[d.device_id] = [cx + 160 * Math.cos(angle), cy + 112 * Math.sin(angle)];
+    });
+    rest.forEach((d, i) => {
+      const angle = -0.12 * Math.PI + 1.24 * Math.PI * ((i + 0.5) / Math.max(rest.length, 1)); // lower arc
+      pos[d.device_id] = [cx + 335 * Math.cos(angle), cy + 195 * Math.sin(angle)];
+    });
+    // soft rings for the two tiers
+    backdrop = svg("g", { class: "topo-rings" },
+      svg("ellipse", { cx, cy, rx: 160, ry: 112 }),
+      svg("ellipse", { cx, cy, rx: 335, ry: 195 }));
+  } else {
+    const placed = [me, ...others].filter((d) => d && d.geo && d.geo.lat != null && d.geo.lon != null);
+    // fit the region around this device (or the middle of everything); devices far outside it
+    // are pinned to the map's edge in their direction instead of shrinking the map to a dot
+    const home = me?.geo?.lat != null ? me.geo : placed[0]?.geo;
+    const near = (d) => !home || (Math.abs(d.geo.lat - home.lat) < 28 && Math.abs(d.geo.lon - home.lon) < 40);
+    const core = placed.filter(near);
+    projection = fitProjection(core.map((d) => [d.geo.lat, d.geo.lon]), W, H, 70);
+    const anchor = {};
+    const margin = 46;
+    for (const device of placed) {
+      let [x, y] = projection.project(device.geo.lat, device.geo.lon);
+      if (x < margin || x > W - margin || y < margin || y > H - 70) {
+        // pinned to the edge, along the line from the middle
+        const dx = x - W / 2, dy = y - H / 2;
+        const t = Math.min((W / 2 - margin) / Math.abs(dx || 1e-9), (H / 2 - 60) / Math.abs(dy || 1e-9));
+        x = W / 2 + dx * t; y = H / 2 + dy * t;
+        far.add(device.device_id);
+      }
+      anchor[device.device_id] = [x, y];
+      pos[device.device_id] = [x, y];
+    }
+    // push apart what overlaps, and keep each one near its place
+    const ids = Object.keys(pos);
+    for (let round = 0; round < 120; round++) {
+      for (let i = 0; i < ids.length; i++) {
+        for (let j = i + 1; j < ids.length; j++) {
+          const a = pos[ids[i]], b = pos[ids[j]];
+          let dx = b[0] - a[0], dy = b[1] - a[1];
+          let dist = Math.hypot(dx, dy);
+          if (dist >= 66) continue;
+          if (dist < 0.01) { dx = Math.cos(i + j); dy = Math.sin(i + j); dist = 1; }
+          const push = (66 - dist) / 2;
+          a[0] -= dx / dist * push; a[1] -= dy / dist * push;
+          b[0] += dx / dist * push; b[1] += dy / dist * push;
+        }
+      }
+      for (const id of ids) {
+        const [ax, ay] = anchor[id];
+        pos[id][0] += (ax - pos[id][0]) * 0.04;
+        pos[id][1] += (ay - pos[id][1]) * 0.04;
+        pos[id][0] = Math.max(30, Math.min(W - 30, pos[id][0]));
+        pos[id][1] = Math.max(30, Math.min(H - 60, pos[id][1]));
+      }
+    }
+    // not located (LAN addresses, unknown): a row along the bottom
+    const lost = [me, ...others].filter((d) => d && !pos[d.device_id]);
+    lost.forEach((device, i) => { pos[device.device_id] = [60 + i * 84, H - 34]; });
+    backdrop = svg("g", {}, worldPaths(world, projection),
+      lost.length ? svg("text", { x: 24, y: H - 62, class: "topo-unknown" }, "位置未知") : null);
+  }
 
   // -- edges: a faint base line plus an animated flow on top
   const edges = svg("g", { "stroke-linecap": "round" });
@@ -84,12 +184,17 @@ export function topology({ devices = [], conns = {} }, actions = {}) {
   const edge = (from, to, kind, { owners = [], dash = null, flow = true, rtt = null, title = "" } = {}) => {
     if (!from || !to) return;
     const color = TONE[kind] || TONE.idle;
+    // a gentle arc on the map (like a flight route), straight in the ring view
+    let d = `M${from[0]},${from[1]} L${to[0]},${to[1]}`;
+    if (isMap) {
+      const mx = (from[0] + to[0]) / 2, my = (from[1] + to[1]) / 2;
+      const dx = to[0] - from[0], dy = to[1] - from[1];
+      d = `M${from[0]},${from[1]} Q${mx - dy * 0.18},${my + dx * 0.18 - Math.hypot(dx, dy) * 0.08} ${to[0]},${to[1]}`;
+    }
     const group = svg("g", { class: "topo-edge" },
       svg("title", {}, title),
-      svg("line", { x1: from[0], y1: from[1], x2: to[0], y2: to[1], class: "topo-base",
-        style: `stroke:${color}`, "stroke-dasharray": dash }),
-      flow ? svg("line", { x1: from[0], y1: from[1], x2: to[0], y2: to[1],
-        class: `topo-flow${kind === "punching" ? " topo-blink" : ""}`,
+      svg("path", { d, class: "topo-base", fill: "none", style: `stroke:${color}`, "stroke-dasharray": dash }),
+      flow ? svg("path", { d, fill: "none", class: `topo-flow${kind === "punching" ? " topo-blink" : ""}`,
         style: `stroke:${color};animation-duration:${flowSeconds(rtt)}s` }) : null);
     edges.append(group);
     for (const id of owners) (touching[id] ||= []).push(group);
@@ -147,7 +252,9 @@ export function topology({ devices = [], conns = {} }, actions = {}) {
         kind === "gateway" ? "网关" : kind === "relay" ? "中转" : big ? "本机" : ""),
       kind === "relay" ? svg("circle", { cx: x + r * 0.72, cy: y - r * 0.72, r: 5, class: "topo-badge" }) : null,
       svg("text", { x, y: y + r + 15, "text-anchor": "middle", class: `topo-label${kind === "offline" ? " off" : ""}` },
-        shortName(title, big ? 16 : 11)));
+        shortName(title, big ? 16 : 11)),
+      device && far.has(id) ? svg("text", { x, y: y + r + 28, "text-anchor": "middle", class: "topo-far" },
+        `→ ${shortName(device.geo?.label || "", 14)}`) : null);
     nodes.append(group);
     nodeOf[id] = group;
     return group;
@@ -166,7 +273,7 @@ export function topology({ devices = [], conns = {} }, actions = {}) {
     backdrop, edges, labels, nodes);
   const card = el("div", { class: "topo-card", hidden: true });
   const panel = el("div", { class: "topo-panel", hidden: true, role: "dialog" });
-  const stage = el("div", { class: "topo" }, picture, card, panel);
+  const stage = el("div", { class: `topo${isMap ? " map" : ""}` }, picture, card, panel);
 
   // -- hover: light up a device's paths and show a card
   const place = (box, id, below = true) => {
@@ -187,7 +294,8 @@ export function topology({ devices = [], conns = {} }, actions = {}) {
     if (device.self) {
       const mesh = conns.mesh;
       const home = (mesh?.home || []).map((h) => `${byId[h.device_id]?.display_name || h.device_id} ${h.rtt_ms}ms`);
-      return [device.display_name, "本机", mesh?.role === "relay" ? "本机是中转设备" : home.length ? `家中转：${home.join("、")}` : "正在选择家中转"];
+      return [device.display_name, "本机", mesh?.role === "relay" ? "本机是中转设备" : home.length ? `家中转：${home.join("、")}` : "正在选择家中转",
+        isMap && device.geo?.lat != null ? `${device.geo.label || ""}（${device.geo.source === "manual" ? "手动设置" : "按 IP 推测，可拖动修正"}）` : ""];
     }
     const link = links[id];
     const lines = [device.display_name, device.device_id];
@@ -196,6 +304,8 @@ export function topology({ devices = [], conns = {} }, actions = {}) {
     else lines.push(`${STATE_TEXT[link.state] || link.state}${link.via ? " " + link.via : ""}${link.rtt_ms != null ? " · " + link.rtt_ms + "ms" : ""}`,
       (link.route || "").replace(/^[^（]*（?/, "").replace(/）$/, ""));
     if (device.relay) lines.push("中转设备：转发其他设备的加密流量");
+    if (isMap) lines.push(device.geo?.lat == null ? "位置未知：拖到地图上即可设置"
+      : `${device.geo.label || ""}（${device.geo.source === "manual" ? "手动设置" : "按 IP 推测，可拖动修正"}）`);
     return lines.filter(Boolean);
   };
   const light = (id) => {
@@ -242,7 +352,9 @@ export function topology({ devices = [], conns = {} }, actions = {}) {
         button("terminal", "终端", can.terminal, actions.terminal, can.why),
         button("folder-open", "文件", can.files, actions.files, can.whyFiles || can.why),
         device.desktop || device.platform !== "linux" ? button("monitor", "远程桌面", can.desktop, actions.desktop, can.whyDesktop || can.why) : null,
-        button("plug", link ? "重新连接" : "建立连接", can.terminal && actions.connect, actions.connect, can.why)));
+        button("plug", link ? "重新连接" : "建立连接", can.terminal && actions.connect, actions.connect, can.why),
+        isMap && device.geo?.source === "manual" && actions.locate
+          ? button("map-pin", "恢复自动位置", true, (d) => actions.locate(d, null)) : null));
     panel.hidden = false;
     card.hidden = true;
     light(id);
@@ -251,13 +363,49 @@ export function topology({ devices = [], conns = {} }, actions = {}) {
     setTimeout(() => { document.addEventListener("mousedown", outside); document.addEventListener("keydown", escape); });
   };
 
+  const toSvg = (event) => {
+    const point = picture.createSVGPoint();
+    point.x = event.clientX; point.y = event.clientY;
+    return point.matrixTransform(picture.getScreenCTM().inverse());
+  };
   for (const [id, group] of Object.entries(nodeOf)) {
+    const device = byId[id];
+    if (isMap && device && actions.locate) {
+      // drag to fix where a device is; a press without moving is a click
+      group.addEventListener("pointerdown", (event) => {
+        if (event.button !== 0) return;
+        const start = toSvg(event);
+        const origin = pos[id];
+        let moved = false;
+        group.setPointerCapture(event.pointerId);
+        const move = (e) => {
+          const now = toSvg(e);
+          const dx = now.x - start.x, dy = now.y - start.y;
+          if (!moved && Math.hypot(dx, dy) < 4) return;
+          moved = true;
+          card.hidden = true;
+          group.setAttribute("transform", `translate(${dx} ${dy})`);
+        };
+        const up = (e) => {
+          group.removeEventListener("pointermove", move);
+          group.removeEventListener("pointerup", up);
+          if (!moved) { if (!device.self) openPanel(id); return; }
+          const now = toSvg(e);
+          const [lat, lon] = projection.invert(origin[0] + now.x - start.x, origin[1] + now.y - start.y);
+          group.classList.add("topo-saving");
+          actions.locate(device, { lat: Math.round(lat * 100) / 100, lon: Math.round(lon * 100) / 100,
+            label: "手动设置" });
+        };
+        group.addEventListener("pointermove", move);
+        group.addEventListener("pointerup", up);
+      });
+    }
     group.addEventListener("mouseenter", () => { if (panel.hidden) { light(id); showCard(id); } });
     group.addEventListener("mouseleave", hide);
     group.addEventListener("focus", () => { if (panel.hidden) { light(id); showCard(id); } });
     group.addEventListener("blur", hide);
     if (byId[id] && !byId[id].self) {
-      group.addEventListener("click", () => openPanel(id));
+      if (!(isMap && actions.locate)) group.addEventListener("click", () => openPanel(id));
       group.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openPanel(id); } });
     }
   }
@@ -268,6 +416,6 @@ export function topology({ devices = [], conns = {} }, actions = {}) {
   const legend = el("div", { class: "row wrap", style: { gap: "16px", fontSize: "var(--fs-sm)" } },
     key("direct", "直连（数字为往返延迟，流动越快延迟越低）"), key("relay", "经中转（端到端加密）", "6 5"),
     key("gateway", "网关中转", "1 6"), key("punching", "正在打洞", "3 7"),
-    el("span", { class: "muted" }, "点设备可直接打开终端、文件或桌面"));
+    el("span", { class: "muted" }, isMap ? "点设备打开操作，拖动设备修正位置（位置按 IP 推测，城市级）" : "点设备可直接打开终端、文件或桌面"));
   return el("div", { class: "stack", style: { gap: "12px" } }, stage, legend);
 }

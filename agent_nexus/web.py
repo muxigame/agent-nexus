@@ -820,6 +820,21 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
         return await device_admin({"op": "set_alias", "device_id": request.path_params["device_id"],
                                    "alias": body["alias"]})
 
+    async def put_device_location(request: Request) -> JSONResponse:
+        """A device's position on the map, set by hand ({"lat", "lon", "label"?}), or null for automatic."""
+        try:
+            body = await request.json()
+        except ValueError:
+            return JSONResponse({"error": "body must be JSON"}, status_code=400)
+        if not isinstance(body, dict) or "location" not in body:
+            return JSONResponse({"error": "body must be an object with a location (object or null)"}, status_code=400)
+        try:
+            lock.require_unlocked()
+        except LockError as exc:
+            return lock_error(exc)
+        return await device_admin({"op": "set_location", "device_id": request.path_params["device_id"],
+                                   "location": body["location"]})
+
     # -- the inbox page and asks (decision D11, design §8.12), served by the gateway --
     async def gateway_call(op: str, args: dict, feature: str) -> JSONResponse:
         from .federation import RoutingError
@@ -1508,6 +1523,7 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
         Route("/cloud", local_page),
         Route("/api/devices", list_devices),
         Route("/api/devices/{device_id}/alias", put_device_alias, methods=["PUT"]),
+        Route("/api/devices/{device_id}/location", put_device_location, methods=["PUT"]),
         Route("/api/devices/{device_id}/revoke", revoke_device, methods=["POST"]),
         Route("/api/devices/{device_id}", delete_device, methods=["DELETE"]),
         Route("/api/invites", invites_api, methods=["GET", "POST"]),

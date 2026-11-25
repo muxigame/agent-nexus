@@ -673,3 +673,8 @@ kbd { display: inline-block; padding: 0 5px; border: 1px solid var(--border-stro
   .topo-flow, .topo-halo, .topo-blink, .topo-panel { animation: none; }
   .topo-flow { stroke-dasharray: none; opacity: .8; }
 }
+.topo-land path { fill: var(--surface-2); stroke: var(--border); stroke-width: .6; }
+.topo-unknown { fill: var(--text-3); font-size: 11px; }
+.topo-saving { opacity: .55; }
+.topo.map .topo-svg { overflow: hidden; border-radius: var(--radius-md); background: var(--surface); }
+.topo-far { fill: var(--text-3); font-size: 10px; }

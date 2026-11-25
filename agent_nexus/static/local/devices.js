@@ -18,7 +18,18 @@ function connPill(device, conn) {
 }
 
 function savedView() {
-  try { return localStorage.getItem("anx.devices.view") === "topology" ? "topology" : "list"; } catch { return "list"; }
+  try {
+    const value = localStorage.getItem("anx.devices.view");
+    return value === "topology" || value === "map" ? value : "list";
+  } catch { return "list"; }
+}
+
+/** The map's land outlines (static, loaded once). */
+let worldOutline = null;
+async function loadWorld() {
+  if (worldOutline) return worldOutline;
+  try { worldOutline = await (await fetch("/local/world.json")).json(); } catch { worldOutline = { rings: [] }; }
+  return worldOutline;
 }
 
 function avatar(device) {
@@ -76,9 +87,10 @@ export async function devicesPage(ctx) {
     render(data);
   }
 
-  function setView(next) {
+  async function setView(next) {
     view = next;
     drawn = "";
+    if (next === "map") await loadWorld();
     try { localStorage.setItem("anx.devices.view", next); } catch { /* private mode */ }
     if (last) render(last);
   }
@@ -87,7 +99,7 @@ export async function devicesPage(ctx) {
     const option = (key, label, glyph) => el("button", { type: "button", "aria-pressed": view === key ? "true" : "false",
       onclick: () => setView(key) }, icon(glyph, { size: 14 }), label);
     return el("div", { class: "segmented", role: "group", "aria-label": "显示方式" },
-      option("list", "列表", "list"), option("topology", "拓扑", "network"));
+      option("list", "列表", "list"), option("topology", "拓扑", "network"), option("map", "地图", "map"));
   }
 
   /** What this device may do to another one right now, and why not. */
@@ -110,8 +122,9 @@ export async function devicesPage(ctx) {
     const locked = !!lock.locked;
     // a refresh that changes nothing in the picture keeps it (and its animations, open panel)
     const signature = `${view}|${locked}|${remote}|${topologySignature({ devices, conns })}`;
-    if (view === "topology" && signature === drawn && holder.querySelector(".topo")) return;
-    drawn = view === "topology" ? signature : "";
+    const pictured = view === "topology" || view === "map";
+    if (pictured && signature === drawn && holder.querySelector(".topo")) return;
+    drawn = pictured ? signature : "";
     const others = devices.filter((d) => !d.self);
     const me = devices.find((d) => d.self);
     mount(holder,
@@ -127,14 +140,15 @@ export async function devicesPage(ctx) {
         pill(locked ? "revoked" : "online", locked ? "已锁定" : "未锁定"))) : null,
       others.length ? el("div", { class: "row", style: { justifyContent: "space-between", alignItems: "center" } },
         el("span", { class: "muted" }, meshSummary(conns)), switcher()) : null,
-      others.length && view === "topology" ? el("section", { class: "card" }, el("div", { class: "card-body" },
-        topology({ devices, conns }, {
+      others.length && (view === "topology" || view === "map") ? el("section", { class: "card" }, el("div", { class: "card-body" },
+        topology({ devices, conns, world: worldOutline }, {
           can: (device) => abilities(device, locked, remote),
           terminal: (device) => { location.hash = `#/terminal/${encodeURIComponent(device.device_id)}`; },
           files: (device) => openFiles(device),
           desktop: (device) => { location.hash = `#/desktop/${encodeURIComponent(device.device_id)}`; },
           connect: (device) => connect(device),
-        })))
+          locate: locked ? null : (device, location) => locate(device, location),
+        }, { layout: view === "map" ? "map" : "rings" })))
       : others.length ? el("div", { class: "list" }, others.map((device) => row(device, locked, remote, links[device.device_id])))
         : el("section", { class: "card" }, el("div", { class: "card-body" }, emptyState({ icon: "monitor", title: "网关里还没有其他设备",
           text: "在网关控制台或“连接云端”页生成邀请码，让其他电脑加入。", compact: true }))));
@@ -160,6 +174,15 @@ export async function devicesPage(ctx) {
       node.classList.add("flash");
       setTimeout(() => node.classList.remove("flash"), 1600);
     });
+  }
+
+  async function locate(device, location) {
+    try {
+      await fetchJSON(`/api/devices/${encodeURIComponent(device.device_id)}/location`, { method: "PUT", body: { location } });
+      toast(location ? `已把 ${device.display_name} 放到这里` : `${device.display_name} 改回按 IP 自动定位`);
+    } catch { /* toasted */ }
+    drawn = "";
+    load();
   }
 
   async function connect(device) {
@@ -237,6 +260,7 @@ export async function devicesPage(ctx) {
     load();
   }
 
+  if (view === "map") await loadWorld();
   await load();
   ctx.every(10000, load);
   window.addEventListener("anx:lockchange", load);

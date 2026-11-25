@@ -114,6 +114,19 @@ class Devices:
             result.append(entry)
         return result
 
+    #: geoip.GeoLocator (gateway with p2p): where each device roughly is, for the map view
+    locator = None
+
+    def set_location(self, value: Any, location: Any) -> dict:
+        agent_id = self.resolve(value)
+        try:
+            self.store.set_location(agent_id, location if isinstance(location, dict) else None)
+        except KeyError:
+            raise RoutingError(f"unknown device {agent_id}; it must have connected at least once") from None
+        except ValueError as exc:
+            raise RoutingError(str(exc)) from None
+        return self.console_describe(agent_id)
+
     def set_alias(self, value: Any, alias: Any) -> dict:
         agent_id = self.resolve(value)
         try:
@@ -147,6 +160,15 @@ class Devices:
     ENROLLED_VIA = {"legacy_env": "agents_map", "agents_map": "agents_map", "agent_groups": "agent_groups",
                     "invite": "invite"}
 
+    def _geo(self, agent_id: str, stored: dict) -> dict | None:
+        if self.locator is None:
+            manual = stored.get("location")
+            return {**manual, "source": "manual"} if manual else None
+        try:
+            return self.locator.locate(agent_id, stored.get("location"))
+        except Exception:
+            return None
+
     def console_describe(self, agent_id: str, row: dict | None = None) -> dict:
         """:meth:`describe` plus what the owner's device table shows (version, enrolment, revocation)."""
         row = row or self._known().get(agent_id) or {"agent_id": agent_id, "online": False}
@@ -176,6 +198,8 @@ class Devices:
             files=bool(peer is not None and "files/1" in getattr(peer, "features", ())),
             # relay/1: forwards other devices' streams (docs/relay-mesh.md).
             relay=bool(peer is not None and "relay/1" in getattr(peer, "features", ())),
+            # roughly where it is (the 设备 page's map): set by hand, else from its egress address
+            geo=self._geo(agent_id, stored),
             # What the device publishes now (names, descriptions, tool counts; never URLs).
             plugins=[{"name": name, "description": str(mcp.get("description") or "")[:300],
                       "tools": len(mcp.get("tools") or []), "error": bool(mcp.get("error"))}

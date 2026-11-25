@@ -419,6 +419,10 @@ def build_cloud_app(config: dict, root: Path):
                      device_credential=device_credential, owner=console.owner)
     facade.p2p = p2p
     app.state.p2p = p2p
+    # Where devices roughly are (the 设备 page's map): ip2region, offline, on the gateway only.
+    from .geoip import GeoLocator
+    facade.devices.locator = GeoLocator(state_db_path(config, root).parent,
+                                        ip_of=p2p.device_ip if p2p.enabled else None)
     if p2p.enabled:
         try:
             from starlette.routing import Mount

@@ -380,7 +380,7 @@ def test_migration_7_on_an_existing_database(tmp_path):
     db.close()
     store = GatewayStore(path)
     try:
-        assert store.schema_version() == 8 == len(MIGRATIONS)
+        assert store.schema_version() == 9 == len(MIGRATIONS)
         mailbox = Mailbox(store)
         rows = {row["address"]: row for row in mailbox.addresses(include_ended=True)}
         assert rows["anon-abc123@dev-a"]["name_source"] == "anon" and rows["alpha@dev-a"]["name_source"] == "explicit"
@@ -658,7 +658,7 @@ def test_migration_8_adds_displaced_to_existing_handles(tmp_path):
     db.close()
     store = GatewayStore(path)
     try:
-        assert store.schema_version() == 8
+        assert store.schema_version() == len(MIGRATIONS)
         store.put_handle("h" * 32, AGENT, "proj", client_id="c")
         with store._lock:
             row = store._connect().execute("SELECT displaced FROM handles").fetchone()

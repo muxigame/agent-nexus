@@ -127,6 +127,31 @@ class P2PGateway:
             await self._reflector.stop()
             self._reflector = None
 
+    @staticmethod
+    def device_ip(agent_id: str) -> str | None:
+        """The public IPv4 the device's tunnel agent reported (its punch candidates; not the
+        address its gateway link comes from, which can be a proxy or a VPN exit)."""
+        import ipaddress
+        try:
+            from muxi_p2p_signaling.tunnel_registry import _registrations
+        except ImportError:
+            return None
+        registration = _registrations.get(agent_id)
+        if registration is None:
+            return None
+        for raw in list(getattr(registration, "udp_candidates", []) or []):
+            if raw.startswith(("n:", "t:", "te:")):
+                continue
+            text = raw[2:] if raw.startswith("a:") else raw
+            host = text.rpartition(":")[0].strip("[]")
+            try:
+                address = ipaddress.ip_address(host)
+            except ValueError:
+                continue
+            if address.version == 4 and address.is_global:
+                return str(address)
+        return None
+
     # -- hub_call ops
     async def device_config(self, agent_id: str) -> dict:
         if not self.enabled:

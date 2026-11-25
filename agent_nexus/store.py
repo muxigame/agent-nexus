@@ -165,6 +165,11 @@ MIGRATIONS: list[str] = [
       AND address IN (SELECT address FROM addresses WHERE name_source = 'auto')
       AND handle IS NOT (SELECT last_handle FROM addresses a WHERE a.address = handles.address)
     """,
+    # 9: a device's position on the 设备 page's map, set by hand (geoip.py guesses it from the
+    # device's egress address otherwise). JSON {"lat", "lon", "label"}; NULL = automatic.
+    """
+    ALTER TABLE devices ADD COLUMN location_json TEXT
+    """,
 ]
 
 
@@ -327,6 +332,25 @@ class GatewayStore:
             raise KeyError(agent_id)
         return alias
 
+    def set_location(self, agent_id: str, location: dict | None) -> dict | None:
+        """A manual map position, or None to go back to the automatic one."""
+        if location is not None:
+            try:
+                lat, lon = float(location["lat"]), float(location["lon"])
+            except (KeyError, TypeError, ValueError):
+                raise ValueError("location needs numeric lat and lon") from None
+            if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+                raise ValueError("lat/lon out of range")
+            label = clean_alias(location.get("label")) if location.get("label") else None
+            location = {"lat": round(lat, 4), "lon": round(lon, 4), "label": label}
+        with self._lock:
+            updated = self._connect().execute(
+                "UPDATE devices SET location_json = ? WHERE agent_id = ?",
+                (json.dumps(location, ensure_ascii=False) if location else None, agent_id)).rowcount
+        if not updated:
+            raise KeyError(agent_id)
+        return location
+
     def device(self, agent_id: str) -> dict | None:
         with self._lock:
             row = self._connect().execute("SELECT * FROM devices WHERE agent_id = ?", (agent_id,)).fetchone()
@@ -349,7 +373,8 @@ class GatewayStore:
                 "device": json.loads(row["device_json"]) if row["device_json"] else None,
                 "enrolled_via": row["enrolled_via"], "online": bool(row["online"]),
                 "last_connected_at": row["last_connected_at"], "last_seen_at": row["last_seen_at"],
-                "version": row["version"], "revoked_at": row["revoked_at"]}
+                "version": row["version"], "revoked_at": row["revoked_at"],
+                "location": json.loads(row["location_json"]) if row["location_json"] else None}
 
     # -- invites and device tokens (M16, design §11.5) ------------------------
     def invite_insert(self, invite_id: str, secret_sha256: str, *, label: str | None, agent_id: str | None,

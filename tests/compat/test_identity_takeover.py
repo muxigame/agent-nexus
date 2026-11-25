@@ -162,7 +162,7 @@ def test_migration_8_marks_the_victims_of_schema_7_takeovers(tmp_path):
     try:
         from agent_nexus.mailbox import Mailbox
         mailbox = Mailbox(store)
-        assert store.schema_version() == 8
+        assert store.schema_version() == len(MIGRATIONS)
         mailbox.send(ME, "claude-p@dev-a", "secret for B")
         assert mailbox.displaced("ha" * 16) == "claude-p@dev-a" and mailbox.address_for_handle("ha" * 16) is None
         assert mailbox.address_for_handle("hb" * 16) == "claude-p@dev-a"
