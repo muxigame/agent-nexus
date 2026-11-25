@@ -64,7 +64,7 @@ def test_member_keeps_the_two_nearest_relays_pinned_and_warmed():
     assert manager.home == ["r22", "r333"]
     assert connector.pinned == {"r22", "r333"}
     assert sorted(warmed) == ["r22", "r333"]
-    assert "r4444" in manager.backoff and "r4444" in connector.forgotten
+    assert "r4444" in manager.backoff and connector.forgotten == []  # the mesh never kills tunnels
     assert manager.preferred()[:3] == ["r22", "r333", "r1"]
     status = manager.status()
     assert status["role"] == "member" and [h["device_id"] for h in status["home"]] == ["r22", "r333"]
@@ -114,3 +114,18 @@ def test_an_offline_home_relay_is_dropped_and_the_slot_refilled():
     manager, connector, _ = run_mesh({"r1": 10.0, "r22": 50.0, "r333": 30.0}, manager=manager, devices=offline)
     assert manager.home == ["r333", "r22"]
     assert "r1" not in manager.rtt and connector.pinned == {"r333", "r22"}
+
+
+def test_a_busy_tunnel_keeps_its_relay():
+    manager, connector, _ = run_mesh({"r1": 10.0, "r22": 50.0})
+    original = mesh_mod.ping
+
+    async def slow(port, count=3, timeout=5.0):
+        raise asyncio.TimeoutError
+
+    mesh_mod.ping = slow
+    try:
+        asyncio.run(manager.tick())
+    finally:
+        mesh_mod.ping = original
+    assert manager.home == ["r1", "r22"] and manager.backoff == {} and connector.forgotten == []

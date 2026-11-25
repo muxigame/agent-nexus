@@ -29,7 +29,12 @@ SWITCH_RATIO = 0.7  # a candidate replaces a home relay only below 70% of its ro
 BACKOFF_MIN_S, BACKOFF_MAX_S = 60.0, 1800.0
 
 
-async def ping(port: int, count: int = 3, timeout: float = 5.0) -> float:
+#: a ping queued behind a big transfer on a slow uplink takes seconds; that is a busy tunnel,
+#: not a dead one
+PING_TIMEOUT_S = 15.0
+
+
+async def ping(port: int, count: int = 3, timeout: float = PING_TIMEOUT_S) -> float:
     """Median round trip in ms of ``ANX-PING`` lines through the tunnel at ``port``."""
     reader, writer = await asyncio.wait_for(asyncio.open_connection("127.0.0.1", port), timeout)
     samples: list[float] = []
@@ -105,15 +110,26 @@ class MeshManager:
         self.backoff[relay] = (time.monotonic() + delay, delay)
         self.errors[relay] = error[:160]
         self.rtt.pop(relay, None)
-        with contextlib.suppress(Exception):
-            self.connector.forget(relay)
+        # Never kill the tunnel from here: streams in flight ride on it (a relayed upload died
+        # at 93% when a ping, stuck behind it, timed out and the tunnel was torn down). A dead
+        # tunnel is noticed and rebuilt by the connector itself.
 
     async def _measure(self, relay: str) -> float | None:
         try:
             port, route = await self.tunnel_port(relay)
-            rtt = await ping(port)
         except Exception as exc:
             self._failed(relay, str(getattr(exc, "message", None) or exc) or type(exc).__name__)
+            return None
+        try:
+            rtt = await ping(port)
+        except asyncio.TimeoutError:
+            if relay in self.rtt:  # busy, not gone: keep what we knew
+                self.routes[relay] = route
+                return self.rtt[relay]
+            self._failed(relay, "ping timed out")
+            return None
+        except Exception as exc:
+            self._failed(relay, str(exc) or type(exc).__name__)
             return None
         self.backoff.pop(relay, None)
         self.errors.pop(relay, None)
