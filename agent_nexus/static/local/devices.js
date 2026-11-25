@@ -3,7 +3,7 @@
 import { el, mount, icon, iconHTML, fetchJSON, toast, modal, confirmDialog, emptyState, errorState, pill, relTime } from "/ui/ui.js";
 import { osMark } from "/ui/os-icons.js";
 import { openFiles } from "/local/files.js";
-import { topology } from "/local/topology.js";
+import { topology, topologySignature } from "/local/topology.js";
 
 /** How this device reaches another one right now (/api/remote/connections). */
 function connPill(device, conn) {
@@ -55,6 +55,7 @@ export async function devicesPage(ctx) {
 
   let view = savedView();
   let last = null;
+  let drawn = "";  // what the topology view currently shows (redraw only when it changed)
 
   async function load() {
     let data;
@@ -77,6 +78,7 @@ export async function devicesPage(ctx) {
 
   function setView(next) {
     view = next;
+    drawn = "";
     try { localStorage.setItem("anx.devices.view", next); } catch { /* private mode */ }
     if (last) render(last);
   }
@@ -88,11 +90,28 @@ export async function devicesPage(ctx) {
       option("list", "列表", "list"), option("topology", "拓扑", "network"));
   }
 
+  /** What this device may do to another one right now, and why not. */
+  function abilities(device, locked, remote) {
+    const why = locked ? "这台设备已锁定" : !device.online ? "设备不在线" : !device.terminal ? "对方客户端不支持远程终端（需 0.3.0 以上）" : !remote ? "网关需要 0.4.0 以上" : "";
+    return {
+      terminal: device.online && device.terminal && remote && !locked,
+      files: device.online && device.files && remote && !locked,
+      desktop: device.online && device.desktop && remote && !locked,
+      why,
+      whyFiles: locked ? "这台设备已锁定" : !device.online ? "设备不在线" : !device.files ? "对方客户端不支持文件传输（需 0.8.8 以上）" : why,
+      whyDesktop: locked ? "这台设备已锁定" : !device.online ? "设备不在线" : !device.desktop ? "对方没有可共享的桌面" : why,
+    };
+  }
+
   function render(data) {
     last = data;
     const { devices = [], lock = {}, remote = true, conns = {} } = data;
     const links = conns.devices || {};
     const locked = !!lock.locked;
+    // a refresh that changes nothing in the picture keeps it (and its animations, open panel)
+    const signature = `${view}|${locked}|${remote}|${topologySignature({ devices, conns })}`;
+    if (view === "topology" && signature === drawn && holder.querySelector(".topo")) return;
+    drawn = view === "topology" ? signature : "";
     const others = devices.filter((d) => !d.self);
     const me = devices.find((d) => d.self);
     mount(holder,
@@ -109,7 +128,13 @@ export async function devicesPage(ctx) {
       others.length ? el("div", { class: "row", style: { justifyContent: "space-between", alignItems: "center" } },
         el("span", { class: "muted" }, meshSummary(conns)), switcher()) : null,
       others.length && view === "topology" ? el("section", { class: "card" }, el("div", { class: "card-body" },
-        topology({ devices, conns }, (device) => { setView("list"); focusRow(device.device_id); })))
+        topology({ devices, conns }, {
+          can: (device) => abilities(device, locked, remote),
+          terminal: (device) => { location.hash = `#/terminal/${encodeURIComponent(device.device_id)}`; },
+          files: (device) => openFiles(device),
+          desktop: (device) => { location.hash = `#/desktop/${encodeURIComponent(device.device_id)}`; },
+          connect: (device) => connect(device),
+        })))
       : others.length ? el("div", { class: "list" }, others.map((device) => row(device, locked, remote, links[device.device_id])))
         : el("section", { class: "card" }, el("div", { class: "card-body" }, emptyState({ icon: "monitor", title: "网关里还没有其他设备",
           text: "在网关控制台或“连接云端”页生成邀请码，让其他电脑加入。", compact: true }))));

@@ -634,3 +634,42 @@ kbd { display: inline-block; padding: 0 5px; border: 1px solid var(--border-stro
 
 /* a row the topology view pointed at */
 .list-item.flash { box-shadow: 0 0 0 2px var(--accent); transition: box-shadow var(--dur) var(--ease); }
+
+/* ---------------------------------------------------------------- topology (设备 page) */
+.topo { position: relative; }
+.topo-svg { display: block; max-height: 600px; font-family: var(--font); overflow: visible; }
+.topo-rings ellipse { fill: none; stroke: var(--border); stroke-dasharray: 2 6; }
+.topo-base { stroke-width: 2; opacity: .35; }
+.topo-flow { stroke-width: 2.5; stroke-dasharray: 2 14; animation: topo-flow 1.6s linear infinite; }
+@keyframes topo-flow { to { stroke-dashoffset: -32; } }
+.topo-blink { animation-name: topo-flow, topo-blink; animation-timing-function: linear, ease-in-out; animation-iteration-count: infinite; }
+@keyframes topo-blink { 50% { opacity: .15; } }
+.topo-disc { fill: var(--surface); stroke-width: 2.5; filter: drop-shadow(0 1px 3px rgba(0, 0, 0, .18));
+  transform-box: fill-box; transform-origin: center; transition: transform var(--dur-fast) var(--ease); }
+.topo-node.offline .topo-disc { filter: none; stroke-dasharray: 3 3; }
+.topo-halo { fill: none; stroke-width: 2; transform-box: fill-box; transform-origin: center; animation: topo-halo 2.6s ease-out infinite; }
+@keyframes topo-halo { from { opacity: .5; transform: scale(1); } to { opacity: 0; transform: scale(1.8); } }
+.topo-node[tabindex] { cursor: pointer; outline: none; }
+.topo-node[tabindex]:hover .topo-disc, .topo-node[tabindex]:focus-visible .topo-disc { transform: scale(1.12); }
+.topo-node:focus-visible .topo-disc { stroke: var(--focus) !important; }
+.topo-label { fill: var(--text); font-size: 11px; }
+.topo-label.off, .topo-inner { fill: var(--text-3); }
+.topo-badge { fill: var(--info); stroke: var(--surface); stroke-width: 2; }
+.topo-rtt { fill: var(--ok); font-weight: var(--fw-medium); paint-order: stroke; stroke: var(--surface); stroke-width: 4px; stroke-linejoin: round; }
+.topo .topo-edge, .topo .topo-node, .topo .topo-rtt { transition: opacity var(--dur) var(--ease); }
+.topo.dim .topo-edge:not(.hot), .topo.dim .topo-node:not(.hot) { opacity: .15; }
+.topo.dim .topo-rtt { opacity: .3; }
+.topo-card, .topo-panel { position: absolute; z-index: 5; background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius-md); box-shadow: var(--shadow-pop); font-size: var(--fs-sm); }
+.topo-card { padding: 8px 10px; pointer-events: none; max-width: 300px; }
+.topo-card .title { font-weight: var(--fw-semibold); margin-bottom: 2px; }
+.topo-panel { padding: 10px; width: 264px; display: flex; flex-direction: column; gap: 8px; animation: topo-pop var(--dur-fast) var(--ease); }
+@keyframes topo-pop { from { opacity: 0; transform: translateY(4px) scale(.98); } }
+.topo-panel-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.topo-panel-info { font-size: var(--fs-xs); }
+.topo-panel-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.topo-panel-actions .btn { justify-content: center; }
+@media (prefers-reduced-motion: reduce) {
+  .topo-flow, .topo-halo, .topo-blink, .topo-panel { animation: none; }
+  .topo-flow { stroke-dasharray: none; opacity: .8; }
+}
