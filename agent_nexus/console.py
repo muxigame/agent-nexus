@@ -347,6 +347,12 @@ class Console:
             "clients": clients, "setup": setup, "alerts": alerts,
             "downloads": {"latest": downloads["latest"], "count": len(downloads["items"])}})
 
+    async def topology(self, request: Request) -> Response:
+        """The 拓扑 view: every device and the links they report (``links/1``)."""
+        if await self.owner(request) is None:
+            return self.unauthorized()
+        return self._json({**self.facade.devices.topology(), "origin": self.origin(request)})
+
     async def devices(self, request: Request) -> Response:
         if await self.owner(request) is None:
             return self.unauthorized()
@@ -361,10 +367,13 @@ class Console:
                 return self._json({"error": text, "code": code}, 404 if code == "unknown_device" else 409)
             return self._json({"deleted": agent_id})
         body = await self._body(request)
-        if body is None or "alias" not in body:
-            return self._json({"error": "body must be an object with an alias (string or null)"}, 400)
+        if body is None or ("alias" not in body and "location" not in body):
+            return self._json({"error": "body must be an object with an alias (string or null) or a location"}, 400)
         try:
-            device = self.facade.devices.set_alias(request.path_params["device_id"], body["alias"])
+            if "location" in body:  # the 拓扑 map: dragged to a place, or null for ip2region again
+                device = self.facade.devices.set_location(request.path_params["device_id"], body["location"])
+            else:
+                device = self.facade.devices.set_alias(request.path_params["device_id"], body["alias"])
         except RoutingError as exc:
             status = 404 if str(exc).startswith("unknown device") else 400
             return self._json({"error": str(exc)}, status)
@@ -464,6 +473,7 @@ class Console:
             Route("/console/{name}", self.asset, methods=["GET", "HEAD"]),
             Route("/api/console/summary", self.summary, methods=["GET"]),
             Route("/api/devices", self.devices, methods=["GET"]),
+            Route("/api/topology", self.topology, methods=["GET"]),
             Route("/api/devices/{device_id}", self.devices, methods=["PUT", "DELETE"]),
             Route("/api/devices/{device_id}/revoke", self.revoke, methods=["POST"]),
             Route("/api/invites", self.invites, methods=["GET", "POST"]),

@@ -36,7 +36,7 @@ AGENT_FEATURES: tuple[str, ...] = ("device-contract/1", "mcp-alias/1", "hub_call
 #: ``remote/1``: devices may open each other's terminals with their own credential
 #: (``/api/devices/{id}/terminal[/ws]`` with ``X-ANX-Device``) and report ``hub_call lock_report``.
 GATEWAY_FEATURES: tuple[str, ...] = ("hub_call/1", "mcp-alias/1", "mail/1", "ask/1", "inbox/1", "wake/1", "invites/1",
-                                     "plugin_repo/1", "remote/1", "p2p/1")
+                                     "plugin_repo/1", "remote/1", "p2p/1", "links/1")
 REMOTE = "remote/1"
 #: ``p2p/1``: muxi-p2p signaling under /p2p, the reflector, hub_call p2p_config / remote_ticket.
 P2P = "p2p/1"
@@ -52,6 +52,9 @@ TERM = "term/1"
 FILES = "files/1"
 #: ``relay/1`` (device): forwards other devices' remote-hub streams (docs/relay-mesh.md).
 RELAY = "relay/1"
+#: ``links/1``: devices report how they reach each other (``hub_call links_report``) and the
+#: gateway console draws everyone's reports as one network (docs/relay-mesh.md).
+LINKS = "links/1"
 AGENT_OPTIONAL_FEATURES: tuple[str, ...] = (PLUGIN_REPO, TERM, "remote-hub/1", "desktop/1", FILES, RELAY)
 ASK = "ask/1"
 INBOX = "inbox/1"

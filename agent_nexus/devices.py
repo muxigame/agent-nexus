@@ -8,6 +8,7 @@ every agent-facing input that takes a device accepts either spelling.
 """
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from .federation import Hub, Peer, RoutingError
@@ -200,11 +201,72 @@ class Devices:
             relay=bool(peer is not None and "relay/1" in getattr(peer, "features", ())),
             # roughly where it is (the 设备 page's map): set by hand, else from its egress address
             geo=self._geo(agent_id, stored),
+            # its round trip to the gateway (links/1), shown next to 在线
+            gateway_rtt_ms=round(peer.gateway_rtt_ms) if peer is not None and peer.gateway_rtt_ms is not None else None,
             # What the device publishes now (names, descriptions, tool counts; never URLs).
             plugins=[{"name": name, "description": str(mcp.get("description") or "")[:300],
                       "tools": len(mcp.get("tools") or []), "error": bool(mcp.get("error"))}
                      for name, mcp in sorted((catalog.get("mcps") or {}).items()) if isinstance(mcp, dict)] if peer else None)
         return entry
+
+    #: what a device may report about one link (``links_report``)
+    LINK_KINDS = ("direct", "relay", "gateway", "punching")
+    MAX_LINKS = 256
+    #: a report older than this is not drawn (devices report every 30 s)
+    LINKS_TTL_S = 120.0
+
+    def links_report(self, peer: Peer, args: dict) -> dict:
+        """Keep what ``peer`` says about its links (``hub_call links_report``, ``links/1``)."""
+        links = []
+        for item in (args.get("links") or [])[:self.MAX_LINKS] if isinstance(args.get("links"), list) else []:
+            if not isinstance(item, dict) or item.get("kind") not in self.LINK_KINDS:
+                continue
+            other = item.get("peer")
+            if not isinstance(other, str) or not other or other == peer.agent_id:
+                continue
+            rtt = item.get("rtt_ms")
+            via = item.get("via")
+            links.append({"peer": other[:200], "kind": item["kind"],
+                          "via": via[:200] if isinstance(via, str) and via and via not in (other, peer.agent_id) else "",
+                          "rtt_ms": float(rtt) if isinstance(rtt, (int, float)) and 0 <= rtt < 600000 else None,
+                          "pinned": bool(item.get("pinned"))})
+        peer.links, peer.links_at = links, time.monotonic()
+        rtt = args.get("gateway_rtt_ms")
+        if isinstance(rtt, (int, float)) and 0 <= rtt < 600000:
+            peer.gateway_rtt_ms = float(rtt)
+        return {"links": len(links)}
+
+    def topology(self) -> dict:
+        """Every device and every live link between them, merged from both ends' reports.
+
+        One edge per pair and kind (a relayed link also names its relay); a round trip both
+        ends measured is averaged. Links to offline devices and stale reports are left out.
+        """
+        now = time.monotonic()
+        edges: dict[tuple, dict] = {}
+        for agent_id, peer in list(self.hub.peers.items()):
+            if not peer.links or now - peer.links_at > self.LINKS_TTL_S:
+                continue
+            for link in peer.links:
+                other = link["peer"]
+                if other not in self.hub.peers:
+                    continue
+                a, b = sorted((agent_id, other))
+                key = (a, b, link["kind"], link["via"])
+                edge = edges.setdefault(key, {"a": a, "b": b, "kind": link["kind"], "via": link["via"],
+                                              "rtt": [], "pinned": False, "reported_by": []})
+                edge["reported_by"].append(agent_id)
+                edge["pinned"] = edge["pinned"] or link["pinned"]
+                if link["rtt_ms"] is not None:
+                    edge["rtt"].append(link["rtt_ms"])
+        result = []
+        for edge in edges.values():
+            rtts = edge.pop("rtt")
+            edge["rtt_ms"] = round(sum(rtts) / len(rtts)) if rtts else None
+            edge["reported_by"] = sorted(set(edge["reported_by"]))
+            result.append(edge)
+        result.sort(key=lambda e: (e["a"], e["b"], e["kind"]))
+        return {"devices": self.console_list(), "edges": result}
 
     def console_list(self) -> list[dict]:
         known = self._known()

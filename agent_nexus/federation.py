@@ -69,6 +69,11 @@ class Peer:
     anx_version: str | None = None
     #: The client's 锁定 (``hub_call lock_report``): it may be operated on, not operate on others.
     locked: bool = False
+    #: ``hub_call links_report`` (``links/1``): how it reaches the other devices, when it said so
+    #: (monotonic), and its round trip to this gateway.
+    links: list = field(default_factory=list)
+    links_at: float = 0.0
+    gateway_rtt_ms: float | None = None
     _closed: bool = field(default=False, init=False, repr=False)
     _socket_close_task: asyncio.Task | None = field(default=None, init=False, repr=False)
 

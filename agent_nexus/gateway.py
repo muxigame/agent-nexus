@@ -633,14 +633,19 @@ class Gateway:
             # but may not operate on other devices. Reported on connect and on every change.
             peer.locked = bool(args.get("locked"))
             return {"locked": peer.locked}
+        if op == "links_report":
+            # How this device reaches the others right now; the console's 拓扑 draws all of them.
+            return self.devices.links_report(peer, args)
         if op == "device_admin":
             action = args.get("op")
-            if action != "list" and getattr(peer, "locked", False):
+            if action not in ("list", "topology") and getattr(peer, "locked", False):
                 raise RoutingError("locked: 这台设备已锁定，解锁后才能操作其他设备")
             if action == "list":
                 if self.enrollment is not None:
                     return {"devices": self.devices.console_list()}
                 return {"devices": self.devices.list(include_offline=bool(args.get("include_offline", True)))}
+            if action == "topology":
+                return self.devices.topology()
             if action == "set_alias":
                 return {"device": self.devices.set_alias(args.get("device_id"), args.get("alias"))}
             if action == "set_location":

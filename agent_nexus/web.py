@@ -281,7 +281,7 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
     async def device_admin(args: dict) -> JSONResponse:
         """The console's device page, served by the gateway (``hub_call device_admin``)."""
         from .federation import RoutingError
-        if args.get("op") != "list":
+        if args.get("op") not in ("list", "topology"):  # reading is fine while locked
             try:
                 lock.require_unlocked()  # 锁定: this client may be operated on, not operate on others
             except LockError as exc:
@@ -307,6 +307,20 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
         body["lock"] = lock.state()
         from .features import REMOTE
         body["remote"] = REMOTE in hub.features
+        return JSONResponse(body)
+
+    async def network_topology(_request: Request) -> JSONResponse:
+        """Every device's links as the gateway sees them (``links/1``): the 设备 page's 全网 view."""
+        from .features import LINKS
+        if hub.available and LINKS not in hub.features:
+            return JSONResponse({"error": "网关版本较旧，还不能汇总全网连接", "code": "unsupported_gateway"}, status_code=409)
+        response = await device_admin({"op": "topology"})
+        if response.status_code != 200:
+            return response
+        body = json.loads(response.body)
+        me = joining.cloud_config(sup.cfg.root).get("agent_id")
+        for device in body.get("devices", []):
+            device["self"] = device.get("device_id") == me or device.get("agent_id") == me
         return JSONResponse(body)
 
     # -- 锁定 and operating on other devices (private-network model, remote/1) --
@@ -515,9 +529,9 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
     #: device id -> what its last stream actually used (the 设备 page shows it)
     route_seen: dict[str, dict] = {}
 
-    def note_route(device_id: str, kind: str, route: str, via: str = "") -> None:
+    def note_route(device_id: str, kind: str, route: str, via: str = "", via_id: str = "") -> None:
         import time as _time
-        route_seen[device_id] = {"kind": kind, "route": route, "via": via, "at": _time.time()}
+        route_seen[device_id] = {"kind": kind, "route": route, "via": via, "via_id": via_id, "at": _time.time()}
     #: how long a request waits for a direct tunnel before taking a relay; LAN, IPv6 and cone
     #: NATs connect well within it, a symmetric pair needs 2-20 s and goes through a relay meanwhile
     DIRECT_GRACE_S = 3.0
@@ -552,7 +566,7 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
                 continue
             name = relay.get("display_name") or relay_id
             route = f"经 {name} 中转（端到端加密；{note}）"
-            note_route(device_id, "relay", route, name)
+            note_route(device_id, "relay", route, name, relay_id)
             return (HubPath(port, relay_ticket=relay_ticket["ticket"], target=device_id, label=name), route, ticket)
         return None
 
@@ -1194,15 +1208,48 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
 
         hub.on_attach.append(start_mesh)
 
+    links_task: dict[str, asyncio.Task | None] = {"task": None}
+
+    async def report_links_forever() -> None:
+        """Tell the gateway how this device reaches the others (``links/1``), every 30 s.
+
+        The gateway console draws everyone's reports as one picture; the call's own round trip
+        is this device's latency to the gateway, shown next to 在线 everywhere.
+        """
+        import time as _time
+        from .features import LINKS
+        while True:
+            try:
+                if hub.available and LINKS in hub.features:
+                    links = [{"peer": peer, "kind": link["state"], "via": link.get("via_id") or "",
+                              "rtt_ms": link.get("rtt_ms"), "pinned": bool(link.get("pinned"))}
+                             for peer, link in (await connection_snapshot()).items()]
+                    started = _time.monotonic()
+                    await hub.call("links_report", {"links": links, "gateway_rtt_ms": gateway_rtt["ms"]}, timeout=10)
+                    gateway_rtt["ms"] = (_time.monotonic() - started) * 1000
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.debug("links report failed: %s", exc)
+            await asyncio.sleep(30)
+
+    async def start_links_report() -> None:
+        if links_task["task"] is None or links_task["task"].done():
+            links_task["task"] = asyncio.ensure_future(report_links_forever())
+
+    hub.on_attach.append(start_links_report)
+
     #: device id -> (monotonic time, round trip ms) through its direct tunnel
     rtt_cache: dict[str, tuple[float, float]] = {}
 
-    async def remote_connections(_request: Request) -> JSONResponse:
-        """This device's connection to every other one, for the 设备 page and its topology view."""
+    #: the round trip of the last ``links_report`` call: this device's latency to the gateway
+    gateway_rtt: dict[str, float | None] = {"ms": None}
+
+    async def connection_snapshot() -> dict[str, dict]:
+        """How this device reaches every other one right now (device id -> state, route, rtt)."""
         import time as _time
         from .mesh import ping as mesh_ping
         connector = p2p_state["connector"]
-        mesh = p2p_state.get("mesh")
         now = _time.monotonic()
         devices: dict[str, dict] = {}
         direct: dict[str, int] = {}
@@ -1216,7 +1263,8 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
                 devices[target] = {"state": "punching", "route": "正在打洞直连"}
         for target, seen in route_seen.items():
             if target not in devices and _time.time() - seen["at"] < 600 and seen["kind"] in ("relay", "gateway"):
-                devices[target] = {"state": seen["kind"], "route": seen["route"], "via": seen.get("via", "")}
+                devices[target] = {"state": seen["kind"], "route": seen["route"], "via": seen.get("via", ""),
+                                   "via_id": seen.get("via_id", "")}
 
         async def measure(target: str, port: int) -> None:
             cached = rtt_cache.get(target)
@@ -1231,11 +1279,19 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
             devices[target]["rtt_ms"] = round(ms)
 
         await asyncio.gather(*(measure(t, port) for t, port in direct.items()))
+        return devices
+
+    async def remote_connections(_request: Request) -> JSONResponse:
+        """This device's connection to every other one, for the 设备 page and its topology view."""
+        devices = await connection_snapshot()
+        mesh = p2p_state.get("mesh")
+        rtt = gateway_rtt["ms"]
         origin = ""
         with contextlib.suppress(Exception):
             origin = remote.credentials(sup.cfg.root)[0]
         return JSONResponse({"me": joining.cloud_config(sup.cfg.root).get("agent_id"),
-                             "gateway": {"origin": origin, "online": hub.available},
+                             "gateway": {"origin": origin, "online": hub.available,
+                                         "rtt_ms": round(rtt) if rtt is not None else None},
                              "relay": getattr(sup.cfg, "relay", "auto") == "on",
                              "mesh": mesh.status() if mesh is not None else None,
                              "devices": devices})
@@ -1522,6 +1578,7 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
         Route("/api/cloud/leave", cloud_leave, methods=["POST"]),
         Route("/cloud", local_page),
         Route("/api/devices", list_devices),
+        Route("/api/topology", network_topology),
         Route("/api/devices/{device_id}/alias", put_device_alias, methods=["PUT"]),
         Route("/api/devices/{device_id}/location", put_device_location, methods=["PUT"]),
         Route("/api/devices/{device_id}/revoke", revoke_device, methods=["POST"]),

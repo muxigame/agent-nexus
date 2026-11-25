@@ -3,18 +3,24 @@
 import { el, mount, icon, iconHTML, fetchJSON, toast, modal, confirmDialog, emptyState, errorState, pill, relTime } from "/ui/ui.js";
 import { osMark } from "/ui/os-icons.js";
 import { openFiles } from "/local/files.js";
-import { topology, topologySignature } from "/local/topology.js";
+import { topology, topologySignature, localEdges, loadWorld, linkText } from "/ui/topology.js";
 
 /** How this device reaches another one right now (/api/remote/connections). */
 function connPill(device, conn) {
-  if (!device.online || device.self) return null;
-  if (!conn) return el("span", { class: "pill neutral", title: "还没有建立连接：打开终端、文件或桌面时自动选路（直连 → 经中转 → 网关中转），之后三者共用这条连接" }, "未连接");
-  const rtt = conn.rtt_ms != null ? ` · ${conn.rtt_ms}ms` : "";
-  if (conn.state === "direct") return el("span", { class: "pill ok", title: conn.route }, (conn.pinned ? "常驻直连" : "直连") + rtt);
-  if (conn.state === "relay") return el("span", { class: "pill info", title: conn.route }, `经 ${conn.via} 中转`);
-  if (conn.state === "punching") return el("span", { class: "pill warn pulse", title: conn.route }, "打洞中");
-  if (conn.state === "gateway") return el("span", { class: "pill warn", title: conn.route }, "网关中转");
-  return null;
+  // no pill until there is a connection: they are built on demand, so "none yet" is the normal case
+  if (!device.online || device.self || !conn) return null;
+  const link = { kind: conn.state, via: conn.via, rtt_ms: conn.rtt_ms };
+  const tone = { direct: "ok", relay: "info", punching: "warn pulse", gateway: "warn" }[conn.state] || "neutral";
+  const text = conn.state === "direct" && conn.pinned ? linkText(link).replace("直连", "常驻直连") : linkText(link);
+  return el("span", { class: `pill ${tone}`, title: conn.route || "" }, text);
+}
+
+/** 在线 with this device's round trip to the gateway (links/1), 离线, 已吊销. */
+function presencePill(device, gatewayRtt) {
+  if (device.revoked) return pill("revoked");
+  if (!device.online) return pill("offline");
+  const rtt = device.self ? gatewayRtt : device.gateway_rtt_ms;
+  return pill("online", rtt != null ? `在线 · ${rtt}ms` : "在线");
 }
 
 function savedView() {
@@ -24,23 +30,14 @@ function savedView() {
   } catch { return "list"; }
 }
 
-/** The map's land outlines (static, loaded once). */
-let worldOutline = null;
-async function loadWorld() {
-  if (worldOutline) return worldOutline;
-  try { worldOutline = await (await fetch("/local/world.json")).json(); } catch { worldOutline = { rings: [] }; }
-  return worldOutline;
+function savedScope() {
+  try { return localStorage.getItem("anx.devices.scope") === "global" ? "global" : "local"; } catch { return "local"; }
 }
 
 function avatar(device) {
   const mark = osMark(device.os_family);
   if (mark) return el("span", { class: "avatar os-mark", title: mark.label, "aria-label": mark.label, html: mark.svg });
   return el("span", { class: "avatar" }, icon(device.platform === "linux" ? "server" : "monitor", { size: 16 }));
-}
-
-function state(device) {
-  if (device.revoked) return "revoked";
-  return device.online ? "online" : "offline";
 }
 
 function menu(anchor, items) {
@@ -65,17 +62,20 @@ export async function devicesPage(ctx) {
   mount(page, head, holder);
 
   let view = savedView();
+  let scope = savedScope();  // the picture: how this device reaches the others, or the whole network
   let last = null;
   let drawn = "";  // what the topology view currently shows (redraw only when it changed)
 
   async function load() {
     let data;
     try {
-      const [devices, conns] = await Promise.all([
+      const pictured = view === "topology" || view === "map";
+      const [devices, conns, network] = await Promise.all([
         fetchJSON("/api/devices", { quiet: true }),
         fetchJSON("/api/remote/connections", { quiet: true }).catch(() => ({})),
+        pictured && scope === "global" ? fetchJSON("/api/topology", { quiet: true }).catch((error) => ({ error })) : null,
       ]);
-      data = { ...devices, conns };
+      data = { ...devices, conns, network };
     } catch (error) {
       if (error.status === 409) {
         mount(holder, el("section", { class: "card" }, el("div", { class: "card-body" }, emptyState({
@@ -93,13 +93,27 @@ export async function devicesPage(ctx) {
     if (next === "map") await loadWorld();
     try { localStorage.setItem("anx.devices.view", next); } catch { /* private mode */ }
     if (last) render(last);
+    if (scope === "global" && next !== "list") load();  // the network picture comes from the gateway
+  }
+
+  function setScope(next) {
+    scope = next;
+    drawn = "";
+    try { localStorage.setItem("anx.devices.scope", next); } catch { /* private mode */ }
+    load();
   }
 
   function switcher() {
     const option = (key, label, glyph) => el("button", { type: "button", "aria-pressed": view === key ? "true" : "false",
       onclick: () => setView(key) }, icon(glyph, { size: 14 }), label);
-    return el("div", { class: "segmented", role: "group", "aria-label": "显示方式" },
+    const views = el("div", { class: "segmented", role: "group", "aria-label": "显示方式" },
       option("list", "列表", "list"), option("topology", "拓扑", "network"), option("map", "地图", "map"));
+    if (view === "list") return views;
+    const lens = (key, label, title) => el("button", { type: "button", "aria-pressed": scope === key ? "true" : "false", title,
+      onclick: () => setScope(key) }, label);
+    return el("div", { class: "row", style: { gap: "8px" } },
+      el("div", { class: "segmented", role: "group", "aria-label": "视角" },
+        lens("local", "本机", "本机怎样连到每台设备"), lens("global", "全网", "所有设备之间实际在用的连接（网关汇总）")), views);
   }
 
   /** What this device may do to another one right now, and why not. */
@@ -117,16 +131,20 @@ export async function devicesPage(ctx) {
 
   function render(data) {
     last = data;
-    const { devices = [], lock = {}, remote = true, conns = {} } = data;
+    const { devices = [], lock = {}, remote = true, conns = {}, network = null } = data;
     const links = conns.devices || {};
     const locked = !!lock.locked;
+    const global = scope === "global" && network && !network.error;
+    const me = devices.find((d) => d.self);
+    const picture = global
+      ? { devices: network.devices || devices, edges: network.edges || [], gateway: conns.gateway || {}, scope: "global" }
+      : { devices, edges: localEdges(conns, me?.device_id, devices), gateway: conns.gateway || {}, mesh: conns.mesh, scope: "local" };
     // a refresh that changes nothing in the picture keeps it (and its animations, open panel)
-    const signature = `${view}|${locked}|${remote}|${topologySignature({ devices, conns })}`;
+    const signature = `${view}|${scope}|${locked}|${remote}|${topologySignature(picture)}`;
     const pictured = view === "topology" || view === "map";
     if (pictured && signature === drawn && holder.querySelector(".topo")) return;
     drawn = pictured ? signature : "";
     const others = devices.filter((d) => !d.self);
-    const me = devices.find((d) => d.self);
     mount(holder,
       locked ? el("div", { class: "banner warn" }, icon("lock", { size: 18 }),
         el("div", { class: "banner-body" }, el("div", { class: "banner-title" }, "这台设备已锁定"),
@@ -137,18 +155,21 @@ export async function devicesPage(ctx) {
       me ? el("section", { class: "card" }, el("div", { class: "card-body row", style: { gap: "12px" } }, avatar(me),
         el("div", { class: "stack grow", style: { gap: 0 } }, el("span", { class: "title" }, me.display_name, el("span", { class: "tag", style: { marginLeft: "8px" } }, "本机")),
           el("span", { class: "sub mono" }, me.device_id)),
-        pill(locked ? "revoked" : "online", locked ? "已锁定" : "未锁定"))) : null,
+        presencePill(me, conns.gateway?.rtt_ms), pill(locked ? "revoked" : "online", locked ? "已锁定" : "未锁定"))) : null,
       others.length ? el("div", { class: "row", style: { justifyContent: "space-between", alignItems: "center" } },
         el("span", { class: "muted" }, meshSummary(conns)), switcher()) : null,
+      scope === "global" && network?.error && view !== "list" ? el("div", { class: "banner info" }, icon("info", { size: 18 }),
+        el("div", { class: "banner-body" }, el("div", { class: "banner-title" }, "暂时看不到全网连接"),
+          el("div", { class: "muted" }, network.error.message || "网关需要 0.8.18 以上"))) : null,
       others.length && (view === "topology" || view === "map") ? el("section", { class: "card" }, el("div", { class: "card-body" },
-        topology({ devices, conns, world: worldOutline }, {
+        topology(picture, {
           can: (device) => abilities(device, locked, remote),
           terminal: (device) => { location.hash = `#/terminal/${encodeURIComponent(device.device_id)}`; },
           files: (device) => openFiles(device),
           desktop: (device) => { location.hash = `#/desktop/${encodeURIComponent(device.device_id)}`; },
           connect: (device) => connect(device),
           locate: locked ? null : (device, location) => locate(device, location),
-        }, { layout: view === "map" ? "map" : "rings" })))
+        }, { layout: view === "map" ? "map" : "rings", onChange: () => { drawn = ""; render(last); } })))
       : others.length ? el("div", { class: "list" }, others.map((device) => row(device, locked, remote, links[device.device_id])))
         : el("section", { class: "card" }, el("div", { class: "card-body" }, emptyState({ icon: "monitor", title: "网关里还没有其他设备",
           text: "在网关控制台或“连接云端”页生成邀请码，让其他电脑加入。", compact: true }))));
@@ -207,7 +228,7 @@ export async function devicesPage(ctx) {
         el("span", { class: "sub truncate" }, el("span", { class: "mono" }, device.device_id), device.os ? ` · ${device.os}` : "",
           !device.online && device.last_connected_at ? ` · ${relTime(device.last_seen_at)}在线` : "")),
       el("div", { class: "meta row", style: { gap: "6px" } },
-        pill(state(device)),
+        presencePill(device),
         connPill(device, conn),
         device.desktop || device.platform !== "linux" ? el("a", { class: `btn btn-sm ${canDesktop ? "" : "disabled"}`,
           href: canDesktop ? `#/desktop/${encodeURIComponent(device.device_id)}` : null,
