@@ -598,3 +598,12 @@ def test_read_dsh_v4_records(tmp_path):
                      ("message", None, "hello")]
     tool = next(e for e in events if e["type"] == "tool")
     assert tool["status"] == "ok" and tool["output"] == "hello" and tool["input"] == {"file_path": "a.txt"}
+
+
+def test_console_started_session_titled_by_its_first_prompt(home, tmp_path):
+    # dsh titles a session from its first user message, which (over ACP) carries the system prompt in front
+    meta = S.SessionMeta(tmp_path / "root")
+    meta.set("dsh", DSH_1, managed=True, first_prompt="  修复   登录页 ")
+    meta.set("dsh", DSH_1, first_prompt="later message")  # kept once set
+    found = by_id(S.discover(None, home, kind="dsh", env={}, meta=meta))
+    assert found[("dsh", DSH_1)]["title"] == "修复 登录页"

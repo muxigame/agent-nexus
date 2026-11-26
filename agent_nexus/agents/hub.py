@@ -199,7 +199,9 @@ class AgentHub:
         if not session_id:
             return
         try:
-            self.meta.set(run.kind, session_id, managed=True, rid=run.rid, address=run.address or None)
+            fresh = not getattr(run.opts, "resume_id", None)  # a resumed session keeps the CLI's own title
+            self.meta.set(run.kind, session_id, managed=True, rid=run.rid, address=run.address or None,
+                          **({"first_prompt": run.last_prompt} if fresh and run.last_prompt else {}))
         except (OSError, ValueError):
             log.warning("agents: could not record session %s", session_id)
         try:

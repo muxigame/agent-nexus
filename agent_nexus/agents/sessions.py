@@ -1770,7 +1770,7 @@ class SessionMeta:
 
     def set(self, kind: str, session_id: str, **patch: Any) -> dict:
         """Apply ``alias`` (text; empty clears it), ``pinned`` / ``archived`` / ``hidden`` / ``managed`` (bools; false
-        clears), ``rid``, ``address``. Unknown keys are ignored. Returns the stored entry. Raises ``ValueError`` for bad input."""
+        clears), ``rid``, ``address``, ``first_prompt`` (kept once set). Unknown keys are ignored. Returns the stored entry. Raises ``ValueError`` for bad input."""
         if not isinstance(kind, str) or not kind or not isinstance(session_id, str) or not session_id:
             raise ValueError("缺少 kind 或 id")
         with self.lock:
@@ -1802,6 +1802,11 @@ class SessionMeta:
                         entry[name] = True
                     else:
                         entry.pop(name, None)
+                elif name == "first_prompt" and isinstance(value, str):
+                    # the first message typed in the console for a session it started: its title, since an ACP CLI
+                    # (dsh) gets the system prompt in front of that message and titles the session from the mix
+                    if value.strip() and "first_prompt" not in entry:
+                        entry["first_prompt"] = " ".join(value.split())[:TITLE_MAX * 2]
                 elif name in ("rid", "address") and (value is None or isinstance(value, str)):
                     # rid: the console run using it; address: its mailbox address (§10), shown again on reopen
                     if value:
@@ -1836,6 +1841,8 @@ class SessionMeta:
                 session["archived"] = bool(entry["archived"])
             session["hidden"] = bool(entry.get("hidden"))
             session["managed"] = bool(entry.get("managed"))
+            if entry.get("first_prompt"):
+                session["title"] = _title(entry["first_prompt"])
             if entry.get("address"):
                 session["address"] = entry["address"]
         return sessions
