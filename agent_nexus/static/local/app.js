@@ -7,9 +7,9 @@ import { pluginsPage } from "/local/plugins.js";
 import { cloudPage } from "/local/cloud.js";
 import { settingsPage } from "/local/settings.js";
 import { devicesPage, lockButton } from "/local/devices.js";
-import { desktopPage } from "/local/desktop.js";
+import { desktopPage, loadNoVNC } from "/local/desktop.js";
 import { localConnectorsPage } from "/local/connectors.js";
-import { terminalPage } from "/ui/terminal.js";
+import { terminalPage, loadVendor } from "/ui/terminal.js";
 import { CLIENT_TERMINAL_API } from "/ui/terminal-config.js";
 
 restoreTheme();
@@ -140,7 +140,13 @@ function warm() {
   for (const path of ["/api/devices", "/api/inbox/threads", "/api/plugin-repo"]) prefetch(path);
 }
 
-refreshStatus().finally(() => { router.start(); warm(); });
+/** xterm.js and noVNC while the window is idle: the 终端 / 远程桌面 pages then draw without them. */
+function preload() {
+  const idle = window.requestIdleCallback || ((fn) => setTimeout(fn, 1500));
+  idle(() => { loadVendor().catch(() => {}); loadNoVNC().catch(() => {}); }, { timeout: 5000 });
+}
+
+refreshStatus().finally(() => { router.start(); warm(); preload(); });
 setInterval(warm, 30000);
 setInterval(() => { if (visible()) refreshStatus(); }, 10000);
 window.addEventListener("mcpmvisibilitychange", () => { if (visible()) refreshStatus(); });

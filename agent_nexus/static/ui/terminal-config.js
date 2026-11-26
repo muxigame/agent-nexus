@@ -33,6 +33,54 @@ export const CLIENT_TERMINAL_API = {
   back: { label: "设备", href: "#/devices" },
 };
 
+/** "ps" (PowerShell), "cmd", or "sh" (bash, zsh, Git Bash, …): how a shell id quotes and chains commands. */
+export function shellFamily(shell = "") {
+  if (/^(pwsh|powershell)/.test(shell)) return "ps";
+  return shell === "cmd" ? "cmd" : "sh";
+}
+
+/** A program by name, or by full path (quoted; PowerShell runs a quoted path only after `&`). */
+export function runCommand(command, shell = "") {
+  if (!/[\\/]/.test(command)) return command;
+  return shellFamily(shell) === "ps" ? `& "${command}"` : `"${command}"`;
+}
+
+/** OpenAI's standalone installers (github.com/openai/codex README); they put codex in the user's
+ *  own folder, which a shell opened before the install does not have on its PATH yet. */
+export const CODEX_INSTALL = {
+  sh: "curl -fsSL https://chatgpt.com/codex/install.sh | sh",
+  windows: 'powershell -ExecutionPolicy ByPass -c "irm https://chatgpt.com/codex/install.ps1 | iex"',
+};
+const CODEX_INSTALLED = {
+  ps: "$env:LOCALAPPDATA\\Programs\\OpenAI\\Codex\\bin\\codex.exe",
+  cmd: "%LOCALAPPDATA%\\Programs\\OpenAI\\Codex\\bin\\codex.exe",
+  sh: "$LOCALAPPDATA/Programs/OpenAI/Codex/bin/codex.exe",  // Git Bash
+};
+
+/** What the 终端 page's Codex button types (then Enter), for ``cli`` = the device's codex entry
+ *  (null: not installed) in ``shell`` on ``platform`` (sys.platform of the device):
+ *  - launch: codex;
+ *  - login: not signed in -- a device code first (the browser sign-in would open on that
+ *    computer's screen, and its callback is that computer's localhost), then codex either way
+ *    (its own sign-in screen remains when device codes are off for the account);
+ *  - install: the official installer, then the same sign-in, then codex. */
+export function codexPlan({ platform = "", shell = "", cli = null } = {}) {
+  const family = shellFamily(shell);
+  const then = family === "cmd" ? " & " : "; ";
+  if (cli) {
+    const run = runCommand(cli.command || "codex", shell);
+    if (cli.signed_in === false) return { kind: "login", text: `${run} login --device-auth${then}${run}` };
+    return { kind: "launch", text: run };
+  }
+  const windows = platform === "win32";
+  const path = windows ? CODEX_INSTALLED[family] : "$HOME/.local/bin/codex";
+  const run = family === "ps" ? `& "${path}"` : `"${path}"`;
+  const install = windows ? CODEX_INSTALL.windows : CODEX_INSTALL.sh;
+  const after = family === "ps" ? `if ($?) { ${run} login --device-auth; ${run} }` : `${run} login --device-auth${then}${run}`;
+  return { kind: "install", text: family === "ps" ? `${install}; ${after}` : `${install} && ${after}`,
+    install, path };
+}
+
 /** Keys a phone keyboard lacks, as the bytes a terminal sends. */
 export const EXTRA_KEYS = [
   ["Esc", "\x1b"], ["Tab", "\t"], ["Ctrl+C", "\x03"], ["Ctrl+D", "\x04"], ["Ctrl+L", "\x0c"],

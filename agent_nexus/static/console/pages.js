@@ -203,6 +203,8 @@ export async function devicesPage(ctx, route) {
           el("button", { class: "btn btn-ghost btn-sm btn-icon", type: "button", "aria-label": "更多操作", html: iconHTML("ellipsis", { size: 16 }),
             onclick: (event) => openMenu(event.currentTarget, [
               { label: "复制设备 ID", icon: "copy", onClick: () => copy(device.device_id) },
+              ...(device.online && device.terminal ? [{ label: "启动 Codex", icon: "zap",
+                onClick: () => { location.hash = `#/terminal/${encodeURIComponent(device.device_id)}?run=codex`; } }] : []),
               { separator: true },
               { label: device.revoked ? "已吊销" : "吊销", icon: "circle-x", danger: true, onClick: () => revoke(device, reload) },
               ...(device.online ? [] : [{ label: "删除", icon: "trash", danger: true, onClick: () => removeDevice(device, reload) }]),

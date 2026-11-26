@@ -10,6 +10,8 @@ Looking only in this process's PATH missed them:
   MSIX package under ``C:\\Program Files\\WindowsApps\\OpenAI.Codex_*\\app\\resources`` -- which
   is on no PATH at all, not even the user's. It is a complete Codex CLI (``codex --version``).
 * macOS apps started from the Dock do not get the shell's PATH (Homebrew, nvm, ~/.local/bin).
+* OpenAI's standalone installer (the 终端 page's 安装 Codex) puts it in the user's own folder:
+  ``%LOCALAPPDATA%\\Programs\\OpenAI\\Codex\\bin`` on Windows, ``~/.local/bin`` elsewhere.
 
 Results are cached for ten minutes: the manager asks on every catalog refresh.
 """
@@ -66,6 +68,8 @@ def candidates(name: str, env: dict[str, str]) -> list[tuple[str, str]]:
                       (os.path.join(home, "scoop", "shims", f"{name}.exe"), "scoop"),
                       (os.path.join(home, ".bun", "bin", f"{name}.exe"), "bun")]
         if local:
+            if name == "codex":
+                found.append((os.path.join(local, "Programs", "OpenAI", "Codex", "bin", "codex.exe"), "native"))
             found += [(os.path.join(local, "Microsoft", "WinGet", "Links", f"{name}.exe"), "winget"),
                       (os.path.join(local, "pnpm", f"{name}.cmd"), "pnpm")]
         if name == "codex":
@@ -105,6 +109,23 @@ def find(name: str, env: dict[str, str] | None = None) -> dict:
     return {"available": False, "path_known": False}
 
 
+def codex_signed_in(env: dict[str, str] | None = None) -> bool | None:
+    """Whether the screen user has signed Codex in: ``$CODEX_HOME/auth.json`` (``~/.codex``).
+    None when it cannot tell (credentials kept in the OS keyring instead of the file)."""
+    env = env if env is not None else user_env()
+    home = env.get("USERPROFILE" if WINDOWS else "HOME") or os.path.expanduser("~")
+    codex_home = env.get("CODEX_HOME") or os.path.join(home, ".codex")
+    try:
+        if os.path.isfile(os.path.join(codex_home, "auth.json")):
+            return True
+        with open(os.path.join(codex_home, "config.toml"), encoding="utf-8", errors="replace") as handle:
+            if re.search(r'^\s*cli_auth_credentials_store\s*=\s*"(keyring|auto)"', handle.read(), re.M):
+                return None
+    except OSError:
+        pass
+    return False
+
+
 def runtimes(*, fresh: bool = False) -> dict[str, dict]:
     """``find`` for Claude Code and Codex, cached for ten minutes."""
     global _cache
@@ -112,5 +133,7 @@ def runtimes(*, fresh: bool = False) -> dict[str, dict]:
         return _cache[1]
     env = user_env()
     result = {name: find(name, env) for name in NAMES}
+    if result["codex"].get("available"):
+        result["codex"]["signed_in"] = codex_signed_in(env)
     _cache = (time.monotonic(), result)
     return result

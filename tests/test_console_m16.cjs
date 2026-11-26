@@ -134,6 +134,43 @@ test("the terminal page builds its socket URL and keeps phone keys", async () =>
   assert.match(TERMINAL_THEME.background, /^#[0-9a-f]{6}$/);
 });
 
+test("the Codex button launches, signs in first, or installs, in each shell's own syntax", async () => {
+  const { codexPlan, runCommand, CODEX_INSTALL } = await load("ui/terminal-config.js");
+  assert.equal(runCommand("codex", "pwsh"), "codex");
+  assert.equal(runCommand("C:\\Apps\\codex.exe", "powershell"), '& "C:\\Apps\\codex.exe"');
+  assert.equal(runCommand("C:\\Apps\\codex.exe", "cmd"), '"C:\\Apps\\codex.exe"');
+  assert.deepEqual(codexPlan({ platform: "linux", shell: "bash", cli: { id: "codex", command: "codex", signed_in: true } }),
+    { kind: "launch", text: "codex" });
+  // signed-in state unknown (keyring): launch, its own screen signs in if needed
+  assert.equal(codexPlan({ platform: "darwin", shell: "zsh", cli: { command: "codex", signed_in: null } }).kind, "launch");
+  assert.deepEqual(codexPlan({ platform: "win32", shell: "pwsh", cli: { command: "C:\\A\\codex.exe", signed_in: false } }),
+    { kind: "login", text: '& "C:\\A\\codex.exe" login --device-auth; & "C:\\A\\codex.exe"' });
+  assert.equal(codexPlan({ platform: "win32", shell: "cmd", cli: { command: "codex", signed_in: false } }).text,
+    "codex login --device-auth & codex");
+
+  const posix = codexPlan({ platform: "linux", shell: "bash", cli: null });
+  assert.equal(posix.kind, "install");
+  assert.equal(posix.text, `${CODEX_INSTALL.sh} && "$HOME/.local/bin/codex" login --device-auth; "$HOME/.local/bin/codex"`);
+  const ps = codexPlan({ platform: "win32", shell: "powershell", cli: null });
+  assert.ok(ps.text.startsWith(`${CODEX_INSTALL.windows}; if ($?) { & "$env:LOCALAPPDATA\\Programs\\OpenAI\\Codex\\bin\\codex.exe" login --device-auth;`));
+  assert.ok(codexPlan({ platform: "win32", shell: "cmd", cli: null }).text.includes('"%LOCALAPPDATA%\\Programs\\OpenAI\\Codex\\bin\\codex.exe" login'));
+  assert.ok(codexPlan({ platform: "win32", shell: "git-bash", cli: null }).text.includes('"$LOCALAPPDATA/Programs/OpenAI/Codex/bin/codex.exe"'));
+  assert.match(CODEX_INSTALL.sh, /^curl -fsSL https:\/\/chatgpt\.com\/codex\/install\.sh \| sh$/);
+});
+
+test("the terminal and desktop pages draw before the network answers", () => {
+  const page = fs.readFileSync(path.join(STATIC, "ui/terminal.js"), "utf8");
+  // no Promise.all over the device list / info before the first paint, the socket opens at once
+  assert.ok(!/await Promise\.all\(\[\s*fetchJSON\(api\.devices/.test(page));
+  assert.match(page, /cachedJSON\(api\.devices\)/);
+  assert.match(page, /query\?\.get\?\.\("run"\) === "codex"/);
+  const desktop = fs.readFileSync(path.join(STATIC, "local/desktop.js"), "utf8");
+  assert.match(desktop, /desktop\/prepare`, \{ method: "POST", quiet: true, keepCache: true \}/);
+  assert.ok(desktop.indexOf('cachedJSON("/api/devices")') < desktop.indexOf("desktop/prepare"));
+  const ui = fs.readFileSync(path.join(STATIC, "ui/ui.js"), "utf8");
+  assert.match(ui, /if \(!options\.keepCache && swr\.store\.size\)/);
+});
+
 test("the console page routes to the terminal and loads xterm from /console/ only", () => {
   const app = fs.readFileSync(path.join(STATIC, "console/app.js"), "utf8");
   assert.match(app, /"\/terminal\/:device"/);

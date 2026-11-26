@@ -348,6 +348,13 @@ export function prefetch(path) {
   return swrFetch(path).catch(() => null);
 }
 
+/** The cached answer for ``path`` right now (no request), or null: a page draws with it at once
+ *  and checks the fresh answer when it arrives. */
+export function cachedJSON(path) {
+  const entry = swr.store.get(path);
+  return entry && Date.now() - entry.at < swr.maxAge ? clone(entry.data) : null;
+}
+
 function swrFetch(path) {
   if (!swr.inflight.has(path)) {
     const request = rawFetchJSON(path, { quiet: true }).then((data) => {
@@ -365,7 +372,9 @@ const clone = (data) => (typeof structuredClone === "function" ? structuredClone
 export async function fetchJSON(path, options = {}) {
   const method = options.method || "GET";
   if (method !== "GET") {
-    if (swr.store.size) { swr.store.clear(); swrSave(); }
+    // a change may make any cached answer stale; ``keepCache``: a POST that changes nothing shown
+    // (preparing a tunnel) -- clearing made the page after it wait for the device list again
+    if (!options.keepCache && swr.store.size) { swr.store.clear(); swrSave(); }
     return rawFetchJSON(path, options);
   }
   if (!options.signal && swr.prefixes.some((prefix) => path === prefix || path.startsWith(prefix + "/") || path.startsWith(prefix + "?"))) {

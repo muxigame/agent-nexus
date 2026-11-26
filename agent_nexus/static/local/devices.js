@@ -5,6 +5,17 @@ import { osMark } from "/ui/os-icons.js";
 import { openFiles } from "/local/files.js";
 import { topology, topologySignature, localEdges, loadWorld, linkText } from "/ui/topology.js";
 
+const warmedAt = new Map();
+/** The pointer is on a 终端 / 远程桌面 button: the client fetches the ticket and starts the
+ *  tunnel now, so the page that opens on the click has less to wait for. */
+function warmLink(deviceId, service) {
+  const key = `${deviceId} ${service}`;
+  if (Date.now() - (warmedAt.get(key) || 0) < 20000) return;
+  warmedAt.set(key, Date.now());
+  fetchJSON(`/api/remote/devices/${encodeURIComponent(deviceId)}/warm?service=${service}`, { method: "POST", quiet: true, keepCache: true })
+    .catch(() => {});
+}
+
 /** How this device reaches another one right now (/api/remote/connections). */
 function connPill(device, conn) {
   // no pill until there is a connection: they are built on demand, so "none yet" is the normal case
@@ -235,15 +246,19 @@ export async function devicesPage(ctx) {
         connPill(device, conn),
         device.desktop || device.platform !== "linux" ? el("a", { class: `btn btn-sm ${canDesktop ? "" : "disabled"}`,
           href: canDesktop ? `#/desktop/${encodeURIComponent(device.device_id)}` : null,
+          onpointerenter: canDesktop ? () => warmLink(device.device_id, "desktop") : null,
           title: canDesktop ? "查看并控制对方桌面（打洞直连）" : whyDesktop, "aria-disabled": canDesktop ? null : "true" },
           icon("monitor", { size: 14 }), "远程桌面") : null,
         el("button", { class: `btn btn-sm ${canFiles ? "" : "disabled"}`, type: "button",
           title: canFiles ? "浏览、下载对方的文件，或发送文件过去" : whyFiles, "aria-disabled": canFiles ? null : "true",
           onclick: () => { if (canFiles) openFiles(device); } }, icon("folder-open", { size: 14 }), "文件"),
         el("a", { class: `btn btn-sm ${canTerminal ? "" : "disabled"}`, href: canTerminal ? `#/terminal/${encodeURIComponent(device.device_id)}` : null,
+          onpointerenter: canTerminal ? () => warmLink(device.device_id, "terminal") : null,
           title: canTerminal ? "在这个窗口里打开终端" : why, "aria-disabled": canTerminal ? null : "true" }, icon("terminal", { size: 14 }), "终端"),
         el("button", { class: "btn btn-ghost btn-sm btn-icon", type: "button", "aria-label": "更多操作", html: iconHTML("ellipsis", { size: 16 }),
           onclick: (event) => menu(event.currentTarget, [
+            { label: "启动 Codex", icon: "zap", disabled: !canTerminal,
+              onClick: () => { location.hash = `#/terminal/${encodeURIComponent(device.device_id)}?run=codex`; } },
             { label: "在本机终端打开", icon: "external-link", disabled: !canTerminal, onClick: () => external(device) },
             { label: "预先建立连接", icon: "plug", disabled: !canTerminal, onClick: () => connect(device) },
             { label: device.revoked ? "已吊销" : "吊销", icon: "circle-x", danger: true, disabled: locked || device.revoked, onClick: () => revoke(device) },

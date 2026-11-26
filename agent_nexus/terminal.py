@@ -34,6 +34,9 @@ MAX_READ_BYTES = 256 * 1024
 #: output kept while nobody reads; older output is dropped (like a terminal's scrollback)
 MAX_BUFFER_BYTES = 2 * 1024 * 1024
 MAX_WAIT_S = 25.0
+#: the CLI list a terminal page gets is rescanned behind it when older than this (a tool
+#: installed from the page -- 安装 Codex -- shows up on the next visit)
+CLI_RESCAN_S = 120.0
 WINDOWS = sys.platform == "win32"
 
 
@@ -191,7 +194,7 @@ def _version_of(path: str, args: tuple[str, ...]) -> str | None:
 
 def detect_clis() -> list[dict]:
     from . import agent_cli
-    agents = agent_cli.runtimes()  # Claude Code / Codex also outside this process's PATH
+    agents = agent_cli.runtimes(fresh=True)  # Claude Code / Codex also outside this process's PATH
     found = []
     for cli_id, label, names, args in CLI_CATALOG:
         agent = agents.get(cli_id) or {}
@@ -199,17 +202,19 @@ def detect_clis() -> list[dict]:
             # ``command``: what to type -- the full path when it is on no PATH (the desktop app's codex)
             command = cli_id if agent.get("on_path") else agent["path"]
             found.append((cli_id, label + ("（ChatGPT / Codex 应用自带）" if agent.get("source") == "app" else ""),
-                          agent["path"], args, command))
+                          agent["path"], args, command, agent.get("signed_in", "")))
             continue
         path = next((p for p in (shutil.which(name) for name in names) if p), None)
         if path:
-            found.append((cli_id, label, path, args, cli_id))
+            found.append((cli_id, label, path, args, cli_id, ""))
     results: list[dict | None] = [None] * len(found)
 
     def probe(index: int) -> None:
-        cli_id, label, path, args, command = found[index]
+        cli_id, label, path, args, command, signed_in = found[index]
         results[index] = {"id": cli_id, "name": label, "path": path, "command": command,
                           "version": _version_of(path, args)}
+        if signed_in != "":  # codex: True / False / None (cannot tell)
+            results[index]["signed_in"] = signed_in
 
     threads = [threading.Thread(target=probe, args=(i,), daemon=True) for i in range(len(found))]
     for start in range(0, len(threads), 8):
@@ -436,7 +441,7 @@ class Terminals:
         shells = await self.shells()
         if refresh:
             await self._scan_clis()
-        elif self._clis is None or time.monotonic() - self._clis[0] > 600:
+        elif self._clis is None or time.monotonic() - self._clis[0] > CLI_RESCAN_S:
             self._scan_clis()
         account = self.account()
         return {"shells": [shell.view() for shell in shells], "clis": self._clis[1] if self._clis else [],

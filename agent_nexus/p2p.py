@@ -29,7 +29,7 @@ log = logging.getLogger(__name__)
 FEATURE = "p2p/1"
 EXE = "muxi-p2p-agent.exe" if sys.platform == "win32" else "muxi-p2p-agent"
 CONNECT_TIMEOUT_S = 25.0
-IDLE_S = 600.0
+IDLE_S = 1800.0
 NO_WINDOW = getattr(__import__("subprocess"), "CREATE_NO_WINDOW", 0)
 
 
@@ -217,6 +217,8 @@ class _Link:
         self.process, self.port, self.route = process, port, route
         self.used = time.monotonic()
         self.lost = False
+        #: streams using the tunnel now (an open terminal or desktop): never idle meanwhile
+        self.streams = 0
 
     @property
     def alive(self) -> bool:
@@ -323,7 +325,8 @@ class Connector:
     def reap(self) -> None:
         now = time.monotonic()
         for target, link in list(self.links.items()):
-            if not link.alive or (now - link.used > IDLE_S and target not in self.pinned):
+            idle = now - link.used > IDLE_S and target not in self.pinned and link.streams <= 0
+            if not link.alive or idle:
                 self.links.pop(target, None)
                 self._kill(link)
 
@@ -335,6 +338,20 @@ class Connector:
                     link.process.stdin.close()  # the forwarder exits when its stdin closes
             with contextlib.suppress(ProcessLookupError):
                 link.process.terminate()
+
+    @contextlib.contextmanager
+    def hold(self, target: str):
+        """A stream uses ``target``'s tunnel meanwhile: it is not closed for being idle (a terminal
+        left open longer than IDLE_S was cut when any other tunnel was asked for)."""
+        link = self.links.get(target)
+        if link is not None:
+            link.streams += 1
+        try:
+            yield
+        finally:
+            if link is not None:
+                link.streams -= 1
+                link.used = time.monotonic()
 
     def forget(self, target: str) -> None:
         link = self.links.pop(target, None)

@@ -4,7 +4,7 @@ import { mountInbox } from "/ui/inbox.js";
 import { overviewPage, devicesPage, settingsPage, pluginsPage } from "/console/pages.js";
 import { renderDownloads } from "/console/downloads.js";
 import { connectorsPage } from "/console/connectors.js";
-import { terminalPage } from "/ui/terminal.js";
+import { terminalPage, loadVendor } from "/ui/terminal.js";
 import { topologyPage } from "/console/topology.js";
 
 restoreTheme();
@@ -112,6 +112,8 @@ const router = createRouter({
   "/settings": (route) => settingsPage(context("设置"), route),
 }, { fallback: "/" });
 router.start();
+// xterm.js while idle: the 终端 page then draws without loading it
+(window.requestIdleCallback || ((fn) => setTimeout(fn, 1500)))(() => loadVendor().catch(() => {}), { timeout: 5000 });
 refreshStatus();
 setInterval(() => { if (!document.hidden) refreshStatus(); }, 15000);
 document.addEventListener("visibilitychange", () => { if (!document.hidden) refreshStatus(); });

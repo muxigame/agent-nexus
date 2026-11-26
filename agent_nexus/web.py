@@ -438,7 +438,8 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
             # Direct first (or through a relay device), then the gateway relay.
             try:
                 path, route, ticket = await p2p_link(device_id, "terminal")
-                await remote.p2p_terminal(socket, path, ticket, query, route)
+                with connector.hold(device_id):
+                    await remote.p2p_terminal(socket, path, ticket, query, route)
                 return
             except Exception as exc:  # any failure: the relay still works
                 log.info("p2p terminal to %s unavailable (%s); using the gateway relay", device_id, exc)
@@ -557,6 +558,11 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
     #: (no 3-second wait, no new punch) for DIRECT_RETRY_S
     direct_failed: dict[str, float] = {}
     DIRECT_RETRY_S = 120.0
+    #: target -> seconds its last direct punch took to get through. A cold tunnel to most devices
+    #: takes 3-5 s (probing the NAT ~1 s, signalling ~1 s, warming the hole ~1 s): longer than
+    #: DIRECT_GRACE_S, so waiting for it only delayed the relay. Such a target (or one whose last
+    #: punch failed) gets a relay at once, and the punch carries on for the streams after it.
+    direct_took: dict[str, float] = {}
     #: device id -> what its last stream actually used (the 设备 page shows it)
     route_seen: dict[str, dict] = {}
 
@@ -570,15 +576,17 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
     def direct_task(target: str) -> asyncio.Task:
         task = direct_pending.get(target)
         if task is None or task.done():
+            import time as _time
             task = asyncio.ensure_future(tunnel_port(target))
+            started = _time.monotonic()
 
             def settled(t: asyncio.Task) -> None:
-                import time as _time
                 failed = t.cancelled() or t.exception() is not None  # also retrieves the exception
                 if failed:
                     direct_failed[target] = _time.monotonic()
                 else:
                     direct_failed.pop(target, None)
+                    direct_took[target] = _time.monotonic() - started
             task.add_done_callback(settled)
             direct_pending[target] = task
         return task
@@ -676,6 +684,11 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
             if relayed is not None:
                 return relayed
         task = direct_task(target)
+        if direct_took.get(target, 0.0) > DIRECT_GRACE_S or target in direct_failed:
+            # its punch is known to take longer than the grace (or failed last time): no wait
+            relayed = await relay_path(device_id, ticket["ticket"], "直连在后台打洞，打通后新连接自动走直连")
+            if relayed is not None:
+                return relayed
         await asyncio.wait({task}, timeout=DIRECT_GRACE_S)
         if not task.done():
             relayed = await relay_path(device_id, ticket["ticket"], "直连在后台打洞，打通后新连接自动走直连")
@@ -693,6 +706,31 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
         if relayed is None:
             raise failure
         return relayed
+
+    async def remote_warm(request: Request) -> JSONResponse:
+        """The pointer is on a device's 终端 / 远程桌面 button: fetch the ticket the page will need
+        (a gateway round trip) and start the direct tunnel, a moment before the click."""
+        import time as _time
+        try:
+            lock.require_unlocked()
+        except LockError as exc:
+            return lock_error(exc)
+        device_id = request.path_params["device_id"]
+        service = request.query_params.get("service") or "terminal"
+        if service not in ("terminal", "desktop", "files"):
+            return JSONResponse({"error": "unknown service"}, status_code=400)
+        connector = p2p_state["connector"]
+        if connector is None or not hub.available:
+            return JSONResponse({"warming": False})
+        prefetch_ticket(device_id, service)
+        link = connector.links.get(device_id)
+        if link is None or not link.alive:
+            mesh = p2p_state.get("mesh")
+            if mesh is not None and mesh.preferred():
+                prefetch_ticket(mesh.preferred()[0], "relay")
+            if _time.monotonic() - direct_failed.get(device_id, -1e9) >= DIRECT_RETRY_S:
+                direct_task(device_id)
+        return JSONResponse({"warming": True})
 
     async def remote_desktop_prepare(request: Request) -> JSONResponse:
         """Build (or reuse) the tunnel first, so the page can say which route it got."""
@@ -730,7 +768,9 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
         except RoutingError as exc:
             await socket.close(code=4404, reason=str(exc)[:120])
             return
-        await remote.p2p_desktop(socket, port, ticket)
+        connector = p2p_state["connector"]
+        with connector.hold(socket.path_params["device_id"]) if connector is not None else contextlib.nullcontext():
+            await remote.p2p_desktop(socket, port, ticket)
 
     # -- file transfer with another device: P2P first, else the gateway relays ---------------
     from . import file_transfer
@@ -1725,6 +1765,7 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
         Route("/api/remote/devices/{device_id}/terminal/external", remote_terminal_external, methods=["POST"]),
         WebSocketRoute("/api/remote/devices/{device_id}/terminal/ws", remote_terminal_socket),
         Route("/api/remote/devices/{device_id}/desktop/prepare", remote_desktop_prepare, methods=["POST"]),
+        Route("/api/remote/devices/{device_id}/warm", remote_warm, methods=["POST"]),
         Route("/api/remote/devices/{device_id}/files", remote_files_list),
         Route("/api/remote/devices/{device_id}/files/download", remote_files_download),
         Route("/api/remote/devices/{device_id}/files/upload", remote_files_upload, methods=["POST"]),

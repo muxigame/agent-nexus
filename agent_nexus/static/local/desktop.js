@@ -1,5 +1,5 @@
 // The client's 远程桌面: noVNC over the P2P tunnel to another device's built-in VNC.
-import { el, mount, icon, fetchJSON, toast, errorState, pill } from "/ui/ui.js";
+import { el, mount, icon, fetchJSON, cachedJSON, toast, errorState, pill } from "/ui/ui.js";
 import { osMark } from "/ui/os-icons.js";
 
 export const ENCODING_H264 = 50;
@@ -17,6 +17,16 @@ export async function canDecodeH264() {
     } catch { /* try the next */ }
   }
   return false;
+}
+
+let novnc = null;
+/** noVNC's RFB (57 small modules: once per window; the shell preloads them while idle). */
+export function loadNoVNC() {
+  if (!novnc) {
+    novnc = import("/vendor/novnc/core/rfb.js").then((module) => withH264(module.default));
+    novnc.catch(() => { novnc = null; });
+  }
+  return novnc;
 }
 
 /** noVNC with H.264 offered whenever this client can decode it. */
@@ -40,39 +50,57 @@ export function desktopSocketURL(deviceId, loc = location) {
   return `${scheme}://${loc.host}/api/remote/devices/${encodeURIComponent(deviceId)}/desktop/ws`;
 }
 
+/** Why this device's desktop cannot open, from the device list ("" = it can). */
+function refusal(list, device) {
+  if (list.lock?.locked) return "这台设备已锁定，解锁后才能操作其他设备（右上角的锁）";
+  if (!device) return "没有这台设备";
+  if (!device.online) return `${device.display_name} 现在不在线`;
+  if (!device.desktop) return `${device.display_name} 没有可共享的桌面（无桌面的服务器只能用终端），或客户端低于 0.5.0`;
+  return "";
+}
+
+/** The page draws at once and connects as soon as the tunnel is prepared: the device list (a
+ *  gateway round trip) is checked meanwhile instead of first. */
 export async function desktopPage(ctx, { params }) {
   const deviceId = params.device;
   const { page, shell: appShell } = ctx;
   appShell.setTitle("远程桌面", [{ label: "设备", href: "#/devices" }]);
   page.classList.add("wide");
-  mount(page, el("div", { class: "stack" }, el("span", { class: "skeleton w-40" }), el("div", { class: "term-frame skeleton-block" })));
 
-  let device;
-  let RFB;
+  const findDevice = (list) => (list?.devices || []).find((d) => d.device_id === deviceId) || null;
+  let device = findDevice(cachedJSON("/api/devices"));
   // the tunnel (and the socket's ticket) is prepared while the page loads, not after it
-  let preparing = fetchJSON(`/api/remote/devices/${encodeURIComponent(deviceId)}/desktop/prepare`, { method: "POST", quiet: true })
+  let preparing = fetchJSON(`/api/remote/devices/${encodeURIComponent(deviceId)}/desktop/prepare`, { method: "POST", quiet: true, keepCache: true })
     .catch((error) => ({ failed: error }));
   const h264Check = canDecodeH264();
-  try {
-    const [list, rfbModule] = await Promise.all([
-      fetchJSON("/api/devices", { quiet: true }),
-      import("/vendor/novnc/core/rfb.js"),
-    ]);
-    if (list.lock?.locked) throw new Error("这台设备已锁定，解锁后才能操作其他设备（右上角的锁）");
-    device = (list.devices || []).find((d) => d.device_id === deviceId);
-    if (!device) throw new Error("没有这台设备");
-    if (!device.online) throw new Error(`${device.display_name} 现在不在线`);
-    if (!device.desktop) throw new Error(`${device.display_name} 没有可共享的桌面（无桌面的服务器只能用终端），或客户端低于 0.5.0`);
-    RFB = withH264(rfbModule.default);
-  } catch (error) {
+  let failed = false;
+  fetchJSON("/api/devices", { quiet: true }).then((list) => {
+    device = findDevice(list) || device;
+    nameNode.textContent = device?.display_name || deviceId;
+    drawMark();
+    const why = refusal(list, findDevice(list));
+    if (why && !connected && !leaving) fail(new Error(why));
+  }, () => { /* the connection says what is wrong */ });
+
+  function fail(error) {
+    if (failed) return;
+    failed = true;
+    leaving = true;
+    try { rfb?.disconnect(); } catch { /* closed */ }
     mount(page, el("div", { class: "page-head" }, el("div", { class: "titles" }, el("h1", {}, "远程桌面"))),
       errorState(error, () => desktopPage(ctx, { params })));
-    return;
   }
 
-  let h264 = await h264Check;
+  let h264 = false;
+  let connected = false;
+  const nameNode = el("span", { class: "title truncate" }, device?.display_name || deviceId);
+  const markNode = el("span", { class: "avatar" }, icon("monitor", { size: 16 }));
+  const drawMark = () => {
+    const mark = device ? osMark(device.os_family) : null;
+    if (mark) { markNode.className = "avatar os-mark"; markNode.innerHTML = mark.svg; markNode.title = mark.label; }
+  };
+  drawMark();
   const codecTag = el("span", { class: "tag", title: "画面编码" });
-  const mark = osMark(device.os_family);
   const status = el("span", { class: "term-status" }, pill("connecting", "正在直连"));
   const routeTag = el("span", { class: "tag term-route is-p2p", hidden: true });
   const screen = el("div", { class: "desktop-screen" });
@@ -81,9 +109,8 @@ export async function desktopPage(ctx, { params }) {
   [[9, "画质 · 最佳"], [6, "画质 · 均衡"], [3, "画质 · 省流"], [1, "画质 · 极省"]].map(([v, label]) => el("option", { value: v, selected: v === 6 }, label)));
   const toolbar = el("div", { class: "term-toolbar" },
     el("div", { class: "row grow", style: { gap: "10px", minWidth: 0 } },
-      mark ? el("span", { class: "avatar os-mark", html: mark.svg, title: mark.label }) : el("span", { class: "avatar" }, icon("monitor", { size: 16 })),
-      el("div", { class: "stack", style: { gap: 0, minWidth: 0 } }, el("span", { class: "title truncate" }, device.display_name),
-        el("span", { class: "sub mono truncate" }, device.device_id)),
+      markNode,
+      el("div", { class: "stack", style: { gap: 0, minWidth: 0 } }, nameNode, el("span", { class: "sub mono truncate" }, deviceId)),
       status, routeTag, codecTag),
     el("div", { class: "row", style: { gap: "6px" } }, quality,
       el("button", { class: "btn btn-sm", type: "button", title: "发送 Ctrl+Alt+Del", onclick: () => rfb?.sendCtrlAltDel() }, "Ctrl+Alt+Del"),
@@ -109,18 +136,21 @@ export async function desktopPage(ctx, { params }) {
     mount(screen);
     setStatus("connecting", "正在直连");
     routeTag.hidden = true;
+    let RFB;
     try {
       const prepared = preparing ? await preparing
-        : await fetchJSON(`/api/remote/devices/${encodeURIComponent(deviceId)}/desktop/prepare`, { method: "POST", quiet: true });
+        : await fetchJSON(`/api/remote/devices/${encodeURIComponent(deviceId)}/desktop/prepare`, { method: "POST", quiet: true, keepCache: true });
       preparing = null;  // a reconnect prepares again
       if (prepared.failed) throw prepared.failed;
       routeTag.hidden = false;
       routeTag.textContent = `直连 · ${prepared.route}`;
+      [RFB, h264] = await Promise.all([loadNoVNC(), connected ? h264 : h264Check]);
     } catch (error) {
       setStatus("error", "无法直连");
       mount(screen, el("div", { class: "desktop-message" }, error.message));
       return;
     }
+    if (leaving) return;
     rfb = new RFB(screen, desktopSocketURL(deviceId), { wsProtocols: ["binary"] });
     rfb.anxH264 = h264;
     codecTag.textContent = h264 ? "H.264 硬件解码" : "JPEG";
@@ -130,7 +160,7 @@ export async function desktopPage(ctx, { params }) {
     rfb.qualityLevel = Number(quality.value);
     rfb.compressionLevel = 2;
     rfb.focusOnClick = true;
-    rfb.addEventListener("connect", () => { connectedAt.time = Date.now(); setStatus("online", "已连接"); rfb.focus(); });
+    rfb.addEventListener("connect", () => { connected = true; connectedAt.time = Date.now(); setStatus("online", "已连接"); rfb.focus(); });
     rfb.addEventListener("disconnect", (event) => {
       if (leaving) return;
       // A decoder that cannot handle the stream fails right away: retry once with JPEG.
