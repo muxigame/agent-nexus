@@ -26,7 +26,8 @@ function presencePill(device, gatewayRtt) {
 function savedView() {
   try {
     const value = localStorage.getItem("anx.devices.view");
-    return ["topology", "map", "globe"].includes(value) ? value : "list";
+    if (value === "map") return "globe";  // the flat map is gone; the globe shows the same
+    return ["topology", "globe"].includes(value) ? value : "list";
   } catch { return "list"; }
 }
 
@@ -90,7 +91,7 @@ export async function devicesPage(ctx) {
   async function setView(next) {
     view = next;
     drawn = "";
-    if (next === "map" || next === "globe") await loadWorld();
+    if (next === "globe") await loadWorld();
     try { localStorage.setItem("anx.devices.view", next); } catch { /* private mode */ }
     if (last) render(last);
     if (scope === "global" && next !== "list") load();  // the network picture comes from the gateway
@@ -107,7 +108,7 @@ export async function devicesPage(ctx) {
     const option = (key, label, glyph) => el("button", { type: "button", "aria-pressed": view === key ? "true" : "false",
       onclick: () => setView(key) }, icon(glyph, { size: 14 }), label);
     const views = el("div", { class: "segmented", role: "group", "aria-label": "显示方式" },
-      option("list", "列表", "list"), option("topology", "拓扑", "network"), option("map", "地图", "map"), option("globe", "地球", "globe"));
+      option("list", "列表", "list"), option("topology", "拓扑", "network"), option("globe", "地球", "globe"));
     if (view === "list") return views;
     const lens = (key, label, title) => el("button", { type: "button", "aria-pressed": scope === key ? "true" : "false", title,
       onclick: () => setScope(key) }, label);
@@ -283,7 +284,7 @@ export async function devicesPage(ctx) {
     load();
   }
 
-  if (view === "map" || view === "globe") await loadWorld();
+  if (view === "globe") await loadWorld();
   await load();
   ctx.every(10000, load);
   window.addEventListener("anx:lockchange", load);

@@ -7,7 +7,7 @@ import { topology, topologySignature, loadWorld } from "/ui/topology.js";
 function savedView() {
   try {
     const value = localStorage.getItem("anx.console.topology");
-    return value === "map" || value === "globe" ? value : "rings";
+    return value === "map" || value === "globe" ? "globe" : "rings";  // the flat map is gone
   } catch { return "rings"; }
 }
 
@@ -42,7 +42,7 @@ export async function topologyPage(ctx) {
       if (last) render(last);
     } }, icon(glyph, { size: 14 }), label);
   const switcher = el("div", { class: "segmented", role: "group", "aria-label": "显示方式" },
-    option("rings", "拓扑", "network"), option("map", "地图", "map"), option("globe", "地球", "globe"));
+    option("rings", "拓扑", "network"), option("globe", "地球", "globe"));
   mount(page,
     el("div", { class: "page-head" }, el("div", { class: "titles" }, el("h1", {}, "拓扑"),
       el("p", {}, "所有设备之间实际在用的连接，由各设备每 30 秒上报。连接按需建立：没打开过终端、文件或桌面的两台设备之间没有连线是正常的。")),

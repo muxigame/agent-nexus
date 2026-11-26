@@ -93,6 +93,18 @@ The remote terminal uses `pywinpty` (MIT) for Windows ConPTY sessions.
 
 - Project: https://github.com/andfoy/pywinpty
 
+## IP location data (gateway, downloaded or derived)
+
+The gateway places devices on the 设备 / 拓扑 globe offline (`agent_nexus/geoip.py`):
+
+- ip2region (https://github.com/lionsoul2014/ip2region), Apache-2.0 OR MIT: downloaded by the
+  gateway from a pinned commit, not distributed here.
+- DB-IP City Lite (https://db-ip.com), CC BY 4.0: downloaded monthly by the gateway, not
+  distributed here. "IP Geolocation by DB-IP" is credited under the globe.
+- GeoNames (https://www.geonames.org), CC BY 4.0: `agent_nexus/geo_cn_cities.json` holds the
+  coordinates of the seat of every Chinese city ip2region names, taken from GeoNames
+  `cities1000` by `scripts/build_cn_cities.py`, and credited under the globe.
+
 ## QR Code generator (port)
 
 `agent_nexus/static/ui/qr.js` is a compact JavaScript port of the encoding algorithm of Project Nayuki's

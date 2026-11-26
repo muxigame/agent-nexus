@@ -7,10 +7,9 @@
 //
 // layout "rings": relays on the inner ring, the other devices on the outer ring grouped by
 //   region (a sector per province / country), two staggered rows when crowded.
-// layout "map":   the whole world (Miller projection); wheel or +/− to zoom, drag the empty
-//   map to pan. Devices sit where the gateway located them (ip2region, or dragged by the owner).
-// layout "globe": the same on a globe; drag to turn it, wheel or +/− to zoom.
-// On the map and the globe three or more devices in one place fold into a numbered bubble:
+// layout "globe": the earth; drag to turn it, wheel or +/− to zoom. Devices and the gateway sit
+//   where the gateway located them (or where the owner dragged them); links follow great circles.
+// On the globe three or more devices in one place fold into a numbered bubble:
 // clicking opens it around the place, 「收起」 (on the group, or 全部收起) folds it again, and
 // zooming in separates them by itself.
 //
@@ -72,7 +71,7 @@ export function localEdges(conns = {}, me, devices = []) {
   }));
 }
 
-/** The land outlines for the map and the globe (static, loaded once). */
+/** The land outlines for the globe (static, loaded once). */
 let world = null;
 export async function loadWorld() {
   if (world) return world;
@@ -80,9 +79,9 @@ export async function loadWorld() {
   return world;
 }
 
-/** Bubbles the viewer opened, and where the map / globe was zoomed or turned (kept across refreshes). */
+/** Bubbles the viewer opened, and where the globe was zoomed or turned (kept across refreshes). */
 const opened = new Set();
-const views = { map: null, globe: null };
+const views = { globe: null };
 
 /** A cheap signature of what the picture shows, so a refresh with nothing new can skip redrawing. */
 export function topologySignature({ devices = [], edges = [], gateway = {}, mesh = null }) {
@@ -97,28 +96,7 @@ export function topologySignature({ devices = [], edges = [], gateway = {}, mesh
 
 // ---------------------------------------------------------------- projections
 
-// Miller cylindrical: the familiar world map shape, poles not blown up like Mercator's.
-const millerY = (lat) => 1.25 * Math.log(Math.tan(Math.PI / 4 + 0.4 * clamp(lat, -85, 85) * RAD));
-const millerLat = (y) => (Math.atan(Math.exp(y / 1.25)) - Math.PI / 4) / 0.4 / RAD;
-const SOUTH = -57, NORTH = 83;  // the map's edges (Antarctica and the Arctic sea left out)
-const MAP_K = [1, 24], GLOBE_K = [0.8, 6];
-
-function mapProjection(view, W, H) {
-  const margin = 12;
-  const y0 = millerY(SOUTH), y1 = millerY(NORTH);
-  const s = Math.min((W - 2 * margin) / (2 * Math.PI), (H - 2 * margin) / (y1 - y0)) * view.k;
-  // the centre may not move past the world's edges
-  const hw = W / 2 / s, hh = H / 2 / s;
-  const x = hw >= Math.PI ? 0 : clamp(view.lon * RAD, -Math.PI + hw, Math.PI - hw);
-  const y = 2 * hh >= y1 - y0 ? (y0 + y1) / 2 : clamp(millerY(view.lat), y0 + hh, y1 - hh);
-  view.lon = x / RAD;
-  view.lat = millerLat(y);
-  return {
-    kind: "map", scale: s,
-    project: (lat, lon) => [W / 2 + (lon * RAD - x) * s, H / 2 - (millerY(lat) - y) * s, true],
-    invert: (px, py) => [millerLat(y - (py - H / 2) / s), (x + (px - W / 2) / s) / RAD],
-  };
-}
+const GLOBE_K = [0.8, 6];
 
 // Orthographic: the globe as seen from far away, turned so (view.lat, view.lon) faces us.
 function globeProjection(view, W, H) {
@@ -145,23 +123,6 @@ function globeProjection(view, W, H) {
       return [lat / RAD, ((lon / RAD + 540) % 360) - 180];
     },
   };
-}
-
-function landOnMap(outline, P, W, H) {
-  const group = svg("g", { class: "topo-land" });
-  for (const ring of outline?.rings || []) {
-    let d = "", last = null, x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
-    for (let i = 0; i < ring.length; i += 2) {
-      const lon = ring[i], lat = ring[i + 1];
-      const [x, y] = P.project(lat, lon);
-      const jump = last !== null && Math.abs(lon - last) > 180; // the antimeridian: lift the pen
-      d += `${d && !jump ? "L" : "M"}${x.toFixed(1)},${y.toFixed(1)}`;
-      last = lon;
-      x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y);
-    }
-    if (d && x1 > -20 && x0 < W + 20 && y1 > -20 && y0 < H + 20) group.append(svg("path", { d: d + "Z" }));
-  }
-  return group;
 }
 
 function landOnGlobe(outline, P) {
@@ -253,16 +214,16 @@ function relax(pos, anchor, W, bottom, gap, rounds = 160, pull = 0.02) {
 /**
  * @param {object} data     {devices, edges, gateway: {origin, online, rtt_ms}, mesh, world, scope}
  * @param {object} actions  {can(device) -> {terminal, files, desktop, why...}, terminal, files, desktop, connect, locate}
- * @param {object} options  {layout: "rings" | "map" | "globe"}
+ * @param {object} options  {layout: "rings" | "globe"}
  */
 export function topology(data, actions = {}, { layout = "rings" } = {}) {
   const { devices = [], edges = [], gateway = {}, mesh = null, scope = "local" } = data;
   const outline = data.world || world;
   const global = scope === "global";
   const isGlobe = layout === "globe";
-  const geoMode = layout === "map" || isGlobe;
+  const geoMode = isGlobe;
   const W = 800;
-  const H = isGlobe ? 520 : layout === "map" ? 470 : global ? 560 : 500;
+  const H = isGlobe ? 520 : global ? 560 : 500;
   const SIZE = geoMode ? { device: 9, relay: 11, me: 13, font: 10 } : { device: 15, relay: 17, me: 22, font: 11 };
   const me = global ? null : devices.find((d) => d.self);
   const shown = devices.filter((d) => !d.revoked);
@@ -283,7 +244,7 @@ export function topology(data, actions = {}, { layout = "rings" } = {}) {
   let host = "";
   try { host = gateway.origin ? new URL(gateway.origin).host : ""; } catch { /* not a URL */ }
 
-  const view = geoMode ? (views[layout] ||= isGlobe ? { k: 1, ...centreOf(me?.geo?.lat != null ? [me] : located) } : { k: 1, lon: 0, lat: 0 }) : null;
+  const view = isGlobe ? (views.globe ||= { k: 1, ...centreOf(me?.geo?.lat != null ? [me] : located) }) : null;
   const card = el("div", { class: "topo-card", hidden: true });
   const panel = el("div", { class: "topo-panel", hidden: true, role: "dialog" });
   const stage = el("div", { class: `topo${geoMode ? " map" : ""}${isGlobe ? " globe" : ""}${global ? " global" : ""}` });
@@ -294,14 +255,13 @@ export function topology(data, actions = {}, { layout = "rings" } = {}) {
   function build() {
     teardown();
     const pos = {};
-    const far = new Set();     // map: devices outside the view, pinned to its edge
     const offside = [];        // globe: devices on the far side
     const hiddenIn = {};       // device id -> the bubble it is folded into
     const geoOf = {};          // globe: node id -> {lat, lon}, for the great-circle routes
     const bubbles = {};        // bubble id -> {members, label, at, open, r}
     const bottom = geoMode ? H - 22 : H - 60;
     let backdrop, P = null;
-    // the gateway: where it is (it locates itself) on the map and the globe, else top left
+    // the gateway: where it is (it locates itself) on the globe, else top left
     const gatewayGeo = gateway.geo && gateway.geo.lat != null && gateway.geo.lon != null ? gateway.geo : null;
     const gatewayAt = geoMode ? (gatewayGeo ? null : [40, 34]) : global ? [W / 2, H / 2 - 6] : null;
 
@@ -348,31 +308,21 @@ export function topology(data, actions = {}, { layout = "rings" } = {}) {
       backdrop = svg("g", { class: "topo-rings" },
         svg("ellipse", { cx, cy, rx: 150, ry: 100 }), svg("ellipse", { cx, cy, rx, ry }), regionLabels);
     } else {
-      P = isGlobe ? globeProjection(view, W, H) : mapProjection(view, W, H);
+      P = globeProjection(view, W, H);
       const anchor = {};
       const spots = gatewayGeo ? [...located, { device_id: GATEWAY, display_name: "网关", geo: gatewayGeo }] : located;
       for (const device of spots) {
-        let [x, y, visible] = P.project(device.geo.lat, device.geo.lon);
+        const [x, y, visible] = P.project(device.geo.lat, device.geo.lon);
         if (!visible) { offside.push(device); continue; }
-        if (!isGlobe && (x < 22 || x > W - 22 || y < 22 || y > bottom)) {
-          // outside the view: pinned to its edge, in its direction
-          const mx = W / 2, my = bottom / 2;
-          const dx = x - mx, dy = y - my;
-          const t = Math.min((mx - 26) / Math.abs(dx || 1e-9), (my - 22) / Math.abs(dy || 1e-9));
-          x = mx + dx * t; y = my + dy * t;
-          far.add(device.device_id);
-        }
         anchor[device.device_id] = [x, y];
       }
-      // bubbles: three or more devices within ~26px of each other (this device and relays never fold);
-      // devices pinned to the edge fold the same way, and that bubble takes the map to them
+      // bubbles: three or more devices within ~26px of each other (this device and relays never fold)
       const solo = (d) => d === me || (d.relay && d.online);
       const groups = [];
       for (const device of located.filter((d) => anchor[d.device_id] && !solo(d)).sort((a, b) => a.device_id.localeCompare(b.device_id))) {
         const [x, y] = anchor[device.device_id];
-        const out = far.has(device.device_id);
-        const group = groups.find((g) => g.out === out && Math.hypot(g.x - x, g.y - y) < 26);
-        if (!group) { groups.push({ x, y, out, members: [device] }); continue; }
+        const group = groups.find((g) => Math.hypot(g.x - x, g.y - y) < 26);
+        if (!group) { groups.push({ x, y, members: [device] }); continue; }
         group.members.push(device);
         const n = group.members.length;
         group.x = (group.x * (n - 1) + x) / n; group.y = (group.y * (n - 1) + y) / n;
@@ -384,8 +334,8 @@ export function topology(data, actions = {}, { layout = "rings" } = {}) {
         const label = placeName(group.members);
         let id = `__bubble:${label}`;
         while (bubbles[id]) id += "+";
-        if (!opened.has(id) || group.out) {
-          bubbles[id] = { members: group.members, label, at: [group.x, group.y], out: group.out };
+        if (!opened.has(id)) {
+          bubbles[id] = { members: group.members, label, at: [group.x, group.y] };
           for (const m of group.members) hiddenIn[m.device_id] = id;
           placeAnchor[id] = [group.x, group.y];
         } else {
@@ -411,7 +361,7 @@ export function topology(data, actions = {}, { layout = "rings" } = {}) {
         offside.length ? svg("text", { x: W - 14, y: H - 10, "text-anchor": "end", class: "topo-unknown" },
           `背面还有 ${[behind ? `${behind} 台设备` : "", offside.some((d) => d.device_id === GATEWAY) ? "网关" : ""].filter(Boolean).join("和")}，拖动地球查看`) : null,
       ];
-      if (isGlobe) {
+      {
         const shade = svg("radialGradient", { id: "topo-sea", cx: "38%", cy: "34%", r: "70%" },
           svg("stop", { offset: "0%", style: "stop-color:var(--surface)" }), svg("stop", { offset: "100%", style: "stop-color:var(--surface-2)" }));
         backdrop = svg("g", {}, svg("defs", {}, shade),
@@ -419,9 +369,6 @@ export function topology(data, actions = {}, { layout = "rings" } = {}) {
           svg("circle", { cx: P.cx, cy: P.cy, r: P.R, class: "topo-sea", fill: "url(#topo-sea)" }),
           graticule(P), landOnGlobe(outline, P),
           svg("circle", { cx: P.cx, cy: P.cy, r: P.R, class: "topo-rim" }), notes);
-      } else {
-        backdrop = svg("g", {}, svg("rect", { x: 0, y: 0, width: W, height: H, class: "topo-sea" }),
-          landOnMap(outline, P, W, H), notes);
       }
     }
     if (gatewayAt) pos[GATEWAY] = gatewayAt;
@@ -438,12 +385,11 @@ export function topology(data, actions = {}, { layout = "rings" } = {}) {
       const mx = (from[0] + to[0]) / 2, my = (from[1] + to[1]) / 2;
       const dx = to[0] - from[0], dy = to[1] - from[1];
       if (!geoMode) return `M${from[0]},${from[1]} L${to[0]},${to[1]}`;
-      if (isGlobe) {
+      {
         // lifted off the surface, away from the globe's middle (like a flight route)
         const ox = mx - P.cx, oy = my - P.cy, n = Math.hypot(ox, oy) || 1, lift = Math.hypot(dx, dy) * 0.22;
         return `M${from[0]},${from[1]} Q${mx + ox / n * lift},${my + oy / n * lift} ${to[0]},${to[1]}`;
       }
-      return `M${from[0]},${from[1]} Q${mx - dy * 0.18},${my + dx * 0.18 - Math.hypot(dx, dy) * 0.08} ${to[0]},${to[1]}`;
     };
     // globe: the great circle between two places, lifted off the surface (higher for a longer
     // route), so a link to the far side climbs over the horizon instead of vanishing
@@ -579,11 +525,9 @@ export function topology(data, actions = {}, { layout = "rings" } = {}) {
         continue;
       }
       const online = bubble.members.filter((m) => m.online).length;
-      node(id, { title: bubble.label, kind: "bubble", count: bubble.members.length,
-        sub: bubble.out ? "→ 点击前往" : `${online} 在线` });
+      node(id, { title: bubble.label, kind: "bubble", count: bubble.members.length, sub: `${online} 在线` });
     }
     const subOf = (device) => {
-      if (far.has(device.device_id)) return `→ ${shortName(regionOf(device), 8)}`;
       if (global && !geoMode && device.online && device.gateway_rtt_ms != null) return `${device.gateway_rtt_ms}ms`;
       return "";
     };
@@ -609,7 +553,7 @@ export function topology(data, actions = {}, { layout = "rings" } = {}) {
       box.style.left = `${left}px`;
       box.style.top = `${Math.max(4, top)}px`;
     };
-    const geoLine = (device) => geoMode ? (device.geo?.lat == null ? "位置未知：拖到地图上即可设置"
+    const geoLine = (device) => geoMode ? (device.geo?.lat == null ? "位置未知：拖到地球上即可设置"
       : `${device.geo.label || ""}（${device.geo.source === "manual" ? "手动设置" : "按 IP 推测，可拖动修正"}）`) : "";
     const describe = (id) => {
       if (id === GATEWAY) {
@@ -623,7 +567,7 @@ export function topology(data, actions = {}, { layout = "rings" } = {}) {
         const online = bubble.members.filter((m) => m.online);
         return [`${bubble.label} · ${bubble.members.length} 台`, `${online.length} 台在线`,
           bubble.members.slice(0, 6).map((m) => m.display_name).join("、") + (bubble.members.length > 6 ? " …" : ""),
-          bubble.out ? "在画面外，点击把地图移过去" : "点击展开，或放大地图"];
+          "点击展开，或放大地球"];
       }
       const device = byId[id];
       if (!device) return [];
@@ -686,11 +630,6 @@ export function topology(data, actions = {}, { layout = "rings" } = {}) {
     const outside = (event) => { if (!panel.contains(event.target) && !event.target.closest?.(".topo-node")) closePanel(); };
     const escape = (event) => { if (event.key === "Escape") closePanel(); };
     const openPanel = (id) => {
-      if (bubbles[id]?.out) {
-        // outside the view: take the map there, keeping the zoom
-        Object.assign(view, centreOf(bubbles[id].members));
-        card.hidden = true; redraw(); return;
-      }
       if (bubbles[id] && !bubbles[id].open) { opened.add(id); card.hidden = true; redraw(); return; }
       const device = byId[id];
       if (!device || device.self) return;
@@ -772,7 +711,7 @@ export function topology(data, actions = {}, { layout = "rings" } = {}) {
       }
     }
 
-    // -- devices without a place: a tray under the map; drag one onto the map to place it
+    // -- devices without a place: a tray under the globe; drag one onto it to place it
     let tray = null;
     const unplaced = geoMode ? shown.filter((d) => !d.geo || d.geo.lat == null || d.geo.lon == null) : [];
     if (unplaced.length) {
@@ -812,52 +751,35 @@ export function topology(data, actions = {}, { layout = "rings" } = {}) {
         }));
     }
 
-    // -- map / globe: drag the empty area to pan or turn, wheel to zoom, the buttons for both
+    // -- globe: drag the empty area to turn it, wheel or the buttons to zoom
     let tools = null;
     if (geoMode) {
-      const zoom = (factor, at = null) => {
-        const [lo, hi] = isGlobe ? GLOBE_K : MAP_K;
-        const k = clamp(view.k * factor, lo, hi);
+      const zoom = (factor) => {
+        const k = clamp(view.k * factor, GLOBE_K[0], GLOBE_K[1]);
         if (k === view.k) return;
-        if (!isGlobe && at) {
-          // keep the place under the pointer where it is (several wheel steps may come before a redraw)
-          const [lat, lon] = mapProjection({ ...view }, W, H).invert(at.x, at.y);
-          view.k = k;
-          const next = mapProjection({ ...view }, W, H);
-          const [nx, ny] = next.project(lat, lon);
-          view.lon += (nx - at.x) / next.scale / RAD;
-          view.lat = millerLat(millerY(view.lat) + (at.y - ny) / next.scale);
-        } else view.k = k;
+        view.k = k;
         redraw();
       };
       const fit = () => {
         if (!located.length) return;
-        if (isGlobe) { Object.assign(view, { k: 1.15, ...centreOf(located) }); redraw(); return; }
-        const lons = located.map((d) => d.geo.lon), ys = located.map((d) => millerY(d.geo.lat));
-        const base = mapProjection({ k: 1, lon: 0, lat: 0 }, W, H).scale;
-        const spanX = (Math.max(...lons) - Math.min(...lons)) * RAD + 0.35, spanY = Math.max(...ys) - Math.min(...ys) + 0.3;
-        view.k = clamp(Math.min((W - 120) / (spanX * base), (bottom - 80) / (spanY * base)), 1, 12);
-        view.lon = (Math.max(...lons) + Math.min(...lons)) / 2;
-        view.lat = millerLat((Math.max(...ys) + Math.min(...ys)) / 2);
+        Object.assign(view, { k: 1.15, ...centreOf(located) });
         redraw();
       };
       const tool = (label, title, run, glyph = null) => el("button", { type: "button", class: "btn btn-sm", title, "aria-label": title,
         onclick: run }, glyph ? icon(glyph, { size: 14 }) : null, label);
       tools = el("div", { class: "topo-tools" },
         tool("+", "放大", () => zoom(1.6)), tool("−", "缩小", () => zoom(1 / 1.6)),
-        tool(isGlobe ? "整个地球" : "全球", isGlobe ? "回到整个地球" : "显示整个世界",
-          () => { Object.assign(view, isGlobe ? { k: 1 } : { k: 1, lon: 0, lat: 0 }); redraw(); }, "globe"),
-        located.length ? tool("对准设备", "缩放到所有设备所在的范围", fit, "maximize") : null,
+        tool("整个地球", "回到整个地球", () => { view.k = 1; redraw(); }, "globe"),
+        located.length ? tool("对准设备", "把设备所在的一面转过来", fit, "maximize") : null,
         opened.size ? tool("全部收起", "把展开的设备组都收起", () => { opened.clear(); redraw(); }, "minimize-2") : null);
       picture.addEventListener("wheel", (event) => {
         event.preventDefault();
-        zoom(Math.exp(-clamp(event.deltaY, -120, 120) * 0.0025), toSvg(event));
+        zoom(Math.exp(-clamp(event.deltaY, -120, 120) * 0.0025));
       }, { passive: false });
       picture.addEventListener("pointerdown", (event) => {
         if (event.button !== 0) return;
         const start = toSvg(event);
         const from = { ...view };
-        const scale = P.scale || P.R;
         let moved = false;
         const move = (e) => {
           const now = toSvg(e);
@@ -866,8 +788,8 @@ export function topology(data, actions = {}, { layout = "rings" } = {}) {
           moved = true;
           stage.classList.add("panning");
           card.hidden = true;
-          if (isGlobe) { view.lon = from.lon - dx / P.R / RAD; view.lat = from.lat + dy / P.R / RAD; }
-          else { view.lon = from.lon - dx / scale / RAD; view.lat = millerLat(millerY(from.lat) + dy / scale); }
+          view.lon = from.lon - dx / P.R / RAD;
+          view.lat = from.lat + dy / P.R / RAD;
           redraw();
         };
         const up = () => {
@@ -897,7 +819,13 @@ export function topology(data, actions = {}, { layout = "rings" } = {}) {
     key("gateway", "网关（兜底转发）", "1 6"), key("punching", "正在打洞", "3 7"),
     global ? key("control", "与网关的长连接", null, true) : null,
     el("span", { class: "muted" }, geoMode
-      ? `滚轮或 +/− 缩放，拖动空白处${isGlobe ? "转动地球" : "平移"}；数字气泡是同一地点的设备，点开展开，「收起」还原；拖动设备可修正位置`
+      ? "滚轮或 +/− 缩放，拖动空白处转动地球；数字气泡是同一地点的设备，点开展开，「收起」还原；拖动设备可修正位置"
       : global ? "连线是设备之间实际在用的连接（按需建立，空闲一段时间后断开）" : "点设备可直接打开终端、文件或桌面"));
-  return el("div", { class: "stack", style: { gap: "12px" } }, stage, legend);
+  // where the positions come from (DB-IP and GeoNames are CC BY 4.0: they are credited where shown)
+  const source = (label, href) => el("a", { href, target: "_blank", rel: "noopener noreferrer" }, label);
+  const credits = geoMode ? el("div", { class: "muted", style: { fontSize: "var(--fs-xs)" } },
+    "位置按 IP 推测（在网关上离线查询）：", source("ip2region", "https://github.com/lionsoul2014/ip2region"), "（境内）、",
+    source("DB-IP", "https://db-ip.com"), "（境外，CC BY 4.0）；城市坐标 ",
+    source("GeoNames", "https://www.geonames.org"), "（CC BY 4.0）") : null;
+  return el("div", { class: "stack", style: { gap: "12px" } }, stage, legend, credits);
 }

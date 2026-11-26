@@ -1,13 +1,20 @@
-"""Where a device roughly is (city level), for the 设备 page's map view. Gateway side only.
+"""Where a device is (city level), for the 设备 page's globe. Gateway side only, all offline.
 
-The lookup runs on the gateway against ip2region (https://github.com/lionsoul2014/ip2region,
-Apache-2.0 OR MIT): an offline IPv4 database of about 11 MB. No address is ever sent to a
-third party. The file is fetched once from a pinned commit, checked against its sha256 and kept
-in the gateway's state directory; if that fails the map simply has no positions.
+Two databases, each where it is good; no address is ever sent to a third party:
 
-Accuracy is that of any IP database: the country almost always, the province usually, the city
-often (cloud servers well, mobile networks often only to the province). The owner can drag a
-device on the map to fix it; a manual position always wins.
+* ip2region (https://github.com/lionsoul2014/ip2region, Apache-2.0 OR MIT, about 11 MB) for
+  addresses in China: the best free source for which province and city a Chinese address is in.
+  It has names only; the city's coordinates come from ``geo_cn_cities.json``, the seat of every
+  city it names, matched in GeoNames (CC BY 4.0) by ``scripts/build_cn_cities.py``. Fetched once
+  from a pinned commit and checked against its sha256.
+* DB-IP City Lite (https://db-ip.com, CC BY 4.0, about 130 MB, monthly) for everything else:
+  city and coordinates abroad, where ip2region goes by registry data (a Hong Kong server in a
+  block registered in Brazil was placed in Brazil; DB-IP has it in Kowloon). In China it is
+  mostly province-level, so it does not override ip2region there. Refreshed monthly; optional:
+  without it (or without the maxminddb package) ip2region alone is used.
+
+When the two disagree on the country, DB-IP wins (ip2region marks cloud addresses abroad by
+where they are registered). The owner can drag a device on the globe; a manual position wins.
 
 The device's address is its own egress as its tunnel agent reported it (its punch candidates),
 not the address its gateway link comes from: that one can be a proxy or a VPN exit.
@@ -22,6 +29,8 @@ import struct
 import threading
 from pathlib import Path
 from typing import Callable
+import json
+import time
 
 log = logging.getLogger(__name__)
 
@@ -29,6 +38,10 @@ XDB_COMMIT = "f1781b7f9b7a17c96246433d83804404f0a22120"
 XDB_URL = f"https://raw.githubusercontent.com/lionsoul2014/ip2region/{XDB_COMMIT}/data/ip2region_v4.xdb"
 XDB_SHA256 = "a29fb3e8b204dfdf45b9bc082e12845b5eaac18cd467849d2888baa9fde383c8"
 XDB_NAME = "ip2region_v4.xdb"
+DBIP_NAME = "dbip-city-lite.mmdb"
+DBIP_URL = "https://download.db-ip.com/free/dbip-city-lite-{month}.mmdb.gz"
+DBIP_MAX_AGE_S = 35 * 86400  # a new file comes out monthly
+CHINESE = {"CN", "HK", "MO", "TW"}
 
 HEADER_SIZE = 256
 VECTOR_COLS = 256
@@ -158,6 +171,20 @@ def _bare(name: str) -> str:
     return name
 
 
+_CN_CITIES: dict | None = None
+
+
+def cn_cities() -> dict[str, list[float]]:
+    """{"浙江|宁波": [lat, lon]}: the seat of every city ip2region names (geo_cn_cities.json)."""
+    global _CN_CITIES
+    if _CN_CITIES is None:
+        try:
+            _CN_CITIES = json.loads((Path(__file__).parent / "geo_cn_cities.json").read_text(encoding="utf-8"))["cities"]
+        except (OSError, ValueError, KeyError):
+            _CN_CITIES = {}
+    return _CN_CITIES
+
+
 def place(region: str) -> dict | None:
     """``country|province|city|isp|iso`` -> a location dict, coordinates included when known."""
     parts = [(p if p not in ("0", "") else "") for p in region.split("|")]
@@ -170,6 +197,11 @@ def place(region: str) -> dict | None:
         if not key:
             continue
         bare = _bare(key)
+        if level == "city" and country == "中国":
+            found = cn_cities().get(f"{_bare(province)}|{bare}")
+            if found:
+                coords, precision = tuple(found), level
+                break
         if level == "province":  # 吉林 is a province and a city: the province means its capital
             found = PROVINCES.get(bare) or REGIONS.get(key) or REGIONS.get(bare)
         elif level == "city":
@@ -185,37 +217,126 @@ def place(region: str) -> dict | None:
             "precision": precision, "source": "ip"}
 
 
+class Dbip:
+    """DB-IP City Lite (mmdb) through the maxminddb package."""
+
+    def __init__(self, path: Path):
+        import maxminddb
+        self.reader = maxminddb.open_database(str(path))
+        kind = str(self.reader.metadata().database_type)
+        if not kind.startswith("DBIP-City"):
+            self.reader.close()
+            raise ValueError(f"not a DB-IP city database: {kind}")
+
+    def search(self, ip: str) -> dict | None:
+        try:
+            record = self.reader.get(ip) or {}
+        except ValueError:
+            return None
+        country = record.get("country") or {}
+        location = record.get("location") or {}
+        if not country.get("iso_code"):
+            return None
+        names = country.get("names") or {}
+        subdivision = ((record.get("subdivisions") or [{}])[0].get("names") or {}).get("en", "")
+        city = ((record.get("city") or {}).get("names") or {}).get("en", "")
+        city = city.split(" (")[0]  # "Los Angeles (Central-Alameda)": the district is too fine
+        country_name = names.get("zh-CN") or names.get("en") or country["iso_code"]
+        return {"country": country_name, "province": subdivision, "city": city, "isp": "",
+                "iso": country["iso_code"], "label": " ".join(x for x in (country_name, city or subdivision) if x),
+                "lat": location.get("latitude"), "lon": location.get("longitude"),
+                "precision": "city" if city else "province" if subdivision else "country",
+                "source": "ip", "provider": "dbip"}
+
+
+def merge(china: dict | None, abroad: dict | None) -> dict | None:
+    """ip2region for Chinese addresses, DB-IP for the rest and when they disagree on the country."""
+    if china and china.get("country") == "中国" and (abroad is None or abroad.get("iso") in CHINESE):
+        if china.get("lat") is None and abroad and abroad.get("lat") is not None:
+            china = {**china, "lat": abroad["lat"], "lon": abroad["lon"], "precision": abroad["precision"]}
+        return {**china, "provider": "ip2region"}
+    if abroad and abroad.get("lat") is not None:
+        return abroad
+    return {**china, "provider": "ip2region"} if china else None
+
+
 class GeoLocator:
     """Lazily fetched database + the device -> egress address lookup the gateway provides."""
 
     def __init__(self, state_dir: Path, ip_of: Callable[[str], str | None] | None = None,
-                 fetch: Callable[[], bytes] | None = None):
+                 fetch: Callable[[], bytes] | None = None, fetch_dbip: Callable[[Path], None] | None = None):
         self.path = Path(state_dir) / XDB_NAME
+        self.dbip_path = Path(state_dir) / DBIP_NAME
         self.ip_of = ip_of
         self._fetch = fetch or _download
+        self._fetch_dbip = fetch_dbip or _download_dbip
         self._xdb: Xdb | None = None
+        self._dbip: Dbip | None = None
+        self._dbip_checked = 0.0
         self._lock = threading.Lock()
         self._loading: asyncio.Task | None = None
         self.error: str | None = None
 
     def _load(self) -> None:
         with self._lock:
-            if self._xdb is not None:
-                return
-            data = self.path.read_bytes() if self.path.exists() else b""
-            if hashlib.sha256(data).hexdigest() != XDB_SHA256:
-                data = self._fetch()
+            if self._xdb is None:
+                data = self.path.read_bytes() if self.path.exists() else b""
                 if hashlib.sha256(data).hexdigest() != XDB_SHA256:
-                    raise ValueError("ip2region 数据校验失败")
-                self.path.parent.mkdir(parents=True, exist_ok=True)
-                temp = self.path.with_suffix(".part")
-                temp.write_bytes(data)
-                temp.replace(self.path)
-            self._xdb = Xdb(data)
+                    data = self._fetch()
+                    if hashlib.sha256(data).hexdigest() != XDB_SHA256:
+                        raise ValueError("ip2region 数据校验失败")
+                    self.path.parent.mkdir(parents=True, exist_ok=True)
+                    temp = self.path.with_suffix(".part")
+                    temp.write_bytes(data)
+                    temp.replace(self.path)
+                self._xdb = Xdb(data)
+            self._load_dbip()
+
+    def _dbip_due(self) -> bool:
+        """DB-IP missing, unopened or a month old, and not tried within the hour."""
+        try:
+            import maxminddb  # noqa: F401
+        except ImportError:
+            return False
+        stale = not self.dbip_path.exists() or time.time() - self.dbip_path.stat().st_mtime >= DBIP_MAX_AGE_S
+        return (stale and time.time() - self._dbip_checked > 3600) or (self._dbip is None and self.dbip_path.exists())
+
+    def _load_dbip(self) -> None:
+        """Open DB-IP, fetching it when missing or a month old (at most once an hour on failure)."""
+        now = time.time()
+        fresh = self.dbip_path.exists() and now - self.dbip_path.stat().st_mtime < DBIP_MAX_AGE_S
+        if self._dbip is not None and fresh:
+            return
+        try:
+            import maxminddb  # noqa: F401  (optional: without it ip2region alone is used)
+        except ImportError:
+            return
+        if not fresh and now - self._dbip_checked > 3600:
+            self._dbip_checked = now
+            try:
+                temp = self.dbip_path.with_suffix(".part")
+                self.dbip_path.parent.mkdir(parents=True, exist_ok=True)
+                self._fetch_dbip(temp)
+                Dbip(temp).reader.close()  # a valid DB-IP city database before it replaces the old one
+                if self._dbip is not None:
+                    self._dbip.reader.close()
+                    self._dbip = None
+                temp.replace(self.dbip_path)
+            except Exception as exc:
+                self.dbip_path.with_suffix(".part").unlink(missing_ok=True)
+                log.warning("geoip: DB-IP unavailable: %s", exc)
+        if self._dbip is None and self.dbip_path.exists():
+            try:
+                self._dbip = Dbip(self.dbip_path)
+            except Exception as exc:
+                log.warning("geoip: DB-IP file unusable: %s", exc)
 
     def warm(self) -> None:
-        """Start loading in the background (the first device list must not wait for 11 MB)."""
-        if self._xdb is not None or (self._loading is not None and not self._loading.done()):
+        """Start loading in the background (the first device list must not wait for the files);
+        also how DB-IP gets its monthly refresh."""
+        if self._loading is not None and not self._loading.done():
+            return
+        if self._xdb is not None and not self._dbip_due():
             return
         try:
             loop = asyncio.get_running_loop()
@@ -238,10 +359,11 @@ class GeoLocator:
             address = ipaddress.ip_address(ip)
         except ValueError:
             return None
-        if address.version != 4 or not _public(address):
+        if not _public(address):
             return None
-        region = self._xdb.search(ip)
-        return place(region) if region else None
+        region = self._xdb.search(ip) if address.version == 4 else None
+        abroad = self._dbip.search(str(address)) if self._dbip is not None else None
+        return merge(place(region) if region else None, abroad)
 
     def locate(self, agent_id: str, manual: dict | None = None) -> dict | None:
         if manual and manual.get("lat") is not None and manual.get("lon") is not None:
@@ -254,6 +376,33 @@ class GeoLocator:
 def _public(address) -> bool:
     """A routable address (private, loopback and documentation ranges are not)."""
     return address.is_global
+
+
+def _download_dbip(dest: Path) -> None:
+    """This month's DB-IP City Lite (last month's early in the month), unpacked to ``dest``."""
+    import datetime
+    import gzip
+    import shutil
+    import httpx
+    today = datetime.date.today()
+    months = [today.strftime("%Y-%m"), (today.replace(day=1) - datetime.timedelta(days=1)).strftime("%Y-%m")]
+    status = None
+    for month in months:
+        packed = dest.with_suffix(".gz")
+        with httpx.stream("GET", DBIP_URL.format(month=month), timeout=300, follow_redirects=True) as response:
+            status = response.status_code
+            if status != 200:
+                continue
+            with packed.open("wb") as out:
+                for chunk in response.iter_bytes(1 << 20):
+                    out.write(chunk)
+        try:
+            with gzip.open(packed, "rb") as source, dest.open("wb") as out:
+                shutil.copyfileobj(source, out, 1 << 20)
+        finally:
+            packed.unlink(missing_ok=True)
+        return
+    raise ValueError(f"DB-IP download failed (HTTP {status})")
 
 
 def _download() -> bytes:

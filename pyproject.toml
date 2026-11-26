@@ -26,6 +26,8 @@ dependencies = [
     # remote desktop video: H.264 with NVENC / Quick Sync / AMF / Media Foundation / VAAPI / libx264
     "av>=14",
     "python-xlib>=0.33; sys_platform == 'linux'",
+    # the gateway's globe: DB-IP City Lite (mmdb) for addresses abroad (agent_nexus/geoip.py)
+    "maxminddb>=2.5",
 ]
 
 [project.scripts]
