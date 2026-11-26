@@ -230,3 +230,32 @@ FEATURE = "agents/1"
 ```
 
 所有 handler：入参 dict，出参 dict；出错返回 `{"error": "中文说明", "code": "…"}`，不抛异常。
+
+## 14. 实机核实（2026-11，Windows 工作电脑，Codex 0.164.0 / DeepSeek Harness 0.2.2-rc.5）
+
+**Codex**
+- npm 全局安装在 `%APPDATA%\npm`，有 `codex.ps1` / `codex.cmd` 两种 shim；Codex 桌面版也会写同一个 `~/.codex`（`originator: codex_work_desktop`，`source: vscode`）。
+- `codex login status`：已登录时输出 `Logged in using ChatGPT`（或 API key），**写在 stderr**，判断要合并 stdout+stderr。
+- `codex exec` 参数：`-s/--sandbox read-only|workspace-write|danger-full-access`、`-C/--cd <DIR>`、`-c key=value`（TOML）、`-m`、`-i`、
+  `--approve-for-me`、`--dangerously-bypass-approvals-and-sandbox`；子命令 `resume <id>|--last`、`fork <id>`、`review`；prompt 为 `-` 时读 stdin。
+- 会话文件 `~/.codex/sessions/YYYY/MM/DD/rollout-<时间>-<id>.jsonl`，每行 `{timestamp, ordinal, type, payload}`：
+  首行 `session_meta`（payload 有 `id, cwd, originator, cli_version, source, model_provider, base_instructions`，首行可能 20KB+）；
+  `turn_context`（`cwd, model, approval_policy, sandbox_policy`）；`response_item`（payload.type = `message`(role user/assistant, content[].text)、
+  `reasoning`、`function_call`/`function_call_output`、`custom_tool_call`/`custom_tool_call_output`、`additional_tools`）；
+  `event_msg`（`task_started`、`item_completed`、`token_count`、`thread_settings_applied` …）；`token_usage_record`；`world_state`。
+  role=user 的 message 里有系统注入内容（`<environment_context>`、`<user_instructions>`、AGENTS.md 等），取标题时跳过以 `<` 开头的文本。
+- **标题索引** `~/.codex/session_index.jsonl`：每行 `{id, thread_name, updated_at}`，优先用它做标题。归档会话在 `~/.codex/archived_sessions/`。
+
+**DeepSeek Harness（dsh）**
+- Windows 上通常是桌面版：`%LOCALAPPDATA%\Programs\DeepSeek Harness\`，CLI 启动器在 `resources\runtime\cli\bin\dsh.cmd`
+  （`ELECTRON_RUN_AS_NODE=1` 运行自带的 Electron）。不在 PATH 上，检测必须查这个位置（macOS：`/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh`；
+  Linux：`~/.local/share/...` 或 npm 全局 `dsh`）。`dsh --version` → `0.2.2-rc.5`。
+- 数据在 `$DSH_HOME`（默认 `~/.dsh`）：`sessions/`、`storages/`、`profiles/`、`dsh-runtimes/`、`.credentials.yaml`（存在即视为已配置模型凭据；**不读取内容**）。
+- 档案（profile）：`dsh --profile acp`（ACP over stdio）、`dsh --profile sdk`（JSON-RPC stdio）、
+  `dsh --profile headless [--json] [--session-id <id>] [--permission-mode <preset>] [--approval-policy ask|never] [--add-dir <path>] <task|->`。
+  `--json` 输出逐行的 run 事件（格式未公开，解析要宽松）。首次运行某个档案会在 `~/.dsh/profiles/<name>` 生成该档案。
+- 会话：`~/.dsh/sessions/<编码后的 cwd>/<session-id>/session.v4.jsonl.zstd`（zstd 压缩；旧版 v3）。编码规则：`C:\Users\x\proj` → `--C-Users-x-proj--`，空格 → `~0020`。
+  **索引** `~/.dsh/storages/session_projcache/sessions/<session-id>.json`：`{version, record: {identity: {createdAt(ms), cwd}, rows: {title.val, titleInput.val.first,
+  sessionListMetadata.val {blank, lastPromptAt}, sessionStats.val {turns, ...}, workingDirectory.val, sandboxMode.val, agentPreset.val, tokenUsage.val, ...}}}`。
+  会话列表用这个索引（不需要解压 zstd）：标题 = `title.val` 或 `titleInput.val.first`；`blank: true` 的空会话默认隐藏。读历史需要 zstd（可选依赖，缺失时只显示元数据）。
+- 适配器选择：优先 `acp`（流式 + 审批）；ACP 初始化失败时退回 `headless --json`，续接用 `--session-id`。
