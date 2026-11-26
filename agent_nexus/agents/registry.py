@@ -77,6 +77,9 @@ class AgentDef:
     login_command: list[str] = field(default_factory=list)  # what "在终端登录" types
     stream: bool = True
     path: str = ""  # agents.custom.<kind>.path: an explicit binary
+    #: Install places on no PATH (desktop apps), as templates: ``{HOME}``, ``{LOCALAPPDATA}``, ``{VAR:default}``
+    #: (the variable, else ``default`` under HOME); keyed by OS like ``install``.
+    extra_paths: dict[str, list[str]] = field(default_factory=dict)
     builtin: bool = True
     docs_url: str = ""
 
@@ -141,7 +144,8 @@ def builtin_definitions() -> dict[str, AgentDef]:
                         "resume", "{resume_id}", "{prompt}"],
         system_prompt_args=["-c", "developer_instructions={system_prompt}"],
         resume=True, approvals=False,  # exec mode cannot ask: the sandbox refuses what is out of bounds
-        permission_flags={"ask": ["--sandbox", "workspace-write", "--ask-for-approval", "never"],
+        # `codex exec` has no --ask-for-approval: the same setting as a config override.
+        permission_flags={"ask": ["--sandbox", "workspace-write", "-c", 'approval_policy="never"'],
                           "edits": ["--sandbox", "workspace-write"],
                           "readonly": ["--sandbox", "read-only"],
                           "full": ["--dangerously-bypass-approvals-and-sandbox"]},
@@ -153,15 +157,26 @@ def builtin_definitions() -> dict[str, AgentDef]:
     dsh = AgentDef(
         kind="dsh", label="DeepSeek Harness", binaries=("dsh",),
         install=_npm("@deepseek-ai/dsh"), npm_package="@deepseek-ai/dsh", node_min=22,
-        install_hint="DeepSeek Harness 只能用 npm 安装，需要 Node.js 22 或更高版本（https://nodejs.org）",
+        install_hint="也可以安装 DeepSeek Harness 桌面版，它自带 dsh；用 npm 安装需要 Node.js 22 或更高版本（https://nodejs.org）",
         adapter="acp",
         command=["{bin}", "--profile", "acp", "{options...}"],
-        fallback_command=["{bin}", "--profile", "headless", "{prompt}"],
+        # ACP failed to start: headless --json, one process per turn, resumed with --session-id (§14).
+        fallback_command=["{bin}", "--profile", "headless", "--json", "{prompt}"],
         resume=True, approvals=True,
         permission_flags={"ask": []},
-        session_globs=[".dsh/sessions/**/*.jsonl", ".dsh/sessions/**/*.json"],
+        session_globs=[".dsh/sessions/*/*/session.v*.jsonl.zstd",
+                       ".dsh/storages/session_projcache/sessions/*.json"],
+        # The desktop app's launcher is on no PATH (docs/agent-chat.md §14).
+        extra_paths={"windows": [r"{LOCALAPPDATA}\Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd"],
+                     "darwin": ["/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh",
+                                "{HOME}/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh"],
+                     "linux": ["{HOME}/.local/share/deepseek-harness/resources/runtime/cli/bin/dsh",
+                               "{HOME}/.local/share/DeepSeek Harness/resources/runtime/cli/bin/dsh",
+                               "/opt/DeepSeek Harness/resources/runtime/cli/bin/dsh"]},
+        # .credentials.yaml present = model credentials configured; its content is never read.
         login_probe={"method": "files", "env": ["DEEPSEEK_API_KEY", "OPENROUTER_API_KEY"],
-                     "files": [".dsh/settings.yaml", ".dsh/settings.yml"], "otherwise": "unknown"},
+                     "files": ["{DSH_HOME:.dsh}/.credentials.yaml", "{DSH_HOME:.dsh}/settings.yaml"],
+                     "otherwise": "unknown"},
         login_command=["dsh"],
     )
     gemini = AgentDef(
@@ -232,7 +247,7 @@ def _apply(base: AgentDef, spec: dict) -> AgentDef:
             items = value if isinstance(value, list) and all(isinstance(v, str) for v in value) else None
             if items is not None:
                 changes[key] = list(items)
-        elif key in ("install", "install_alt"):
+        elif key == "extra_paths" or key in ("install", "install_alt"):
             table = _argv_table(value)
             if table is not None:
                 changes[key] = table
@@ -253,10 +268,9 @@ def _apply(base: AgentDef, spec: dict) -> AgentDef:
                     if mode in PERMISSION_MODES and isinstance(argv, list) and all(isinstance(v, str) for v in argv):
                         flags[mode] = list(argv)
                 changes[key] = flags
-        elif key == "login_probe":
-            if isinstance(value, dict):
-                changes[key] = {k: v for k, v in value.items() if k in ("method", "env", "files", "otherwise",
-                                                                         "unknown_env", "command_min_version")}
+        elif key == "login_probe" and isinstance(value, dict):
+            changes[key] = {k: v for k, v in value.items() if k in ("method", "env", "files", "otherwise",
+                                                                     "unknown_env", "command_min_version")}
     return replace(base, **changes)
 
 
@@ -338,7 +352,7 @@ def run_capture(argv: list[str], env: dict, *, timeout: float = 6.0, run_as: dic
     if not WINDOWS and run_as and "user" in run_as:
         extra = {key: run_as[key] for key in ("user", "group", "extra_groups") if key in run_as}
     try:
-        done = subprocess.run(argv, capture_output=True, timeout=timeout, stdin=subprocess.DEVNULL, env=env,
+        done = subprocess.run(argv, check=False, capture_output=True, timeout=timeout, stdin=subprocess.DEVNULL, env=env,
                               cwd=cwd or _home(env) or None, creationflags=NO_WINDOW, **extra)
     except subprocess.TimeoutExpired:
         return None, "timeout"
@@ -357,6 +371,37 @@ def _home(env: dict) -> str:
 
 def _path_of(env: dict) -> str:
     return next((value for key, value in env.items() if key.upper() == "PATH"), "")
+
+
+def expand(template: str, env: dict) -> str | None:
+    """``{HOME}`` / ``{APPDATA}`` / ``{VAR:default}`` from the user's env (``default`` is under HOME); a path
+    relative to HOME otherwise. None when a needed variable is missing."""
+    home = _home(env)
+    upper = {key.upper(): value for key, value in env.items() if value}
+    missing = False
+
+    def one(match: re.Match) -> str:
+        nonlocal missing
+        name, default = match.group(1), match.group(2)
+        if name == "HOME" and home:
+            return home
+        if upper.get(name.upper()):
+            return upper[name.upper()]
+        if default is not None and home:
+            return os.path.join(home, default)
+        missing = True
+        return ""
+
+    text = re.sub(r"\{([A-Za-z_][A-Za-z0-9_]*)(?::([^{}]*))?\}", one, template)
+    if missing:
+        return None
+    if text.startswith("~"):
+        text = home + text[1:] if home else os.path.expanduser(text)
+    if not os.path.isabs(text) and not re.match(r"^[A-Za-z]:[\\/]", text):
+        if not home:
+            return None
+        text = os.path.join(home, text)
+    return text
 
 
 def _usable(path: str) -> bool:
@@ -401,7 +446,7 @@ def npm_prefix(env: dict, *, timeout: float = 5.0) -> str | None:
     if home:
         try:
             text = Path(home, ".npmrc").read_text(encoding="utf-8", errors="replace")
-            match = re.search(r"^\s*prefix\s*=\s*(.+?)\s*$", text, re.M)
+            match = re.search(r"^\s*prefix\s*=\s*(.+?)\s*$", text, re.MULTILINE)
             if match:
                 value = match.group(1).strip("\"'").replace("${HOME}", home)
                 return home + value[1:] if value.startswith("~") else value
@@ -417,7 +462,7 @@ def npm_prefix(env: dict, *, timeout: float = 5.0) -> str | None:
             return hit[1]
     try:
         code, out = run_capture(runnable(npm, ["config", "get", "prefix"]), env, timeout=timeout)
-    except Exception:
+    except Exception:  # noqa: BLE001
         code, out = None, ""
     prefix = None
     if code == 0:
@@ -446,6 +491,10 @@ def locate(d: AgentDef, env: dict) -> str | None:
         found_generic = find_tool(name, env)
         if found_generic:
             return found_generic
+    for template in d.extra_paths.get(os_key(), []):
+        path = expand(template, env)
+        if path and _usable(path):
+            return path
     prefix = npm_prefix(env)
     if prefix:
         folder = prefix_bin(prefix)
@@ -473,15 +522,13 @@ def _has_env(env: dict, names: list[str] | tuple[str, ...]) -> str | None:
 
 
 def _has_file(env: dict, names: list[str] | tuple[str, ...]) -> str | None:
-    home = _home(env)
     for name in names:
-        path = os.path.expanduser(name) if os.path.isabs(os.path.expanduser(name)) else os.path.join(home, name)
-        if home or os.path.isabs(path):
-            try:
-                if os.path.isfile(path):
-                    return path
-            except OSError:
-                pass
+        path = expand(name, env)
+        try:
+            if path and os.path.isfile(path):
+                return path
+        except OSError:
+            pass
     return None
 
 
@@ -508,7 +555,7 @@ def _claude_login(binary: str, spec: dict, env: dict, timeout: float, run_as: di
     static = _login_static(spec, env)  # no JSON from `auth status`
     if static:
         return static
-    if code is not None and code != 0 and re.search(r"not (logged|signed) in|log ?in required", out, re.I):
+    if code is not None and code != 0 and re.search(r"not (logged|signed) in|log ?in required", out, re.IGNORECASE):
         return "missing", "未登录"
     return _login_without_command(spec, env)
 
@@ -521,7 +568,7 @@ def _codex_login(binary: str, spec: dict, env: dict, timeout: float, run_as: dic
     if static:
         return static
     code, out = run_capture(runnable(binary, ["login", "status"]), env, timeout=timeout, run_as=run_as)
-    if code == 0 and not re.search(r"not logged in", out, re.I):
+    if code == 0 and not re.search(r"not logged in", out, re.IGNORECASE):
         return "ok", "已登录"
     if code is not None and code != 0:
         return "missing", "未登录"
@@ -560,7 +607,7 @@ def login_state(d: AgentDef, binary: str, env: dict, *, timeout: float = 6.0,
         if method == "codex":
             return _codex_login(binary, spec, env, timeout, run_as)
         return _files_login(spec, env)
-    except Exception as exc:  # a probe never breaks the menu
+    except Exception as exc:  # noqa: BLE001 -- a probe never breaks the menu
         return "unknown", f"检测失败：{exc}"
 
 
@@ -569,8 +616,13 @@ _probe_lock = threading.Lock()
 
 
 def _cache_key(d: AgentDef, env: dict) -> tuple:
-    return (d.kind, d.path, tuple(d.binaries), _home(env), _path_of(env),
-            tuple(sorted(k for k, v in env.items() if v and re.search(r"KEY|TOKEN|CODEX_HOME", k, re.I))))
+    """What changes the answer: the binary search, HOME, and every variable a login check reads (the values
+    only as hashes -- keys stay out of the cache's memory)."""
+    names = {name.upper() for name in [*(d.login_probe.get("env") or []), *(d.login_probe.get("unknown_env") or [])]}
+    names |= {m.upper() for f in d.login_probe.get("files") or [] for m in re.findall(r"\{([A-Za-z_]\w*)", f)}
+    names |= {"CODEX_HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "NPM_CONFIG_PREFIX"}
+    relevant = tuple(sorted((k.upper(), hash(v)) for k, v in env.items() if k.upper() in names))
+    return (d.kind, d.path, tuple(d.binaries), _home(env), _path_of(env), relevant)
 
 
 def invalidate(kind: str | None = None) -> None:
@@ -593,7 +645,7 @@ def probe(d: AgentDef, env: dict, *, timeout: float = 6, fresh: bool = False, ru
                 return dict(hit[1])
     try:
         result = _probe(d, env, timeout, run_as)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         result = {"installed": False, "path": None, "version": None, "login": "unknown",
                   "login_detail": f"检测失败：{exc}"}
     with _probe_lock:

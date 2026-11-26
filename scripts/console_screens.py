@@ -318,7 +318,7 @@ async def shoot(world, out: Path | None, smoke: bool) -> list[str]:
     pages = [
         ("cloud-overview", "/#/"), ("cloud-devices", "/#/devices"), ("cloud-inbox", "/#/inbox"),
         ("cloud-downloads", "/#/downloads"), ("cloud-settings", "/#/settings"), ("cloud-connectors", "/#/connectors"),
-        ("cloud-plugins", "/#/plugins"),
+        ("cloud-plugins", "/#/plugins"), ("cloud-agent", "/#/agent"),
     ]
     if smoke:
         pages = pages[:3] + [("cloud-connectors", "/#/connectors")]
@@ -462,6 +462,9 @@ async def shoot(world, out: Path | None, smoke: bool) -> list[str]:
                     await page.goto(f"{joined}/#/", wait_until="networkidle")
                     await page.wait_for_timeout(600)
                     await capture("local-overview")
+                    await page.goto(f"{joined}/#/agent", wait_until="networkidle")
+                    await page.wait_for_timeout(800)
+                    await capture("local-agent")
                     await page.goto(f"{joined}/#/plugins", wait_until="networkidle")
                     await page.wait_for_selector(".plugin-row[data-name='blender']")
                     await page.wait_for_timeout(600)

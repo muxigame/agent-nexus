@@ -20,7 +20,7 @@ const EXTRA_ICONS = {
   "rotate-ccw": '<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/>',
   folder: '<path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/>',
   "corner-left-up": '<path d="M14 9 9 4 4 9"/><path d="M20 20h-7a4 4 0 0 1-4-4V4"/>',
-  lightbulb: '<path d="M15 14c.2-1 .7-1.7 1.5-2.5 1-.9 1.5-2.2 1.5-3.5A6 6 0 0 0 6 8c0 1 .2 2.2 1.5 3.5.7.7 1.3 1.5 1.5 2.5"/><path d="M9 18h6"/><path d="M10 22h4"/>',
+  lightbulb: '<path d="M15 14c.2-1 .7-1.7 1.5-2.5 1-.9 1.5-2.2 1.5-3.5A6 6 0 0 0 6 8c0 1 .2 2.2 1.5 3.5 .7.7 1.3 1.5 1.5 2.5"/><path d="M9 18h6"/><path d="M10 22h4"/>',
   "file-diff": '<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M9 10h6"/><path d="M12 13V7"/><path d="M9 17h6"/>',
   "shield-alert": '<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="M12 8v4"/><path d="M12 16h.01"/>',
   bot: '<path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/>',
@@ -50,7 +50,11 @@ export function kindMark(kind, { size = "sm" } = {}) {
   const text = KINDS[kind]?.mark || String(kind || "?").slice(0, 2).toUpperCase();
   return el("span", { class: `aa-mark ${size}`, dataset: { kind: kind || "" }, "aria-hidden": "true" }, text);
 }
-export function loginCommand(kind, info) { return info?.login_command || KINDS[kind]?.login || kind; }
+export function loginCommand(kind, info) {
+  const command = info?.login_command;
+  if (Array.isArray(command) && command.length) return command.join(" ");
+  return (typeof command === "string" && command) || KINDS[kind]?.login || kind;
+}
 
 /** Call one op; a handler's {"error"} answer becomes a thrown Error (message = the Chinese text). */
 export async function callOp(api, op, params = {}, device = null) {
@@ -58,6 +62,7 @@ export async function callOp(api, op, params = {}, device = null) {
   if (result && typeof result === "object" && !Array.isArray(result) && result.error) {
     const error = new Error(result.error);
     error.code = result.code;
+    error.data = result;
     throw error;
   }
   return result ?? {};
@@ -80,7 +85,7 @@ export function normalizeAgents(result) {
 export function percent(value) {
   const n = Number(value);
   if (!Number.isFinite(n) || n <= 0) return 0;
-  return Math.max(0, Math.min(100, Math.round(n <= 1 ? n * 100 : n)));
+  return Math.max(0, Math.min(100, Math.round(n < 1 ? n * 100 : n)));
 }
 
 export function shortVersion(version) {
@@ -210,7 +215,7 @@ export function mountTmpManager(container, api, { device = null } = {}) {
       return;
     }
     const sorted = items.slice().sort((a, b) => toSeconds(b.updated_at) - toSeconds(a.updated_at));
-    const list = el("div", { class: "aa-tmp-list", role: "list" }, sorted.map((item) => {
+    const list = el("div", { class: "list aa-tmp-list", role: "list" }, sorted.map((item) => {
       const button = el("button", { class: "btn btn-ghost btn-sm", type: "button", disabled: !!item.active,
         title: item.active ? "对话还在进行，结束后才能清理" : `清理 ${item.path || item.rid}`,
         onclick: async (event) => {
@@ -324,10 +329,10 @@ export function mountCliManager(container, api, { device = null, onLogin = null 
       el("div", { class: "aa-cli-head" },
         kindMark(kind, { size: "md" }),
         el("div", { class: "aa-cli-name" }, el("div", { class: "strong" }, kindLabel(kind, info)),
-          el("div", { class: "faint xs" }, info.install_hint || (info.installed ? "" : installHint(kind)))),
+          el("div", { class: "faint xs" }, info.installed ? "" : info.install_hint || installHint(kind))),
         el("span", { class: `pill ${status.tone}` }, status.label),
         actions),
-      info.installed || busy ? facts : null, bar, log);
+      info.installed ? facts : null, bar, log);
     if (log) requestAnimationFrame(() => { log.scrollTop = log.scrollHeight; });
     const old = rows.get(kind);
     rows.set(kind, node);
@@ -337,7 +342,7 @@ export function mountCliManager(container, api, { device = null, onLogin = null 
 
   function login(kind, info) {
     const command = loginCommand(kind, info);
-    if (onLogin) onLogin(kind, device, command);
+    if (onLogin) onLogin(kind, device, command, info);
     else copy(command, { label: `已复制登录命令：${command}` });
   }
 
@@ -346,7 +351,7 @@ export function mountCliManager(container, api, { device = null, onLogin = null 
     const known = new Set(agents.map((item) => item.kind));
     for (const kind of KIND_ORDER) if (!known.has(kind)) agents.push({ kind, installed: false });
     mount(root,
-      el("div", { class: "aa-cli-list" }, agents.map((info) => renderRow(info.kind))),
+      el("div", { class: "list aa-cli-list" }, agents.map((info) => renderRow(info.kind))),
       el("div", { class: "row between aa-cli-foot" },
         el("span", { class: "faint xs" }, "安装以执行账户运行，使用 npm 全局安装；没有 Node.js 时会提示先安装。"),
         el("button", { class: "btn btn-ghost btn-sm", type: "button", onclick: () => load() }, icon("refresh-cw", { size: 14 }), "重新检测")));

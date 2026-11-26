@@ -80,3 +80,36 @@ def test_style_sheets_are_scoped():
                 continue
             for selector in prelude.split(","):
                 assert f'[data-style="{name}"]' in selector, (name, selector)
+
+
+AGENT_CHAT = ("chat.js", "prompts.js", "agent-admin.js", "agent-wire.js")
+
+
+@pytest.mark.parametrize("which", ["gateway", "local"])
+def test_agent_chat_modules_are_served(which, monkeypatch, tmp_path):
+    """The Overview chat and the Agent page (docs/agent-chat.md §11) load from /ui/ in both consoles."""
+    client = gateway_client(monkeypatch, tmp_path) if which == "gateway" else local_client(tmp_path)
+    with client:
+        for name in AGENT_CHAT:
+            response = client.get(f"/ui/{name}")
+            assert response.status_code == 200, name
+            assert response.headers["content-type"].startswith("text/javascript"), name
+
+
+def test_agent_chat_imports_resolve_and_both_consoles_wire_it():
+    import re
+    static = UI_DIR.parent
+    for name in AGENT_CHAT:
+        text = (UI_DIR / name).read_text(encoding="utf-8")
+        for target in re.findall(r'from "(\.\/[^"]+|/ui/[^"]+)"', text):
+            assert (UI_DIR / target.rsplit("/", 1)[-1]).is_file(), (name, target)
+    local_overview = (static / "local" / "overview.js").read_text(encoding="utf-8")
+    console_pages = (static / "console" / "pages.js").read_text(encoding="utf-8")
+    assert "mountChat(" in local_overview and "localAgentApi()" in local_overview
+    assert "mountChat(" in console_pages and "cloudAgentApi()" in console_pages and "localDevice: false" in console_pages
+    for app in (static / "local" / "app.js", static / "console" / "app.js"):
+        text = app.read_text(encoding="utf-8")
+        assert '"/agent"' in text and "agentPage(" in text, app
+    wire = (UI_DIR / "agent-wire.js").read_text(encoding="utf-8")
+    assert "/api/agents/local/" in wire and "/api/agents/remote/" in wire and "/agents/${enc(op)}" in wire
+    assert "/api/inbox/conversation" in wire

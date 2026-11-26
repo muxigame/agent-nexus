@@ -1,8 +1,15 @@
-// 本机 · 概览 (docs/ui-spec.md §4.1): cloud link, plugins, app, recent mail.
+// 本机 · 概览 (docs/ui-spec.md §4.1, docs/agent-chat.md §11): the agent chat on top, then cloud link, plugins,
+// app, recent mail. Regions refresh on their own: the 10 s poll redraws the head and the summary, never the chat.
 import { el, mount, icon, fetchJSON, toast, pill, relTime, errorState, supervisorText } from "/ui/ui.js";
 import { hubHost } from "/ui/invite.js";
+import { mountChat } from "/ui/chat.js";
+import { localAgentApi, loginHandler } from "/ui/agent-wire.js";
 
+const JOIN_HINT_KEY = "anx-local-join-hint-hidden";
 const PROBLEM = new Set(["needs_config", "crashed", "conflict", "invalid", "unhealthy"]);
+
+/** The Overview's head: on a phone only its primary action stays, so the chat starts higher up. */
+function overviewHead(node) { node.classList.add("overview-head"); return node; }
 
 function head(title, text, actions = []) {
   return el("div", { class: "page-head" }, el("div", { class: "titles" }, el("h1", {}, title), text ? el("p", {}, text) : null),
@@ -11,8 +18,14 @@ function head(title, text, actions = []) {
 
 export async function overviewPage(ctx) {
   const { page } = ctx;
-  mount(page, head("这台电脑", "正在读取…"), el("div", { class: "grid cols-4" },
+  const headHolder = el("div", { style: { display: "contents" } }, overviewHead(head("这台电脑", "正在读取…")));
+  const chatHolder = el("div", { class: "overview-chat" });
+  const summaryHolder = el("div", { style: { display: "contents" } }, el("div", { class: "grid cols-4" },
     Array.from({ length: 4 }, () => el("div", { class: "card stat" }, el("span", { class: "skeleton w-40" }), el("span", { class: "skeleton title w-60" })))));
+  mount(page, headHolder, chatHolder, summaryHolder);
+  // The chat is mounted once: in process for 本机, so it works with the cloud disconnected.
+  const chat = mountChat(chatHolder, localAgentApi(), { onLogin: loginHandler({ local: true }) });
+  ctx.onLeave(() => chat.destroy());
 
   async function load() {
     let services, plugins, cloud, inbox = null, autostart = { enabled: null };
@@ -20,14 +33,14 @@ export async function overviewPage(ctx) {
       [services, { plugins }, cloud] = await Promise.all([
         fetchJSON("/api/services", { quiet: true }), fetchJSON("/api/plugins", { quiet: true }), fetchJSON("/api/cloud", { quiet: true })]);
     } catch (error) {
-      mount(page, head("这台电脑", ""), errorState(error, load));
+      mount(headHolder, overviewHead(head("这台电脑", "")));
+      mount(summaryHolder, errorState(error, load));
       return;
     }
     if (cloud.state === "connected") { try { inbox = await fetchJSON("/api/inbox/threads", { quiet: true }); } catch { inbox = null; } }
     try { autostart = await fetchJSON("/api/app/autostart", { quiet: true }); } catch { /* not the desktop app */ }
-    let firstRun = false;
-    try { firstRun = !localStorage.getItem("anx-local-seen"); localStorage.setItem("anx-local-seen", "1"); } catch { /* storage unavailable */ }
-    if (firstRun && cloud.state === "not_joined") { location.hash = "#/cloud"; return; }
+    // No redirect to 连接云端 on a first visit: the chat with this computer's CLIs works without a gateway, so
+    // the Overview stays, with a dismissible line under the chat about what joining adds.
     render(services.manager, plugins, cloud, inbox, autostart);
   }
 
@@ -107,10 +120,22 @@ export async function overviewPage(ctx) {
         el("div", { class: "meta" }, el("span", { class: "faint xs" }, relTime(thread.last_at)))))) :
         el("div", { class: "card-body" }, el("p", { class: "muted small" }, inbox ? "还没有邮件。" : "收件箱需要连接网关。")));
 
-    mount(page,
+    mount(headHolder, overviewHead(
       head("这台电脑", sentence, [
+        el("a", { class: "btn", href: "#/agent" }, icon("sliders-horizontal", { size: 16 }), "Agent 设置"),
         el("a", { class: "btn", href: "#/cloud" }, icon("cloud", { size: 16 }), "连接云端"),
-        el("a", { class: "btn btn-primary", href: "#/plugins?open=install" }, icon("plus", { size: 16 }), "安装插件")]),
+        el("a", { class: "btn btn-primary", href: "#/plugins?open=install" }, icon("plus", { size: 16 }), "安装插件")])));
+    let joinHidden = false;
+    try { joinHidden = localStorage.getItem(JOIN_HINT_KEY) === "1"; } catch { /* storage unavailable */ }
+    const joinHint = !joined && !joinHidden ? el("div", { class: "banner accent overview-join" }, icon("cloud", { size: 18 }),
+      el("div", { class: "banner-body" }, el("div", {}, "加入网关后，还能在其他设备上运行 Agent、收发邮件，ChatGPT 和 Claude 也能用这台电脑的插件。")),
+      el("div", { class: "banner-actions" },
+        el("a", { class: "btn btn-sm btn-primary", href: "#/cloud" }, icon("link", { size: 14 }), "连接云端"),
+        el("button", { class: "btn btn-ghost btn-icon btn-sm", type: "button", "aria-label": "不再提示", title: "不再提示",
+          onclick: (event) => { try { localStorage.setItem(JOIN_HINT_KEY, "1"); } catch { /* storage unavailable */ } event.currentTarget.closest(".banner")?.remove(); } },
+          icon("x", { size: 14 })))) : null;
+    mount(summaryHolder,
+      joinHint,
       problems.length ? el("div", { class: "banner warn" }, icon("triangle-alert", { size: 18 }), el("div", { class: "banner-body" },
         el("div", { class: "banner-title" }, `${problems.length} 个插件需要处理`),
         el("div", { class: "muted" }, problems.map((p) => `${p.title || p.name}：${supervisorText(p.message) || p.status}`).join("；"))),

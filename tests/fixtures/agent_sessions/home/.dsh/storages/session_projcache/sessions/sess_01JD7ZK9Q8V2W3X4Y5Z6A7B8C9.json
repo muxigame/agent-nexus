@@ -1,0 +1,39 @@
+{
+ "version": 3,
+ "record": {
+  "identity": {
+   "createdAt": 1763800000000,
+   "cwd": "/home/u/proj"
+  },
+  "rows": {
+   "title": {
+    "val": "重构配置加载"
+   },
+   "titleInput": {
+    "val": {
+     "first": "把 config.py 的加载逻辑拆出来"
+    }
+   },
+   "sessionListMetadata": {
+    "val": {
+     "blank": false,
+     "lastPromptAt": 1763800600000
+    }
+   },
+   "sessionStats": {
+    "val": {
+     "turns": 3
+    }
+   },
+   "workingDirectory": {
+    "val": "/home/u/proj"
+   },
+   "sandboxMode": {
+    "val": "workspace-write"
+   },
+   "agentPreset": {
+    "val": "default"
+   }
+  }
+ }
+}

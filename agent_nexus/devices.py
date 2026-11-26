@@ -226,6 +226,8 @@ class Devices:
             desktop=bool(peer is not None and "desktop/1" in getattr(peer, "features", ())),
             # files/1: send and fetch files (P2P, else relayed by the gateway).
             files=bool(peer is not None and "files/1" in getattr(peer, "features", ())),
+            # agents/1: the agent chat runs CLIs there (docs/agent-chat.md); the chat's 运行设备 list.
+            agents=bool(peer is not None and "agents/1" in getattr(peer, "features", ())),
             # relay/1: forwards other devices' streams (docs/relay-mesh.md).
             relay=bool(peer is not None and "relay/1" in getattr(peer, "features", ())),
             # roughly where it is (the 设备 page's map): set by hand, else from its egress address

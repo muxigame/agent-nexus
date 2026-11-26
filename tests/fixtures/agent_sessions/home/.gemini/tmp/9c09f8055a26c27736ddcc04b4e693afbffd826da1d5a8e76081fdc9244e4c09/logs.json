@@ -1,0 +1,23 @@
+[
+ {
+  "sessionId": "4b5c6d7e-aaaa-4bbb-8ccc-0123456789ab",
+  "messageId": 0,
+  "type": "user",
+  "message": "这个项目用的什么测试框架？",
+  "timestamp": "2026-11-24T11:20:00.000Z"
+ },
+ {
+  "sessionId": "55555555-6666-4777-8888-999999999999",
+  "messageId": 0,
+  "type": "user",
+  "message": "/help",
+  "timestamp": "2026-11-18T08:00:00.000Z"
+ },
+ {
+  "sessionId": "55555555-6666-4777-8888-999999999999",
+  "messageId": 1,
+  "type": "user",
+  "message": "总结一下最近的提交",
+  "timestamp": "2026-11-18T08:00:10.000Z"
+ }
+]

@@ -1,0 +1,16 @@
+{
+ "version": 3,
+ "record": {
+  "identity": {
+   "createdAt": 1763700000000,
+   "cwd": "/home/u/proj"
+  },
+  "rows": {
+   "sessionListMetadata": {
+    "val": {
+     "blank": true
+    }
+   }
+  }
+ }
+}

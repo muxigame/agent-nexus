@@ -53,6 +53,8 @@
 标题取首条用户消息（截断）或 CLI 自带的 summary。读取有大小上限并缓存（mtime + size）。
 
 管理元数据（重命名、置顶、归档、隐藏）存在 `<root>/.anx/agents/sessions.json`，不改 CLI 自己的文件。
+anx 以 root 运行（Ubuntu 系统服务）而执行账户是普通用户时，发现、读取、删除只认**执行账户自己拥有的普通文件**（`lstat`，不跟随文件符号链接）：
+执行账户在 `~/.claude/projects/` 里放一个指向 root 目录的符号链接，既列不出也删不掉里面的文件。
 “删除”= 从列表隐藏；可选“删除会话文件”，需二次确认，只删除注册表认识的会话文件。
 
 `agent_session_read`：把会话文件规范化成统一事件（见 §4），用于在聊天区展示历史。
@@ -99,7 +101,23 @@ UI：侧栏顶部是 CLI 标签（Claude Code / Codex / DeepSeek / 全部），�
 | `readonly` 只读 | `--permission-mode plan` | `--sandbox read-only` | — |
 | `full` 完全信任 | `--dangerously-skip-permissions` | `--dangerously-bypass-approvals-and-sandbox` | — |
 
-`full` 在 UI 上需要明确勾选，且不作为默认值。
+`full` 在 UI 上需要明确勾选，且不作为默认值。界面的权限菜单按 `agent_info.permissions` 列出该 CLI 支持的模式（不支持的灰显并注明），
+`supports.approvals` 为假时（Codex）“需要审批”显示为“沙箱内自动执行”，如实说明不会逐项询问。
+
+**远程访问策略**（`agent-nexus.json` 的 `agents`）：本机控制台总能用进程内的 AgentHub；其他设备和云端控制台只有在 `agents.remote` 为真时才看得到
+`agents/1`——Agent 能以执行账户运行命令，和终端一样，所以它默认跟随 `terminal.enabled`（关掉远程终端也就关掉了远程 Agent）。
+`agents.allow_full_remote`（默认同样跟随 `terminal.enabled`）为假时，远程调用以 `full` 打开 run 会被拒绝（`code: permission_disabled`），
+`agent_info` 带 `policy: {full: false}`，界面把“完全信任”灰显。
+
+**同一会话只跑一个进程**：`agent_run_open` 带的 `resume_id` 已经有在跑的 run（另一个标签页、云端和本机同时打开）时，不再启动第二个 CLI，
+而是返回那个 run（`attached: true`，有 prompt 时转给它；它正忙则 `code: busy` 并带 `rid`），界面切到那个对话。
+
+**超时与回收**：所有审批（审批 MCP、ACP `session/request_permission`、claude `can_use_tool`）10 分钟无人回应即拒绝；
+一轮在 4 个空闲周期（2 小时）里既没有任何输出、也没有人读取时视为卡住，结束进程、让出名额（会话仍可续接）。
+关机（`close_all`）同步结束所有 CLI：先给每个进程组发 SIGTERM，总共等 2 秒，再 SIGKILL 剩下的（Windows：`taskkill /T /F`）。
+
+**“总是允许”的范围**：shell 类工具（Bash / shell / execute）只记住**完全相同的命令**（空白归一化），不是命令的程序名——
+记住 `git status` 不会放行 `git push --force` 或 `ls && curl … | sh`；其他工具按工具名记住。卡片上写明范围。
 
 **审批**（Claude `ask` 模式）：run 启动时生成一个 `--mcp-config`，其中有一个 stdio MCP 服务器 `anx agent-approve --run <rid> --port <p>`，
 它把审批请求 POST 到本机 AgentHub 的本地回环端点（带一次性令牌），AgentHub 产生 `approval` 事件并等待回应（默认 10 分钟超时 = 拒绝）。
@@ -142,6 +160,9 @@ UI：侧栏顶部是 CLI 标签（Claude Code / Codex / DeepSeek / 全部），�
   只允许白名单里的 op，原样 `peer.call`。长轮询 `run_read` 的 wait ≤ 20 s。
 - 本机控制台：`/api/agents/local/{op}` 直接调进程内 AgentHub；`/api/agents/remote/{device_id}/{op}` 经网关中转（设备凭据，`lock.require_unlocked()`）。
 - 网关 op `agent_handle {device_id, workdir, kind, name}`：签发 workspace handle 并绑定邮箱地址（复用 `gateway.select` 的逻辑），供 run 注入。
+- 网关 op `agent_release {workspace_id}`：run 关闭（或打开失败）时由 AgentHub 调用，结束这个 handle，地址没有别的活跃 handle 时标记为已结束；
+  下一个在同一目录开的对话因此拿回 `claude-proj`，而不是一路漂到 `-2`、`-3`……只接受 `agent_handle` 签发的 handle，且只能由申请它的设备、它指向的设备或 owner 释放。
+  AgentHub 在找网关要 handle 之前先做本地检查（目录在允许范围内、CLI 已安装、会话 ID 合法），失败的打开不占用地址。
 
 ## 10. 会话与 ask_user / 邮件打通
 
@@ -166,6 +187,17 @@ UI：侧栏顶部是 CLI 标签（Claude Code / Codex / DeepSeek / 全部），�
 - “⋯”：提示词预设、工作上下文（同设备直接 / 经网关操作其他设备 + 目录）、临时目录。
 - 新页面“Agent”（侧栏）：提示词片段编辑器（左：片段列表，勾选/排序/编辑/还原，按 全部/已启用/已停用 筛选；右：变量替换后的最终提示词预览和段数）、
   临时目录管理、CLI 管理（安装/更新/登录状态）。
+
+**接线**（`ui/agent-wire.js`）：
+
+- 传输适配器：云端 `cloudAgentApi()`（`/api/devices/{id}/agents/{op}`，设备列表取 `/api/devices`，不在线、没有 `agents/1` 的设备灰显并注明原因）；
+  本机 `localAgentApi()`（本机 → `/api/agents/local/{op}`，其他设备 → `/api/agents/remote/{id}/{op}`；云端未连接时只列本机，并在运行设备菜单里说明）。
+  传输层错误（4xx/5xx、断网）也转成 `{error, code}`，和 handler 自己的错误走同一条路。POST 不清空页面的 GET 缓存（`keepCache`）。
+- 概览页：页头、对话区、摘要三个区块；10 秒轮询只重绘页头和摘要，对话区只挂载一次。手机上页头只保留主按钮，让对话区更靠上。
+- 在终端登录：远端设备 → 打开该设备的“终端”页，连上后键入登录命令（claude `auth login`、codex `login --device-auth`、gemini 直接运行；
+  CLI 不在 PATH 上时用探测到的完整路径）。要键入的内容只存在内存里，链接本身不能让终端执行命令。
+  本机控制台里的本机 → 对话框显示命令（可复制），因为用户就在这台电脑前。dsh 总是先弹对话框：`dsh web` 配置页，或设置 `DEEPSEEK_API_KEY`。
+- 侧栏页面 `#/agent?tab=prompts|cli|tmp&device=<id>`：顶部选运行设备，三个标签页都作用于这台设备。
 
 ## 12. ACP 适配器（dsh、gemini）
 
@@ -254,7 +286,7 @@ FEATURE = "agents/1"
 - 档案（profile）：`dsh --profile acp`（ACP over stdio）、`dsh --profile sdk`（JSON-RPC stdio）、
   `dsh --profile headless [--json] [--session-id <id>] [--permission-mode <preset>] [--approval-policy ask|never] [--add-dir <path>] <task|->`。
   `--json` 输出逐行的 run 事件（格式未公开，解析要宽松）。首次运行某个档案会在 `~/.dsh/profiles/<name>` 生成该档案。
-- 会话：`~/.dsh/sessions/<编码后的 cwd>/<session-id>/session.v4.jsonl.zstd`（zstd 压缩；旧版 v3）。编码规则：`C:\Users\x\proj` → `--C-Users-x-proj--`，空格 → `~0020`。
+- 会话：`~/.dsh/sessions/<编码后的 cwd>/<session-id>/session.v4.jsonl.zstd`（zstd 压缩；旧版 v3）。编码规则：`C:\Users\you\proj` → `--C-Users-you-proj--`，空格 → `~0020`。
   **索引** `~/.dsh/storages/session_projcache/sessions/<session-id>.json`：`{version, record: {identity: {createdAt(ms), cwd}, rows: {title.val, titleInput.val.first,
   sessionListMetadata.val {blank, lastPromptAt}, sessionStats.val {turns, ...}, workingDirectory.val, sandboxMode.val, agentPreset.val, tokenUsage.val, ...}}}`。
   会话列表用这个索引（不需要解压 zstd）：标题 = `title.val` 或 `titleInput.val.first`；`blank: true` 的空会话默认隐藏。读历史需要 zstd（可选依赖，缺失时只显示元数据）。

@@ -181,6 +181,8 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
         tasks.append(asyncio.create_task(auto_update.loop(sup.cfg.root)))
         if lifecycle is not None:
             tasks.append(asyncio.create_task(lifecycle.beat_loop()))
+        if agents_state.get("hub") is not None:
+            agents_state["hub"].start()  # sweeps old temp folders now and every few hours
         if p2p_state.get("sessions") is not None:
             try:
                 await p2p_state["sessions"].start()
@@ -200,6 +202,9 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
             for task in tasks:
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
+            if agents_state.get("hub") is not None:
+                with contextlib.suppress(Exception):
+                    agents_state["hub"].close()  # no agent CLI outlives the manager
             # No orphaned tunnel processes after the manager exits.
             if p2p_state.get("sidecar") is not None:
                 with contextlib.suppress(Exception):
@@ -1010,6 +1015,9 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
             args["ask_id"] = params["ask_id"]
         elif name == "answer":
             args.update(body, ask_id=params["ask_id"])
+        elif name == "conversation":
+            args.update(address=query.get("address", ""), limit=query.get("limit") or 200,
+                        mark_read=query.get("mark_read") in ("1", "true"))
         elif name == "addresses":
             args["include_ended"] = query.get("include_ended") in ("1", "true")
         elif name == "set_address":
@@ -1239,6 +1247,84 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
         file_share = anx_file_share.FileShare(account=lambda: anx_accounts_files.effective(sup.cfg.root, "terminal"))
         hub.handlers.update(file_share.handlers())
         hub.extra_features = (*hub.extra_features, anx_file_share.FEATURE)
+
+    # -- the agent chat (agents/1, docs/agent-chat.md): CLIs, sessions and runs of this device --
+    from .agents import hub as agents_hub_mod
+    agents_state: dict[str, Any] = {"hub": None}
+    if getattr(sup.cfg, "agents", True):
+        from . import accounts as anx_accounts_agents
+        from .federation import RoutingError as _AgentsRoutingError
+
+        async def agents_gateway(op: str, args: dict) -> dict | None:
+            """``hub_call`` for the hub (agent_handle); None when the gateway is away or too old."""
+            if not hub.available or agents_hub_mod.FEATURE not in hub.features:
+                return None
+            try:
+                return await hub.call(op, args, timeout=15)
+            except _AgentsRoutingError as exc:
+                return {"error": str(exc).removeprefix("locked: "), "code": "refused"}
+
+        def agents_device() -> dict:
+            cloud = joining.cloud_config(sup.cfg.root)
+            gateway_url = cloud.get("url") if isinstance(cloud.get("url"), str) else ""
+            with contextlib.suppress(Exception):
+                gateway_url = joining.hub_url(gateway_url) or gateway_url
+            return {"id": cloud.get("agent_id") or "", "gateway": gateway_url,
+                    "name": joining.local_hostname()}
+
+        agents = agents_hub_mod.AgentHub(sup.cfg.root, account=lambda: anx_accounts_agents.effective(sup.cfg.root, "terminal"),
+                                         gateway=agents_gateway, device=agents_device)
+        agents_state["hub"] = agents
+        agents_state["handlers"] = agents.handlers()
+        # Other devices and the cloud console only when allowed: an agent runs commands like a terminal does,
+        # so ``agents.remote`` follows ``terminal.enabled`` unless set (registry.load_manager_config).
+        if getattr(sup.cfg, "agents_remote", True):
+            hub.handlers.update(agents_hub_mod.remote_handlers(
+                agents_state["handlers"], allow_full=getattr(sup.cfg, "agents_allow_full_remote", True)))
+            hub.extra_features = (*hub.extra_features, agents_hub_mod.FEATURE)
+
+    async def agents_body(request: Request) -> dict | None:
+        raw = await request.body()
+        if not raw.strip():
+            return {}
+        try:
+            body = json.loads(raw)
+        except ValueError:
+            return None
+        return body if isinstance(body, dict) else None
+
+    async def agents_local(request: Request) -> JSONResponse:
+        """``POST /api/agents/local/{op}``: this device's agent chat, in process (no gateway needed).
+        A handler's own ``{"error", "code"}`` comes back with HTTP 200."""
+        op = request.path_params["op"]
+        if op not in agents_hub_mod.OPS:
+            return JSONResponse({"error": f"不支持的操作：{op}", "code": "unknown_op"}, status_code=404)
+        if agents_state["hub"] is None:
+            return JSONResponse({"error": "这台设备关闭了 Agent 对话（agent-nexus.json 里 agents.enabled 为 false）",
+                                 "code": "disabled"}, status_code=409)
+        params = await agents_body(request)
+        if params is None:
+            return JSONResponse({"error": "请求内容必须是 JSON 对象", "code": "bad_request"}, status_code=400)
+        return JSONResponse(await agents_state["handlers"][op](params), headers={"Cache-Control": "no-store"})
+
+    async def agents_remote(request: Request) -> JSONResponse:
+        """``POST /api/agents/remote/{device_id}/{op}``: another device's agent chat through the gateway, with
+        this device's credential (refused while this client is locked)."""
+        op = request.path_params["op"]
+        if op not in agents_hub_mod.OPS:
+            return JSONResponse({"error": f"不支持的操作：{op}", "code": "unknown_op"}, status_code=404)
+        try:
+            lock.require_unlocked()
+        except LockError as exc:
+            return lock_error(exc)
+        params = await agents_body(request)
+        if params is None:
+            return JSONResponse({"error": "请求内容必须是 JSON 对象", "code": "bad_request"}, status_code=400)
+        try:
+            result = await remote.agents_call(sup.cfg.root, request.path_params["device_id"], op, params)
+        except remote.RemoteError as exc:
+            return JSONResponse(exc.body(), status_code=exc.status)
+        return JSONResponse(result, headers={"Cache-Control": "no-store"})
 
     # -- P2P tunnels (muxi-p2p): this device's remote hub + tunnel agent, and connect-side links --
     from . import p2p as p2p_mod
@@ -1712,6 +1798,7 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
         inbox_route("/api/inbox/summary", "summary", ["GET"]),
         inbox_route("/api/inbox/threads", "threads", ["GET"]),
         inbox_route("/api/inbox/threads/{thread_id}", "thread", ["GET"]),
+        inbox_route("/api/inbox/conversation", "conversation", ["GET"]),
         inbox_route("/api/inbox/send", "send", ["POST"]),
         inbox_route("/api/inbox/asks", "asks", ["GET"]),
         inbox_route("/api/inbox/asks/{ask_id}", "ask", ["GET"]),
@@ -1763,6 +1850,8 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
         Route("/api/mesh", mesh_status),
         Route("/api/remote/connections", remote_connections),
         Route("/api/remote/devices/{device_id}/connect", remote_connect, methods=["POST"]),
+        Route("/api/agents/local/{op}", agents_local, methods=["POST"]),
+        Route("/api/agents/remote/{device_id}/{op}", agents_remote, methods=["POST"]),
         Route("/api/remote/devices/{device_id}/terminal", remote_terminal_info),
         Route("/api/remote/devices/{device_id}/terminal/external", remote_terminal_external, methods=["POST"]),
         WebSocketRoute("/api/remote/devices/{device_id}/terminal/ws", remote_terminal_socket),

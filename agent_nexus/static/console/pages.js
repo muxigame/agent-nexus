@@ -6,6 +6,8 @@ import {
 import { qrSVG } from "/ui/qr.js";
 import { osMark } from "/ui/os-icons.js";
 import { ubuntuServerJoinCommand } from "/console/install-commands.js";
+import { mountChat } from "/ui/chat.js";
+import { cloudAgentApi, loginHandler } from "/ui/agent-wire.js";
 
 // ---------------------------------------------------------------- shared bits
 
@@ -30,6 +32,9 @@ function deviceState(device) {
   if (device.revoked) return "revoked";
   return device.online ? "online" : "offline";
 }
+
+/** The Overview's head: on a phone only its primary action stays, so the chat starts higher up. */
+function overviewHead(node) { node.classList.add("overview-head"); return node; }
 
 function head(title, text, actions = []) {
   return el("div", { class: "page-head" }, el("div", { class: "titles" }, el("h1", {}, title), text ? el("p", {}, text) : null),
@@ -59,16 +64,24 @@ function openMenu(anchor, items) {
 
 // ---------------------------------------------------------------- overview
 
+/** The agent chat on top (docs/agent-chat.md §11), the gateway summary below. Regions refresh on their own:
+ *  the 10 s poll redraws the head and the summary, never the chat (a re-mount would drop a running turn). */
 export async function overviewPage(ctx) {
   const { page } = ctx;
-  mount(page, head(greeting(), "正在读取网关状态…"), el("div", { class: "grid cols-4" },
+  const headHolder = el("div", { style: { display: "contents" } }, overviewHead(head(greeting(), "正在读取网关状态…")));
+  const chatHolder = el("div", { class: "overview-chat" });
+  const summaryHolder = el("div", { style: { display: "contents" } }, el("div", { class: "grid cols-4" },
     Array.from({ length: 4 }, () => el("div", { class: "card stat" }, el("span", { class: "skeleton w-40" }), el("span", { class: "skeleton title w-60" })))));
+  mount(page, headHolder, chatHolder, summaryHolder);
+  const chat = mountChat(chatHolder, cloudAgentApi(), { localDevice: false, onLogin: loginHandler() });
+  ctx.onLeave(() => chat.destroy());
   let data;
   const load = async () => {
     try {
       data = await fetchJSON("/api/console/summary", { quiet: true });
     } catch (error) {
-      mount(page, head(greeting(), ""), errorState(error, () => overviewPage(ctx)));
+      mount(headHolder, overviewHead(head(greeting(), "")));
+      mount(summaryHolder, errorState(error, load));
       return;
     }
     render(data);
@@ -91,12 +104,14 @@ export async function overviewPage(ctx) {
     ];
     const done = steps.filter((item) => item[0]).length;
     const current = steps.findIndex((item) => !item[0]);
-    mount(page,
+    mount(headHolder, overviewHead(
       head(greeting(), sentence, [
+        el("a", { class: "btn", href: "#/agent" }, icon("sliders-horizontal", { size: 16 }), "Agent 设置"),
         el("a", { class: "btn", href: "#/downloads" }, icon("download", { size: 16 }), "下载客户端"),
         el("a", { class: "btn", href: "#/connectors?open=add-connector" }, icon("plug", { size: 16 }), "添加连接器"),
         el("a", { class: "btn btn-primary", href: "#/devices?invite=1" }, icon("ticket", { size: 16 }), "邀请新设备"),
-      ]),
+      ])));
+    mount(summaryHolder,
       alert ? el("div", { class: `banner ${alert.level || "warn"}` }, icon("triangle-alert", { size: 18 }),
         el("div", { class: "banner-body" }, el("div", { class: "banner-title" }, alert.title), alert.text ? el("div", { class: "muted" }, alert.text) : null,
           summary.alerts.length > 1 ? el("div", { class: "faint xs" }, `另有 ${summary.alerts.length - 1} 项`) : null),

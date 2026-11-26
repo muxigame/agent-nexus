@@ -15,7 +15,7 @@ from .mailbox import ANSWER_VIA, ME
 if TYPE_CHECKING:
     from .gateway import Gateway
 
-OPS = ("summary", "threads", "thread", "send", "answer", "asks", "ask", "addresses", "set_address")
+OPS = ("summary", "threads", "thread", "send", "answer", "asks", "ask", "addresses", "set_address", "conversation")
 
 
 class InboxService:
@@ -41,6 +41,14 @@ class InboxService:
             return {"viewer": viewer, "viewer_display": mailbox.display(viewer),
                     "threads": mailbox.threads(viewer, limit=int(args.get("limit") or 50)),
                     "open_asks": mailbox.asks(state="open"), "unread": mailbox.unread_count(viewer)}
+        if op == "conversation":
+            # me <-> one address, mail and asks in time order: the agent chat's timeline (docs/agent-chat.md §10)
+            try:
+                limit = int(args.get("limit") or 200)
+            except (TypeError, ValueError):
+                limit = 200
+            return mailbox.conversation(args.get("address"), limit=limit,
+                                        mark_read=args.get("mark_read") in (True, "1", "true"))
         if op == "thread":
             viewer = self._viewer(args)
             thread_id = args.get("thread_id")

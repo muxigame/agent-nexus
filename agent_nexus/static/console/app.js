@@ -6,11 +6,13 @@ import { renderDownloads } from "/console/downloads.js";
 import { connectorsPage } from "/console/connectors.js";
 import { terminalPage, loadVendor } from "/ui/terminal.js";
 import { topologyPage } from "/console/topology.js";
+import { agentPage, cloudAgentApi } from "/ui/agent-wire.js";
 
 restoreTheme();
 const NAV = [
   { path: "/", label: "概览", icon: "layout-dashboard", primary: true },
   { path: "/devices", label: "设备", icon: "monitor", primary: true },
+  { path: "/agent", label: "Agent", icon: "bot" },
   { path: "/topology", label: "拓扑", icon: "network" },
   { path: "/connectors", label: "连接器", icon: "plug", primary: true },
   { path: "/plugins", label: "插件", icon: "puzzle" },
@@ -96,7 +98,8 @@ async function downloadsPage() {
 }
 
 const router = createRouter({
-  "/": (route) => overviewPage(context("概览"), route),
+  "/": (route) => overviewPage(context("概览", { wide: true }), route),
+  "/agent": (route) => agentPage(context("Agent", { wide: true }), route, { api: cloudAgentApi() }),
   "/devices": (route) => devicesPage(context("设备"), route),
   "/topology": (route) => topologyPage(context("拓扑", { wide: true }), route),
   "/connectors": (route) => connectorsPage(context("连接器"), route),

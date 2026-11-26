@@ -11,6 +11,7 @@ import { desktopPage, loadNoVNC } from "/local/desktop.js";
 import { localConnectorsPage } from "/local/connectors.js";
 import { terminalPage, loadVendor } from "/ui/terminal.js";
 import { CLIENT_TERMINAL_API } from "/ui/terminal-config.js";
+import { agentPage, localAgentApi } from "/ui/agent-wire.js";
 
 restoreTheme();
 // What the gateway answers (devices, inbox, 插件库): pages show the last answer at once.
@@ -28,6 +29,7 @@ const NAV = [
   { path: "/", label: "概览", icon: "layout-dashboard", primary: true },
   { path: "/plugins", label: "插件", icon: "puzzle", primary: true },
   { path: "/devices", label: "设备", icon: "monitor", primary: true },
+  { path: "/agent", label: "Agent", icon: "bot" },
   { path: "/connectors", label: "连接器", icon: "plug" },
   { path: "/cloud", label: "连接云端", icon: "cloud", primary: true, short: "云端" },
   { path: "/inbox", label: "收件箱", icon: "inbox", primary: true },
@@ -118,7 +120,8 @@ function inboxPage({ params }) {
 }
 
 const router = createRouter({
-  "/": (route) => overviewPage(context("概览"), route),
+  "/": (route) => overviewPage(context("概览", { wide: true }), route),
+  "/agent": (route) => agentPage(context("Agent", { wide: true }), route, { api: localAgentApi(), local: true }),
   "/plugins/:name?": (route) => pluginsPage(context("插件"), route),
   "/cloud": (route) => cloudPage(context("连接云端"), route),
   "/devices": (route) => devicesPage(context("设备"), route),
