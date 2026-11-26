@@ -375,6 +375,8 @@ class ClaudeStream(Adapter):
             block_id = self._find_block(message_id, kind, block, position)
             if kind == "text":
                 text = block.get("text") if isinstance(block.get("text"), str) else ""
+                if text:
+                    self._last_text = text
                 if text and self._streamed.get(block_id) != text:
                     events.append({"type": "message", "role": "assistant", "text": text, "id": block_id})
             elif kind == "thinking":
@@ -428,6 +430,11 @@ class ClaudeStream(Adapter):
             text = obj.get("result") if isinstance(obj.get("result"), str) else ""
             reason = {"error_max_turns": "达到了最大轮数", "error_during_execution": "执行中出错"}.get(
                 str(obj.get("subtype")), "")
+            if text and text == getattr(self, "_last_text", None):
+                # the CLI already said it as a reply (seen with "Not logged in · Please run /login"): no echo,
+                # a pointer to what to do instead
+                text = f"{self.d.label} 这一轮没有完成，原因见上一条" + (
+                    "；它还没登录，先点「在终端登录」登录后再发" if "log" in text.lower() else "")
             events.append({"type": "error", "text": text or reason or f"{self.d.label} 这一轮没有成功完成"})
             events.append({"type": "status", "state": "failed", "session_id": self.session_id, "usage": usage})
             return events

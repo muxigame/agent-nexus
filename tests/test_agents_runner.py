@@ -711,3 +711,16 @@ async def test_close_all_ends_every_process_before_returning(tmp_path, work):
     proc = runs.runs[opened["rid"]].proc
     runs.close_all()
     assert proc.p.poll() is not None, "the CLI is gone when close_all returns"
+
+
+def test_claude_error_said_as_reply_is_not_echoed():
+    # seen on a real device: a signed-out claude answers "Not logged in · Please run /login" and fails the result
+    adapter = adapters.make(registry.builtin_definitions()["claude"], adapters.AdapterOptions(binary="x", workdir="/w"))
+    adapter.argv("hi")
+    note = "Not logged in · Please run /login"
+    adapter.feed(json.dumps({"type": "assistant", "message": {"id": "m1", "role": "assistant",
+                                                              "content": [{"type": "text", "text": note}]}}))
+    events = adapter.feed(json.dumps({"type": "result", "subtype": "success", "is_error": True, "result": note}))
+    error = next(e for e in events if e["type"] == "error")
+    assert error["text"] != note and "登录" in error["text"]
+    assert events[-1]["state"] == "failed"
