@@ -553,7 +553,7 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
         route_seen[device_id] = {"kind": kind, "route": route, "via": via, "via_id": via_id, "at": _time.time()}
     #: how long a request waits for a direct tunnel before taking a relay; LAN, IPv6 and cone
     #: NATs connect well within it, a symmetric pair needs 2-20 s and goes through a relay meanwhile
-    DIRECT_GRACE_S = 3.0
+    DIRECT_GRACE_S = 2.0
 
     def direct_task(target: str) -> asyncio.Task:
         task = direct_pending.get(target)
@@ -654,6 +654,12 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
         if recently_failed and (pending is None or pending.done()):
             # the punch failed a moment ago: no new punch, no wait, the relay right away
             relayed = await relay_path(device_id, ticket["ticket"], "直连刚失败过，稍后再试直连")
+            if relayed is not None:
+                return relayed
+        if pending is not None and not pending.done():
+            # a punch an earlier request started is still going (a symmetric pair takes up to
+            # 20 s): only that first request waits for it, every later one takes a relay at once
+            relayed = await relay_path(device_id, ticket["ticket"], "直连在后台打洞，打通后新连接自动走直连")
             if relayed is not None:
                 return relayed
         task = direct_task(target)
