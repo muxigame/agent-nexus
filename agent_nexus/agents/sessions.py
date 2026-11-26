@@ -549,6 +549,52 @@ def _codex_user_text(payload: dict) -> str | None:
     return "\n".join(parts) or None
 
 
+def _codex_compacted_user(payload: dict) -> str | None:
+    """The first plain user text kept in a ``compacted`` record's ``replacement_history``."""
+    for item in payload.get("replacement_history") or []:
+        if isinstance(item, dict):
+            text = _codex_user_text({"type": "message", **item}) if item.get("role") == "user" else None
+            if text:
+                return text
+    return None
+
+
+def _codex_scan_title(path: Path, compacted_user: str | None) -> tuple[str | None, str | None]:
+    """``(first own user text, first compacted user text)`` found by streaming the file line by line (at most
+    ``READ_BYTES``); used only when the head and the tail held no prompt. The summary cache keeps the result."""
+    read = 0
+    try:
+        with path.open("rb") as handle:
+            for raw in handle:
+                read += len(raw)
+                if read > READ_BYTES:
+                    break
+                start = raw[:400]
+                if b'"compacted"' in start:
+                    if compacted_user is None:
+                        record = _json_loads(raw)
+                        if isinstance(record, dict):
+                            compacted_user = _codex_compacted_user(_codex_payload(record)[1])
+                    continue
+                if b'"user"' not in raw[:2000] and b'"user_message"' not in raw[:2000]:
+                    continue
+                record = _json_loads(raw)
+                if not isinstance(record, dict):
+                    continue
+                kind, payload = _codex_payload(record)
+                if kind == "event_msg" and payload.get("type") == "user_message":
+                    text = str(payload.get("message") or "").strip()
+                    if text and not text.startswith("<"):
+                        return text, compacted_user
+                elif kind in ("response_item", None):
+                    text = _codex_user_text(payload)
+                    if text:
+                        return text, compacted_user
+    except OSError:
+        pass
+    return None, compacted_user
+
+
 def _codex_summary(path: Path, stat: os.stat_result) -> list[dict]:
     match = _UUID.search(path.name)
     out = _summary(id=match.group(0) if match else path.stem, primary=True,
@@ -580,7 +626,17 @@ def _codex_summary(path: Path, stat: os.stat_result) -> list[dict]:
             elif payload.get("type") == "message" and payload.get("role") == "assistant" \
                     and _text_of(payload.get("content")).strip():
                 messages += 1
+    compacted_user = None
+    for record in head:
+        kind, payload = _codex_payload(record)
+        if kind == "compacted" and compacted_user is None:
+            compacted_user = _codex_compacted_user(payload)
     title = event_user or first_user
+    if not title and not complete:
+        # The Codex desktop app writes a multi-megabyte ``compacted`` record near the top of a forked / resumed
+        # session, so the first prompt of the session itself sits past the head (seen on a real Windows device).
+        title, compacted_user = _codex_scan_title(path, compacted_user)
+    title = title or compacted_user
     if title:
         out["title"], out["title_rank"] = _title(title), 1
     out["messages"] = messages if complete else None

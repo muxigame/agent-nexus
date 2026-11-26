@@ -522,3 +522,40 @@ def test_root_core_only_sees_and_deletes_the_run_as_accounts_own_files(home, tmp
     with pytest.raises(LookupError):
         S.delete_files(None, home, "claude", "aaaaaaaa-1111-4222-8333-444455556666", env={})
     assert victim.exists()
+
+
+def _codex_line(kind: str, payload: dict) -> str:
+    return json.dumps({"timestamp": "2026-11-20T08:00:00Z", "type": kind, "payload": payload}, ensure_ascii=False)
+
+
+def _user(text: str) -> dict:
+    return {"type": "message", "role": "user", "content": [{"type": "input_text", "text": text}]}
+
+
+def test_codex_desktop_fork_title_past_a_huge_compacted_record(tmp_path):
+    # Codex desktop forks: two session_meta lines, then a multi-MB ``compacted`` record (seen on a real device), so
+    # the session's own first prompt lies past the head and before the tail.
+    sid = "019a0000-0000-7000-8000-00000000c0de"
+    root = tmp_path / ".codex" / "sessions" / "2026" / "11" / "20"
+    root.mkdir(parents=True)
+    filler = "x" * (S.HEAD_BYTES + 1024)
+    history = [_user("<environment_context>cwd</environment_context>"), _user("父会话的第一个问题")] + \
+        [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": filler}]}]
+    lines = [_codex_line("session_meta", {"id": sid, "cwd": str(tmp_path)}),
+             _codex_line("session_meta", {"id": "parent"}),
+             _codex_line("compacted", {"message": "", "replacement_history": history}),
+             _codex_line("response_item", _user("<image>")),
+             _codex_line("response_item", _user("分叉后的新问题")),
+             _codex_line("response_item", {"type": "reasoning", "summary": [], "content": None,
+                                           "encrypted_content": "y" * (S.TAIL_BYTES + 1024)})]
+    path = root / f"rollout-2026-11-20T08-00-00-{sid}.jsonl"
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    found = by_id(S.discover(None, tmp_path, kind="codex", env={}))
+    assert found[("codex", sid)]["title"] == "分叉后的新问题"
+    assert found[("codex", sid)]["cwd"] == str(tmp_path)
+
+    # no prompt of its own yet: fall back to the compacted history's first plain prompt
+    S._CACHE.clear()
+    path.write_text("\n".join(lines[:4] + lines[5:]) + "\n", encoding="utf-8")
+    found = by_id(S.discover(None, tmp_path, kind="codex", env={}))
+    assert found[("codex", sid)]["title"] == "父会话的第一个问题"
