@@ -1,0 +1,632 @@
+/* Agent Nexus skin: Win11 云母 Mica (key: glass-mica)
+ *
+ * Direction: Windows 11 / Fluent 2. Should sit next to Windows Settings,
+ * File Explorer and the WinUI 3 Gallery without looking foreign.
+ *
+ * Key decisions
+ * - Materials, not effects. The window is Mica: a near-neutral grey that
+ *   only hints at the wallpaper (the tint is visible only next to pure grey).
+ *   The navigation pane and the breadcrumb bar sit on Mica, as in File
+ *   Explorer; the content region is a separate "layer" sheet that starts
+ *   under the bar with an 8px top-left corner and a hairline stroke. That
+ *   sheet is what makes a WinUI window read as one object.
+ *   Flyouts, menus, toasts and the open phone nav are Acrylic.
+ * - Elevation is stroke-first. Light: cards are near-white on a lighter grey
+ *   layer, with a 1px stroke whose bottom edge is a touch darker. Dark: the
+ *   layer is darker than Mica and cards are white at 5%, with Fluent's dark
+ *   card stroke (dark outside, lit top), so cards lift by contrast.
+ * - Shape: Fluent radii. 4px for controls, nav items, tags and menu items;
+ *   8px for cards, lists, tables, InfoBars, flyouts and dialogs.
+ * - Colour restraint. Accent (#0067c0 light / #4cc2ff dark) is reserved for
+ *   actions and selection: the page's one primary button, the nav and tab
+ *   pills, toggles, the current step and focus. Decorative icons, counters
+ *   and avatars stay neutral. Secondary primaries inside cards and InfoBars
+ *   become standard buttons, so each view has a single filled accent.
+ *   "info" is a soft violet so status never reads as accent.
+ * - InfoBars follow Fluent: a card-coloured bar with only a whisper of the
+ *   tone (5%), a tone-mixed stroke, the coloured glyph and a short vertical
+ *   pill on the left edge, echoing the nav selection indicator.
+ * - Type: Segoe UI Variable first (Text for UI, Display for titles), then
+ *   Microsoft YaHei UI for CJK on Windows; PingFang / Noto elsewhere. Fluent
+ *   ramp: Title 28, Subtitle 20, Body 14, Caption 12 (CJK never below 12).
+ */
+
+:root {
+  color-scheme: light;
+
+  /* Mica (light): Win11 neutral grey with a barely-there wallpaper hint */
+  --bg: #eef0f4;
+  --mica:
+    radial-gradient(1500px 1050px at -8% -12%, rgba(0, 120, 212, .12), transparent 64%),
+    radial-gradient(1200px 900px at 108% -8%, rgba(138, 116, 230, .09), transparent 62%),
+    radial-gradient(1100px 800px at 70% 118%, rgba(56, 170, 220, .07), transparent 62%);
+  --layer: rgba(255, 255, 255, .62);
+  --layer-stroke: rgba(0, 0, 0, .07);
+
+  --surface: rgba(255, 255, 255, .8);
+  --surface-2: rgba(0, 0, 0, .037);
+  --surface-3: rgba(0, 0, 0, .055);
+  --overlay: rgba(0, 0, 0, .30);
+  --border: rgba(0, 0, 0, .07);
+  --border-strong: rgba(0, 0, 0, .14);
+
+  --text: #1b1b1b;
+  --text-2: #4c4c50;
+  --text-3: #616166;
+  --text-on-accent: #ffffff;
+
+  --accent: #0067c0;
+  --accent-hover: #1975c5;
+  --accent-active: #3183ca;
+  --accent-subtle: rgba(0, 103, 192, .075);
+  --accent-text: #005fb8;
+  --focus: rgba(0, 0, 0, .9);
+
+  --ok: #0e700e;      --ok-bg: #dff6dd;   --ok-border: rgba(14, 112, 14, .16);
+  --warn: #8a5100;    --warn-bg: #fff4ce; --warn-border: rgba(157, 93, 0, .16);
+  --bad: #c42b1c;     --bad-bg: #fbe9ea;  --bad-border: rgba(196, 43, 28, .16);
+  --info: #6b47c2;    --info-bg: #f1edfa; --info-border: rgba(107, 71, 194, .16);
+  --neutral: #55555a; --neutral-bg: rgba(0, 0, 0, .05); --neutral-border: rgba(0, 0, 0, .06);
+
+  --code-bg: rgba(0, 0, 0, .032);
+  --log-bg: #1c1c1c;
+  --log-text: #d9d9dc;
+
+  --font: "Segoe UI Variable Text", "Segoe UI Variable", "Segoe UI", -apple-system, BlinkMacSystemFont, "Microsoft YaHei UI", "PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+  --font-display: "Segoe UI Variable Display", "Segoe UI Variable", "Segoe UI", -apple-system, BlinkMacSystemFont, "Microsoft YaHei UI", "PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+  --font-mono: "Cascadia Mono", "Cascadia Code", Consolas, ui-monospace, "SF Mono", "JetBrains Mono", "Liberation Mono", monospace;
+  --fs-2xl: 28px;
+  --fs-3xl: 28px;
+  --lh: 1.5;
+
+  --radius-xs: 4px;
+  --radius-sm: 4px;
+  --radius-md: 4px;
+  --radius-lg: 8px;
+  --radius-card: 8px;
+  --control-h: 32px;
+  --control-h-sm: 28px;
+
+  /* Fluent fills and strokes (light) */
+  --fill-card: rgba(255, 255, 255, .92);
+  --fill-card-hover: #ffffff;
+  --fill-control: rgba(255, 255, 255, .78);
+  --fill-control-hover: rgba(249, 249, 249, .6);
+  --fill-control-press: rgba(249, 249, 249, .35);
+  --fill-input-focus: #ffffff;
+  --fill-subtle-hover: rgba(0, 0, 0, .03);
+  --fill-subtle-select: rgba(0, 0, 0, .042);
+  --fill-subtle-press: rgba(0, 0, 0, .055);
+  --stroke-card: rgba(0, 0, 0, .062);
+  --stroke-card-top: rgba(0, 0, 0, .05);
+  --stroke-card-bottom: rgba(0, 0, 0, .095);
+  --stroke-control: rgba(0, 0, 0, .06);
+  --stroke-control-top: rgba(0, 0, 0, .058);
+  --stroke-control-bottom: rgba(0, 0, 0, .16);
+  --stroke-input-bottom: rgba(0, 0, 0, .45);
+  --stroke-accent-top: rgba(255, 255, 255, .08);
+  --stroke-accent-bottom: rgba(0, 0, 0, .40);
+  --stroke-strong: rgba(0, 0, 0, .55);
+  --acrylic: rgba(252, 252, 252, .9);
+  --dialog-bg: #ffffff;
+  --dialog-foot: #f5f5f6;
+  --dialog-stroke: rgba(0, 0, 0, .08);
+  --knob-off: rgba(0, 0, 0, .62);
+  --switch-on-knob: #ffffff;
+  --primary-bg: var(--accent);
+  --primary-hover: var(--accent-hover);
+  --primary-active: var(--accent-active);
+  --auth-bloom: rgba(0, 120, 212, .06);
+  /* InfoBar washes: pale, clean hues (Fluent caution is #fff4ce; this is a step softer) */
+  --wash-accent: #eff6fd; --wash-ok: #f0f9ef; --wash-warn: #fff8e0; --wash-bad: #fdf1f2;
+  --card-lift: 0 1px 2px rgba(0, 0, 0, .04);
+  --badge-bg: var(--accent);
+  --badge-fg: var(--text-on-accent);
+
+  --shadow-xs: none;
+  --shadow-flyout: 0 0 0 1px rgba(0, 0, 0, .06), 0 8px 16px rgba(0, 0, 0, .12);
+  --shadow-pop: var(--shadow-flyout);
+  --shadow-modal: 0 0 0 1px rgba(0, 0, 0, .05), 0 2px 4px rgba(0, 0, 0, .04), 0 24px 48px rgba(0, 0, 0, .12);
+  --shadow-auth: 0 0 0 1px rgba(0, 0, 0, .06), 0 8px 24px rgba(0, 0, 0, .08);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+
+    /* Win11 dark Mica: neutral charcoal; the content layer sits a step darker */
+    --bg: #202022;
+    --mica:
+      radial-gradient(1500px 1050px at -8% -12%, rgba(60, 130, 220, .09), transparent 64%),
+      radial-gradient(1200px 900px at 108% -8%, rgba(118, 100, 220, .06), transparent 62%);
+    --layer: rgba(0, 0, 0, .28);
+    --layer-stroke: rgba(255, 255, 255, .06);
+
+    --surface: rgba(255, 255, 255, .05);
+    --surface-2: rgba(255, 255, 255, .06);
+    --surface-3: rgba(255, 255, 255, .085);
+    --overlay: rgba(0, 0, 0, .5);
+    --border: rgba(255, 255, 255, .07);
+    --border-strong: rgba(255, 255, 255, .12);
+
+    --text: #f3f3f4;
+    --text-2: #c5c5c9;
+    --text-3: #9d9da3;
+    --text-on-accent: #00172b;
+
+    --accent: #4cc2ff;
+    --accent-hover: #47b1e8;
+    --accent-active: #42a1d2;
+    --accent-subtle: rgba(76, 194, 255, .1);
+    --accent-text: #86d5ff;
+    --focus: rgba(255, 255, 255, .9);
+
+    --ok: #6ccb5f;      --ok-bg: rgba(108, 203, 95, .1);    --ok-border: rgba(108, 203, 95, .2);
+    --warn: #f2c661;    --warn-bg: rgba(252, 225, 0, .06);  --warn-border: rgba(245, 195, 90, .18);
+    --bad: #ff99a4;     --bad-bg: rgba(255, 153, 164, .1);  --bad-border: rgba(255, 153, 164, .2);
+    --info: #b9a6ff;    --info-bg: rgba(185, 166, 255, .1); --info-border: rgba(185, 166, 255, .2);
+    --neutral: #b4b4b9; --neutral-bg: rgba(255, 255, 255, .07); --neutral-border: rgba(255, 255, 255, .08);
+
+    --code-bg: rgba(0, 0, 0, .2);
+    --log-bg: #141414;
+
+    /* Fluent fills and strokes (dark) */
+    --fill-card: rgba(255, 255, 255, .065);
+    --fill-card-hover: rgba(255, 255, 255, .085);
+    --fill-control: rgba(255, 255, 255, .061);
+    --fill-control-hover: rgba(255, 255, 255, .084);
+    --fill-control-press: rgba(255, 255, 255, .033);
+    --fill-input-focus: rgba(20, 20, 20, .7);
+    --fill-subtle-hover: rgba(255, 255, 255, .045);
+    --fill-subtle-select: rgba(255, 255, 255, .08);
+    --fill-subtle-press: rgba(255, 255, 255, .08);
+    --stroke-card: rgba(255, 255, 255, .055);
+    --stroke-card-top: rgba(255, 255, 255, .09);
+    --stroke-card-bottom: rgba(0, 0, 0, .35);
+    --stroke-control: rgba(255, 255, 255, .07);
+    --stroke-control-top: rgba(255, 255, 255, .093);
+    --stroke-control-bottom: rgba(255, 255, 255, .05);
+    --stroke-input-bottom: rgba(255, 255, 255, .55);
+    --stroke-accent-top: rgba(255, 255, 255, .08);
+    --stroke-accent-bottom: rgba(0, 0, 0, .14);
+    --stroke-strong: rgba(255, 255, 255, .6);
+    --acrylic: rgba(44, 44, 46, .94);
+    --dialog-bg: #2b2b2d;
+    --dialog-foot: #222224;
+    --dialog-stroke: rgba(0, 0, 0, .45);
+    --knob-off: #cfcfd2;
+    --switch-on-knob: #00172b;
+    /* one blue: the filled accent matches the indicator and brand mark (9.6:1 with #00172b) */
+    --primary-bg: #4cc2ff;
+    --primary-hover: #47b1e8;
+    --primary-active: #42a1d2;
+    --auth-bloom: transparent;
+    --badge-bg: var(--accent);
+    --badge-fg: #00172b;
+    --wash-accent: color-mix(in srgb, #4cc2ff 6%, #2b2b2b); --wash-ok: color-mix(in srgb, #6ccb5f 5%, #2b2b2b); --wash-warn: color-mix(in srgb, #f2c661 3%, #2b2b2b); --wash-bad: color-mix(in srgb, #ff99a4 5%, #2b2b2b);
+    --card-lift: 0 1px 2px rgba(0, 0, 0, .18);
+
+    --shadow-xs: none;
+    --shadow-flyout: 0 0 0 1px rgba(0, 0, 0, .35), 0 8px 16px rgba(0, 0, 0, .26);
+    --shadow-pop: var(--shadow-flyout);
+    --shadow-modal: 0 0 0 1px rgba(0, 0, 0, .45), 0 2px 6px rgba(0, 0, 0, .2), 0 24px 48px rgba(0, 0, 0, .34);
+    --shadow-auth: var(--shadow-modal);
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  /* Win11 dark Mica: neutral charcoal; the content layer sits a step darker */
+  --bg: #202022;
+  --mica:
+    radial-gradient(1500px 1050px at -8% -12%, rgba(60, 130, 220, .09), transparent 64%),
+    radial-gradient(1200px 900px at 108% -8%, rgba(118, 100, 220, .06), transparent 62%);
+  --layer: rgba(0, 0, 0, .28);
+  --layer-stroke: rgba(255, 255, 255, .06);
+
+  --surface: rgba(255, 255, 255, .05);
+  --surface-2: rgba(255, 255, 255, .06);
+  --surface-3: rgba(255, 255, 255, .085);
+  --overlay: rgba(0, 0, 0, .5);
+  --border: rgba(255, 255, 255, .07);
+  --border-strong: rgba(255, 255, 255, .12);
+
+  --text: #f3f3f4;
+  --text-2: #c5c5c9;
+  --text-3: #9d9da3;
+  --text-on-accent: #00172b;
+
+  --accent: #4cc2ff;
+  --accent-hover: #47b1e8;
+  --accent-active: #42a1d2;
+  --accent-subtle: rgba(76, 194, 255, .1);
+  --accent-text: #86d5ff;
+  --focus: rgba(255, 255, 255, .9);
+
+  --ok: #6ccb5f;      --ok-bg: rgba(108, 203, 95, .1);    --ok-border: rgba(108, 203, 95, .2);
+  --warn: #f2c661;    --warn-bg: rgba(252, 225, 0, .06);  --warn-border: rgba(245, 195, 90, .18);
+  --bad: #ff99a4;     --bad-bg: rgba(255, 153, 164, .1);  --bad-border: rgba(255, 153, 164, .2);
+  --info: #b9a6ff;    --info-bg: rgba(185, 166, 255, .1); --info-border: rgba(185, 166, 255, .2);
+  --neutral: #b4b4b9; --neutral-bg: rgba(255, 255, 255, .07); --neutral-border: rgba(255, 255, 255, .08);
+
+  --code-bg: rgba(0, 0, 0, .2);
+  --log-bg: #141414;
+
+  /* Fluent fills and strokes (dark) */
+  --fill-card: rgba(255, 255, 255, .065);
+  --fill-card-hover: rgba(255, 255, 255, .085);
+  --fill-control: rgba(255, 255, 255, .061);
+  --fill-control-hover: rgba(255, 255, 255, .084);
+  --fill-control-press: rgba(255, 255, 255, .033);
+  --fill-input-focus: rgba(20, 20, 20, .7);
+  --fill-subtle-hover: rgba(255, 255, 255, .045);
+  --fill-subtle-select: rgba(255, 255, 255, .08);
+  --fill-subtle-press: rgba(255, 255, 255, .08);
+  --stroke-card: rgba(255, 255, 255, .055);
+  --stroke-card-top: rgba(255, 255, 255, .09);
+  --stroke-card-bottom: rgba(0, 0, 0, .35);
+  --stroke-control: rgba(255, 255, 255, .07);
+  --stroke-control-top: rgba(255, 255, 255, .093);
+  --stroke-control-bottom: rgba(255, 255, 255, .05);
+  --stroke-input-bottom: rgba(255, 255, 255, .55);
+  --stroke-accent-top: rgba(255, 255, 255, .08);
+  --stroke-accent-bottom: rgba(0, 0, 0, .14);
+  --stroke-strong: rgba(255, 255, 255, .6);
+  --acrylic: rgba(44, 44, 46, .94);
+  --dialog-bg: #2b2b2d;
+  --dialog-foot: #222224;
+  --dialog-stroke: rgba(0, 0, 0, .45);
+  --knob-off: #cfcfd2;
+  --switch-on-knob: #00172b;
+  /* one blue: the filled accent matches the indicator and brand mark (9.6:1 with #00172b) */
+  --primary-bg: #4cc2ff;
+  --primary-hover: #47b1e8;
+  --primary-active: #42a1d2;
+  --auth-bloom: transparent;
+  --badge-bg: var(--accent);
+  --badge-fg: #00172b;
+  --wash-accent: color-mix(in srgb, #4cc2ff 6%, #2b2b2b); --wash-ok: color-mix(in srgb, #6ccb5f 5%, #2b2b2b); --wash-warn: color-mix(in srgb, #f2c661 3%, #2b2b2b); --wash-bad: color-mix(in srgb, #ff99a4 5%, #2b2b2b);
+  --card-lift: 0 1px 2px rgba(0, 0, 0, .18);
+
+  --shadow-xs: none;
+  --shadow-flyout: 0 0 0 1px rgba(0, 0, 0, .35), 0 8px 16px rgba(0, 0, 0, .26);
+  --shadow-pop: var(--shadow-flyout);
+  --shadow-modal: 0 0 0 1px rgba(0, 0, 0, .45), 0 2px 6px rgba(0, 0, 0, .2), 0 24px 48px rgba(0, 0, 0, .34);
+  --shadow-auth: var(--shadow-modal);
+}
+
+/* ---------- base ---------- */
+html { background: var(--bg); }
+body {
+  background: var(--mica), var(--bg);
+  background-attachment: fixed;
+  font-feature-settings: "kern";
+}
+h1, h2, h3 { font-family: var(--font-display); letter-spacing: 0; }
+h1 { font-weight: 600; line-height: 1.3; }
+::selection { background: color-mix(in srgb, var(--accent) 28%, transparent); }
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; border-radius: 4px; }
+
+/* ---------- shell: nav pane + bar on Mica, content on a layer sheet ---------- */
+.app { position: relative; }
+.app::before {
+  content: ""; position: fixed; z-index: 0; top: 48px; right: 0; bottom: 0; left: var(--sidebar-w);
+  background: var(--layer);
+  border-top: 1px solid var(--layer-stroke);
+  border-left: 1px solid var(--layer-stroke);
+  border-top-left-radius: 8px;
+  pointer-events: none;
+}
+.main { position: relative; z-index: 1; }
+
+.sidebar {
+  background: transparent; border-right: 0;
+  padding: var(--sp-2) var(--sp-1) var(--sp-3);
+  gap: 0;
+}
+.sidebar-brand { padding: 10px 12px var(--sp-4) 14px; }
+.brand { font-family: var(--font-display); font-size: 14px; font-weight: 600; letter-spacing: 0; gap: 12px; }
+.brand-sub { font-size: 12px; color: var(--text-3); }
+.brand-mark { width: 28px; height: 28px; }
+.brand-mark rect { rx: 6px; }
+
+.nav { gap: 2px; padding: 0 4px; }
+.nav-section { padding: var(--sp-4) 14px 6px; font-size: 12px; font-weight: 600; color: var(--text-2); letter-spacing: 0; }
+.nav-item {
+  position: relative; height: 36px; padding: 0 12px 0 14px; gap: 14px;
+  border-radius: 4px; color: var(--text); font-weight: 400; font-size: 14px;
+}
+.nav-item .icon { opacity: 1; color: var(--text); }
+.nav-item:hover { background: var(--fill-subtle-hover); color: var(--text); }
+.nav-item:active { background: var(--fill-subtle-press); color: var(--text-2); }
+.nav-item.active, .nav-item[aria-current="page"] { background: var(--fill-subtle-select); color: var(--text); }
+.nav-item.active:hover, .nav-item[aria-current="page"]:hover { background: var(--fill-subtle-press); }
+.nav-item.active::before, .nav-item[aria-current="page"]::before {
+  content: ""; position: absolute; left: 0; top: 50%; width: 3px; height: 16px; margin-top: -8px;
+  border-radius: 2px; background: var(--accent);
+}
+/* Fluent InfoBadge */
+.nav-badge {
+  min-width: 16px; height: 16px; padding: 0 4px; font-size: 11px; font-weight: 600; line-height: 16px;
+  background: var(--badge-bg); color: var(--badge-fg);
+}
+.nav-item.active .nav-badge { background: var(--badge-bg); }
+.sidebar-foot { border-top: 1px solid var(--border); margin-left: 12px; margin-right: 12px; padding-top: var(--sp-2); }
+.sidebar-foot .nav-item { margin: 0 -8px; }
+.sidebar-status { padding: var(--sp-2) 6px var(--sp-2) 6px; gap: 10px; color: var(--text-2); font-size: 12px; }
+
+/* the bar is part of the Mica frame, so it carries the same fixed backdrop */
+.topbar {
+  background: var(--mica), var(--bg); background-attachment: fixed;
+  -webkit-backdrop-filter: none; backdrop-filter: none;
+  height: 48px; padding: 0 var(--sp-6); border-bottom: 0;
+}
+.topbar.scrolled { border-bottom-color: transparent; }
+.topbar .crumbs { font-size: 13px; color: var(--text-2); gap: 4px; }
+.topbar .crumbs .current { font-weight: 400; color: var(--text); }
+.topbar .btn-ghost { color: var(--text); }
+
+.page { gap: 24px; padding-top: 32px; }
+.page-head { align-items: center; }
+.page-head .titles { gap: 8px; }
+.page-head h1 { font-size: 28px; line-height: 36px; }
+.page-head p { color: var(--text-2); }
+.section-head { margin-top: 0; margin-bottom: 12px; }
+.section-head h2 { font-size: 14px; }
+
+/* ---------- cards: Fluent card fill + elevation stroke ---------- */
+.card, .list, .table-wrap, .inbox {
+  background: var(--fill-card);
+  border: 1px solid var(--stroke-card);
+  border-top-color: var(--stroke-card-top);
+  border-bottom-color: var(--stroke-card-bottom);
+  border-radius: var(--radius-card);
+  box-shadow: var(--card-lift);
+}
+.card .list, .card .table-wrap, .modal .list, .drawer .list { background: transparent; border-color: var(--border); box-shadow: none; }
+.card-head { padding: var(--sp-4) var(--sp-5) 0; min-height: 52px; }
+.card-head h2, .card-title { font-size: 14px; font-weight: 600; letter-spacing: 0; }
+.card-foot { border-top-color: var(--border); }
+.card.interactive { transition: background var(--dur-fast), border-color var(--dur-fast); }
+.card.interactive:hover { background: var(--fill-card-hover); border-color: var(--stroke-card); border-top-color: var(--stroke-card-top); border-bottom-color: var(--stroke-card-bottom); }
+.card > .list.inset { border-top: 1px solid var(--border); border-radius: 0 0 var(--radius-card) var(--radius-card); }
+.card.flush > .table-wrap, .card.flush > .list { border-radius: 0 0 var(--radius-card) var(--radius-card); }
+.card.accent { background: var(--fill-card); border-color: var(--stroke-card); }
+
+.stat { padding: 18px var(--sp-5) 18px; gap: 4px; }
+.stat-label { color: var(--text-2); font-size: 13px; gap: 8px; }
+.stat-label .icon { color: var(--text-3); }
+.stat-value { font-family: var(--font-display); font-size: 28px; font-weight: 600; letter-spacing: 0; line-height: 1.25; margin-top: 4px; }
+.stat-value .unit { font-size: 14px; font-weight: 400; color: var(--text-3); }
+.stat-meta { font-size: 12px; color: var(--text-3); }
+
+.kv { font-size: 13px; }
+
+/* ---------- list ---------- */
+.list-item { border-top-color: var(--border); }
+.list-item .title { font-weight: 400; }
+.list-item .sub { font-size: 12px; color: var(--text-3); }
+.list-item.clickable:hover, .table tbody tr:hover, .thread-item:hover { background: var(--fill-subtle-hover); }
+
+/* ---------- avatar: Fluent PersonPicture (circle); devices/plugins keep a square ---------- */
+.avatar {
+  border-radius: 50%; border: 0; background: var(--surface-3); color: var(--text);
+  font-weight: 600; font-size: 13px;
+}
+.avatar.sm { width: 32px; height: 32px; border-radius: 50%; font-size: 13px; }
+.avatar.lg { border-radius: 8px; background: var(--surface-2); }
+.avatar.accent { background: var(--surface-3); color: var(--text); }
+.avatar.avatar:has(svg), .avatar.avatar:has(img) { border-radius: 8px; background: var(--surface-2); color: var(--text-2); }
+.avatar.icon-avatar, .avatar.os-mark { border-radius: 8px; border: 1px solid var(--border); }
+
+/* ---------- table ---------- */
+.table th, .table td { border-top-color: var(--border); }
+.table thead th { background: transparent; color: var(--text-2); font-size: 12px; font-weight: 400; height: 40px; }
+.table td { padding-top: 11px; padding-bottom: 11px; }
+.table .cell-main .title { font-weight: 400; }
+
+/* ---------- pills / tags ---------- */
+.pill { height: 20px; padding: 0 8px 0 7px; gap: 6px; border-color: transparent; font-weight: 500; font-size: 12px; line-height: 1; }
+.pill::before { width: 6px; height: 6px; }
+.pill.plain { padding: 0 8px; }
+.pill.neutral, .pill:not(.ok):not(.warn):not(.bad):not(.info):not(.accent) { border-color: transparent; }
+/* accent pills stay quiet: neutral chip, only the dot carries the accent */
+.pill.accent { --tone: var(--text-2); --tone-bg: var(--neutral-bg); --tone-border: transparent; font-weight: 500; }
+.pill.accent::before { background: var(--accent); }
+.card-head .pill.accent.plain { font-weight: 400; color: var(--text-2); }
+.tag {
+  height: 22px; padding: 0 7px; border-radius: 4px; border-color: transparent;
+  background: var(--surface-3); color: var(--text-2); font-size: 12px;
+}
+.tag.mono { font-size: 11.5px; }
+.tag.accent { background: var(--accent-subtle); border-color: transparent; color: var(--accent-text); }
+.card-head .tag.accent { background: var(--surface-3); color: var(--text-2); }
+
+/* ---------- buttons: Fluent standard / accent / subtle ---------- */
+.btn {
+  --btn-bg: var(--fill-control); --btn-fg: var(--text); --btn-hover: var(--fill-control-hover);
+  height: var(--control-h); padding: 0 12px; gap: 8px; border-radius: 4px;
+  font-weight: 400; font-size: 14px;
+  border: 1px solid var(--stroke-control);
+  border-top-color: var(--stroke-control-top);
+  border-bottom-color: var(--stroke-control-bottom);
+}
+.btn:active:not(:disabled) { transform: none; background: var(--fill-control-press); color: var(--text-2); }
+.btn:focus-visible { box-shadow: 0 0 0 1px var(--bg), 0 0 0 3px var(--focus); }
+.btn-primary {
+  --btn-bg: var(--primary-bg); --btn-fg: var(--text-on-accent); --btn-hover: var(--primary-hover);
+  border-color: var(--stroke-accent-top); border-bottom-color: var(--stroke-accent-bottom);
+}
+.btn-primary:hover:not(:disabled) { border-color: var(--stroke-accent-top); border-bottom-color: var(--stroke-accent-bottom); }
+.btn-primary:active:not(:disabled) { background: var(--primary-active); color: var(--text-on-accent); border-color: transparent; }
+/* one filled accent per view: secondary primaries inside cards and InfoBars
+   become standard buttons (the page header owns the accent) */
+.page .card .btn-primary, .page .banner .btn-primary {
+  --btn-bg: var(--fill-control); --btn-fg: var(--text); --btn-hover: var(--fill-control-hover);
+  border-color: var(--stroke-control); border-top-color: var(--stroke-control-top); border-bottom-color: var(--stroke-control-bottom);
+}
+.page .card .btn-primary:hover:not(:disabled), .page .banner .btn-primary:hover:not(:disabled) {
+  border-color: var(--stroke-control); border-top-color: var(--stroke-control-top); border-bottom-color: var(--stroke-control-bottom);
+}
+.page .card .btn-primary:active:not(:disabled), .page .banner .btn-primary:active:not(:disabled) { background: var(--fill-control-press); color: var(--text-2); }
+.page .card .btn-primary .icon, .page .banner .btn-primary .icon { color: var(--accent-text); }
+.btn-ghost { --btn-bg: transparent; --btn-hover: var(--fill-subtle-hover); --btn-fg: var(--text-2); border-color: transparent; }
+.btn-ghost:active:not(:disabled) { background: var(--fill-subtle-press); }
+.btn-danger { --btn-fg: var(--bad); }
+.btn-sm { height: var(--control-h-sm); padding: 0 10px; gap: 6px; border-radius: 4px; font-size: 13px; }
+.btn-lg { height: 40px; padding: 0 20px; border-radius: 4px; font-size: 14px; }
+.btn-icon { width: var(--control-h); padding: 0; }
+.btn-icon.btn-sm { width: var(--control-h-sm); }
+
+/* ---------- forms: Fluent text box with underline ---------- */
+.field > label, .field-label { font-weight: 400; font-size: 14px; }
+.input, .select, .textarea {
+  height: var(--control-h); border-radius: 4px; background-color: var(--fill-control);
+  border: 1px solid var(--stroke-control); border-bottom-color: var(--stroke-input-bottom);
+  padding: 0 11px; font-size: 14px;
+}
+.input:hover, .select:hover, .textarea:hover { background-color: var(--fill-control-hover); border-color: var(--stroke-control); border-bottom-color: var(--stroke-input-bottom); }
+.input:focus, .select:focus, .textarea:focus {
+  background-color: var(--fill-input-focus); border-color: var(--stroke-control);
+  border-bottom-color: var(--accent); box-shadow: inset 0 -1px 0 var(--accent);
+}
+.textarea { padding: 6px 11px; }
+.input-lg { height: 40px; font-size: 15px; }
+.input-group .input { border-radius: 4px 0 0 4px; }
+.input-group .btn { border-radius: 0 4px 4px 0; }
+.check input { accent-color: var(--accent); }
+
+.segmented { border-radius: 6px; padding: 2px; gap: 2px; background: var(--surface-2); border: 1px solid var(--border); }
+.segmented label, .segmented button { height: 28px; border-radius: 4px; font-weight: 400; font-size: 13px; color: var(--text-2); }
+.segmented label:has(input:checked), .segmented button[aria-pressed="true"], .segmented .on {
+  background: var(--dialog-bg); color: var(--text);
+  box-shadow: 0 0 0 1px var(--stroke-control), 0 1px 0 var(--stroke-control-bottom);
+}
+.choice { border-radius: 8px; background: var(--fill-control); border-color: var(--stroke-card); }
+.choice:has(input:checked) { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); background: var(--accent-subtle); }
+
+/* Fluent toggle switch */
+.switch { gap: 12px; }
+.switch > span:first-of-type {
+  width: 40px; height: 20px; background: transparent;
+  border: 1px solid var(--stroke-strong); box-shadow: none;
+}
+.switch > span:first-of-type::after {
+  top: 3px; left: 3px; width: 12px; height: 12px; background: var(--knob-off); box-shadow: none;
+  transition: transform var(--dur) var(--ease), width var(--dur-fast), height var(--dur-fast);
+}
+.switch:hover > span:first-of-type { background: var(--fill-subtle-hover); }
+.switch:hover > span:first-of-type::after { width: 14px; height: 14px; top: 2px; left: 2px; }
+.switch input:checked + span { background: var(--accent); border-color: var(--accent); }
+.switch input:checked + span::after { background: var(--switch-on-knob); transform: translateX(20px); }
+.switch input:focus-visible + span { box-shadow: 0 0 0 1px var(--bg), 0 0 0 3px var(--focus); }
+
+/* ---------- tabs: Fluent SelectorBar ---------- */
+.tabs { border-bottom: 0; gap: 4px; }
+.tab { display: inline-flex; align-items: center; gap: 6px; height: 36px; padding: 0 12px; border-radius: 4px; color: var(--text-2); font-weight: 400; font-size: 14px; }
+.tab:hover { background: var(--fill-subtle-hover); color: var(--text); }
+.tab[aria-selected="true"], .tab.active { color: var(--text); font-weight: 600; }
+.tab[aria-selected="true"]::after, .tab.active::after {
+  left: 50%; right: auto; width: 16px; margin-left: -8px; bottom: 0; height: 3px; border-radius: 2px; background: var(--accent);
+}
+.tab .count {
+  display: inline-flex; align-items: center; justify-content: center; height: 18px; min-width: 18px; padding: 0 6px;
+  border-radius: 9px; background: var(--surface-3); color: var(--text-2); font-size: 12px; font-weight: 400; line-height: 1; vertical-align: middle;
+}
+
+/* ---------- banner: Fluent InfoBar ----------
+   A clean pale wash of the tone mixed on a solid base (never on a
+   translucent fill, which goes muddy); colour lives on the glyph and an
+   inset pill that echoes the nav selection indicator. */
+.banner {
+  --tone: var(--accent-text);
+  position: relative;
+  border-radius: 8px; padding: 13px var(--sp-4) 13px 22px;
+  --wash: var(--wash-accent);
+  background: var(--wash);
+  border: 1px solid color-mix(in srgb, var(--tone) 22%, transparent);
+  gap: 14px; color: var(--text);
+}
+.banner::before {
+  content: ""; position: absolute; left: 6px; top: 14px; bottom: 14px; width: 3px;
+  border-radius: 2px; background: var(--tone);
+}
+.banner > .icon { color: var(--tone); margin-top: 2px; }
+.banner .banner-title { font-weight: 600; }
+.banner .muted { color: var(--text-2); }
+.banner.ok { --tone: var(--ok); --wash: var(--wash-ok); }
+.banner.warn { --tone: var(--warn); --wash: var(--wash-warn); }
+.banner.bad { --tone: var(--bad); --wash: var(--wash-bad); }
+.banner.accent { --tone: var(--accent); --wash: var(--wash-accent); }
+.banner.accent > .icon { color: var(--accent-text); }
+.modal .banner, .drawer .banner { background: var(--wash); }
+
+/* ---------- code ---------- */
+.token, .code-block { border-radius: 4px; border-color: var(--border); background: var(--code-bg); }
+.token code { color: var(--text); }
+.log { border-radius: 8px; }
+kbd { border-radius: 4px; background: var(--fill-control); }
+
+/* ---------- steps ---------- */
+.step::before { background: transparent; border-color: var(--border-strong); color: var(--text-2); font-weight: 600; }
+.step.done::before { background: var(--ok-bg); border-color: transparent; color: var(--ok); }
+.step.current::before { background: var(--accent); border-color: var(--accent); color: var(--text-on-accent); }
+.step:not(:last-child)::after { background: var(--border-strong); }
+.step .step-title { font-weight: 400; }
+
+/* ---------- flyouts / dialogs: Acrylic and ContentDialog ---------- */
+.menu, .toast, .topo-card, .topo-panel {
+  background: var(--acrylic); border: 0; border-radius: 8px; box-shadow: var(--shadow-flyout);
+  -webkit-backdrop-filter: blur(30px) saturate(1.25); backdrop-filter: blur(30px) saturate(1.25);
+}
+.menu { padding: 4px; }
+.menu-item { height: 32px; border-radius: 4px; font-size: 14px; }
+.menu-item:hover { background: var(--fill-subtle-hover); }
+.modal { border-radius: 8px; border: 1px solid var(--dialog-stroke); background: var(--dialog-bg); box-shadow: var(--shadow-modal); }
+.modal-head { padding: var(--sp-5) var(--sp-5) var(--sp-3); }
+.modal-head h2, .drawer-head h2 { font-size: 20px; font-weight: 600; }
+.modal-foot, .drawer-foot { background: var(--dialog-foot); border-top-color: var(--border); border-radius: 0 0 8px 8px; padding: var(--sp-5) var(--sp-5); }
+.drawer { background: var(--dialog-bg); border-left: 1px solid var(--dialog-stroke); }
+.drawer-foot { border-radius: 0; }
+.toast { padding: 14px 16px; }
+
+/* ---------- auth: a Windows sign-in dialog on Mica ---------- */
+.auth { background: var(--mica), var(--bg); background-attachment: fixed; }
+.auth-card {
+  width: min(400px, 100%); border-radius: 8px; padding: 32px 28px 28px; gap: var(--sp-5);
+  background: var(--dialog-bg); border: 0; box-shadow: var(--shadow-auth);
+}
+.auth-head h1 { font-size: 20px; }
+.auth-head .brand-mark { width: 40px; height: 40px; }
+.auth-card .btn-lg { height: 36px; }
+
+/* ---------- inbox ---------- */
+.inbox-list, .inbox-list .inbox-toolbar, .thread-item, .message, .composer { border-color: var(--border); }
+.thread-item { position: relative; }
+.thread-item.active { background: var(--fill-subtle-select); }
+.thread-item.active::before { content: ""; position: absolute; left: 0; top: 50%; width: 3px; height: 16px; margin-top: -8px; border-radius: 2px; background: var(--accent); }
+.ask-card { border-radius: 8px; border-color: color-mix(in srgb, var(--accent) 30%, transparent); }
+
+/* ---------- misc ---------- */
+.empty .empty-icon { border-radius: 8px; }
+.chip { border-radius: 4px; background: var(--fill-control); border-color: var(--stroke-control); }
+.qr-box { border-radius: 8px; }
+.topo-tools .btn { background: var(--fill-control); }
+
+/* ---------- responsive ---------- */
+@media (max-width: 1023px) and (min-width: 769px) {
+  .app::before { left: var(--rail-w); }
+  .sidebar { padding: var(--sp-3) 8px; }
+  .nav { padding: 0; }
+  .nav-item { width: 44px; padding: 0; }
+  .sidebar-foot { margin: 0; }
+}
+@media (max-width: 768px) {
+  .app::before { left: 0; border-left: 0; border-top-left-radius: 0; }
+  .page { padding-top: var(--sp-5); }
+  .sidebar.open { background: var(--acrylic); -webkit-backdrop-filter: blur(30px) saturate(1.25); backdrop-filter: blur(30px) saturate(1.25); border-right: 1px solid var(--stroke-card); }
+  .tabbar { background: var(--acrylic); -webkit-backdrop-filter: blur(30px) saturate(1.25); backdrop-filter: blur(30px) saturate(1.25); border-top-color: var(--stroke-card); }
+  .tabbar .active { color: var(--accent-text); }
+  .modal, .modal.sm, .modal.lg, .drawer, .drawer.lg { border-radius: 8px 8px 0 0; }
+}
