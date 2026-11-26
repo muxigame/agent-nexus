@@ -563,6 +563,7 @@ class CodexExec(Adapter):
             self.session_id = obj["thread_id"]
             return [{"type": "status", "state": "running", "session_id": self.session_id}]
         if kind == "turn.started":
+            self._warned = set()
             return [{"type": "status", "state": "running", "session_id": self.session_id}]
         if kind == "turn.completed":
             self._turn_done = True
@@ -575,7 +576,7 @@ class CodexExec(Adapter):
             return [{"type": "error", "text": str(error.get("message") or "Codex 这一轮失败了")},
                     {"type": "status", "state": "failed", "session_id": self.session_id}]
         if kind == "error":
-            return [{"type": "error", "text": str(obj.get("message") or "Codex 报告了一个错误")}]
+            return self._warn(str(obj.get("message") or "Codex 报告了一个错误"))
         if kind in ("item.started", "item.updated", "item.completed") and isinstance(obj.get("item"), dict):
             return self._item(obj["item"], kind.split(".")[1])
         return []
@@ -644,8 +645,19 @@ class CodexExec(Adapter):
             return [{"type": "tool", "id": item_id or "todo", "name": "todo_list", "title": "任务清单",
                      "status": "ok", "output": "\n".join(lines)}]
         if kind == "error":
-            return [{"type": "error", "text": str(item.get("message") or "Codex 报告了一个错误")}] if done else []
+            return self._warn(str(item.get("message") or "Codex 报告了一个错误")) if done else []
         return []
+
+    def _warn(self, text: str) -> list[dict]:
+        """Codex's ``error`` events and items are non-fatal (a failed turn comes as ``turn.failed``) and the same
+        notice (e.g. "ignoring 1 unrecognized configuration setting") arrives as both: once per turn, as a warning."""
+        seen = getattr(self, "_warned", None)
+        if seen is None:
+            seen = self._warned = set()
+        if text in seen:
+            return []
+        seen.add(text)
+        return [{"type": "error", "level": "warn", "text": text}]
 
     def _legacy(self, msg: dict) -> list[dict]:
         kind = msg.get("type")

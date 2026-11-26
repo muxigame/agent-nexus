@@ -570,6 +570,20 @@ def test_codex_legacy_format():
     assert adapter.exited(0, "") == []
 
 
+
+def test_codex_nonfatal_error_is_one_warning_per_turn():
+    # seen on a real device: the user's config.toml warning arrives as an error item and a top-level error event
+    adapter = adapters.make(registry.builtin_definitions()["codex"], adapters.AdapterOptions(binary="x", workdir="/w"))
+    adapter.argv("hi")
+    note = "Codex is ignoring 1 unrecognized configuration setting."
+    adapter.feed('{"type": "turn.started"}')
+    first = adapter.feed(json.dumps({"type": "item.completed", "item": {"id": "e", "type": "error", "message": note}}))
+    assert first == [{"type": "error", "level": "warn", "text": note}]
+    assert adapter.feed(json.dumps({"type": "error", "message": note})) == []
+    adapter.feed('{"type": "turn.completed", "usage": {}}')
+    adapter.feed('{"type": "turn.started"}')
+    assert adapter.feed(json.dumps({"type": "error", "message": note}))[0]["level"] == "warn"
+
 def test_approve_mcp_protocol(monkeypatch, capsys):
     monkeypatch.setattr(approve_mcp, "decide", lambda url, token, arguments, **_: {"behavior": "allow",
                                                                                     "updatedInput": arguments["input"]})
