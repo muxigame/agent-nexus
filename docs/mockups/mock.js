@@ -37,6 +37,13 @@ const NAV = {
 
 const params = new URLSearchParams(location.search);
 if (params.get("theme")) setTheme(params.get("theme"));
+// ?skin=<name> layers docs/mockups/skins/<name>.css over tokens.css + ui.css (style exploration).
+if (params.get("skin")) {
+  const link = document.createElement("link");
+  link.rel = "stylesheet";
+  link.href = new URL(`skins/${params.get("skin")}.css`, import.meta.url).href;
+  document.head.append(link);
+}
 
 const body = document.body;
 const kind = body.dataset.shell;
