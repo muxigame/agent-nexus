@@ -388,11 +388,30 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
                              "accounts": anx_accounts.configured(sup.cfg.root),
                              "users": await run_in_threadpool(anx_accounts.local_users)})
 
+    #: device id -> (monotonic time, its shells and CLIs): the 终端 page shows them at once and
+    #: they are refreshed behind it (through the gateway: a round trip abroad and back)
+    terminal_infos: dict[str, tuple[float, dict]] = {}
+
     async def remote_terminal_info(request: Request) -> JSONResponse:
+        import time as _time
         try:
             lock.require_unlocked()
-            return JSONResponse(await remote.terminal_info(sup.cfg.root, request.path_params["device_id"],
-                                                           refresh=request.query_params.get("refresh") == "1"))
+            device_id = request.path_params["device_id"]
+            refresh = request.query_params.get("refresh") == "1"
+            prefetch_ticket(device_id, "terminal")  # the page opens its socket next
+
+            async def fetch() -> dict:
+                info = await remote.terminal_info(sup.cfg.root, device_id, refresh=refresh)
+                terminal_infos[device_id] = (_time.monotonic(), info)
+                return info
+
+            cached = terminal_infos.get(device_id)
+            if cached is not None and not refresh and _time.monotonic() - cached[0] < 600:
+                if _time.monotonic() - cached[0] > 30:
+                    task = asyncio.ensure_future(fetch())
+                    task.add_done_callback(lambda done: done.cancelled() or done.exception())
+                return JSONResponse(cached[1])
+            return JSONResponse(await fetch())
         except LockError as exc:
             return lock_error(exc)
         except remote.RemoteError as exc:
@@ -570,6 +589,44 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
             return (HubPath(port, relay_ticket=relay_ticket["ticket"], target=device_id, label=name), route, ticket)
         return None
 
+    #: (device, service) -> a ticket fetched ahead: the 终端 page asks for one while it loads, the
+    #: desktop's prepare keeps the one it got for the socket. A ticket is a gateway round trip
+    #: (two, through the device: ~0.7 s with the gateway abroad), valid 60 s and good for one stream.
+    ticket_stash: dict[tuple[str, str], asyncio.Future] = {}
+    TICKET_FRESH_S = 40.0
+
+    async def fetch_ticket(device_id: str, service: str) -> dict:
+        import time as _time
+        started = _time.monotonic()
+        ticket = await hub.call("remote_ticket", {"device_id": device_id, "service": service}, timeout=20)
+        return {**ticket, "_at": started}
+
+    def prefetch_ticket(device_id: str, service: str) -> None:
+        if (device_id, service) in ticket_stash or not hub.available:
+            return
+        task = asyncio.ensure_future(fetch_ticket(device_id, service))
+        task.add_done_callback(lambda done: done.cancelled() or done.exception())  # never "unretrieved"
+        ticket_stash[(device_id, service)] = task
+
+    def stash_ticket(device_id: str, service: str, ticket: str) -> None:
+        import time as _time
+        future = asyncio.get_running_loop().create_future()
+        future.set_result({"ticket": ticket, "server_id": device_id, "_at": _time.monotonic()})
+        ticket_stash[(device_id, service)] = future
+
+    async def take_ticket(device_id: str, service: str) -> dict:
+        """The stashed ticket when it is still fresh, else a new one."""
+        import time as _time
+        stashed = ticket_stash.pop((device_id, service), None)
+        if stashed is not None:
+            try:
+                ticket = await stashed
+                if _time.monotonic() - ticket["_at"] < TICKET_FRESH_S:
+                    return ticket
+            except Exception:
+                pass
+        return await fetch_ticket(device_id, service)
+
     async def p2p_link(device_id: str, service: str, direct: bool = True) -> tuple["Path", str, str]:
         """(path, route, ticket) for a stream to ``device_id``'s remote hub.
 
@@ -578,7 +635,7 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
         through a relay at once and the punch carries on, so the next stream is direct.
         ``direct=False`` (``route=mesh`` on the API, for diagnosis) takes a relay straight away.
         """
-        ticket = await hub.call("remote_ticket", {"device_id": device_id, "service": service}, timeout=20)
+        ticket = await take_ticket(device_id, service)
         target = ticket["server_id"]
         if not direct:
             relayed = await relay_path(device_id, ticket["ticket"], "按要求不直连")
@@ -630,8 +687,9 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
             if config is None:
                 raise remote.RemoteError(409, "网关未开启直连（需要 0.5.0 以上）", "no_p2p")
             device_id = request.path_params["device_id"]
-            # Only the route matters here; the ticket is thrown away (terminal: every device has one).
-            path, route, _ticket = await p2p_link(device_id, "terminal")
+            # The route for the page, and the ticket for the socket that follows (saves a round trip).
+            path, route, ticket = await p2p_link(device_id, "desktop")
+            stash_ticket(device_id, "desktop", ticket)
             return JSONResponse({"route": route, "relayed": path.relayed})
         except LockError as exc:
             return lock_error(exc)
@@ -1109,6 +1167,7 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
         from . import accounts as anx_accounts
         terminals = anx_terminal.Terminals(account=lambda: anx_accounts.effective(sup.cfg.root, "terminal"))
         hub.handlers.update(terminals.handlers())
+        hub.on_attach.append(terminals.warm)  # the first 终端 must not wait for the shell / CLI scan
         hub.extra_features = (*hub.extra_features, anx_terminal.FEATURE)
 
     # -- file transfer (files/1): this device's files for the others, relay and P2P --

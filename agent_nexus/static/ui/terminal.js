@@ -33,14 +33,20 @@ export async function terminalPage(ctx, { params }, api = GATEWAY_TERMINAL_API) 
   let device = null;
   let info = null;
   try {
-    const list = await fetchJSON(api.devices, { quiet: true });
+    // all at once: the device list, its shells (cached by the client, which also fetches the
+    // socket's ticket meanwhile) and xterm.js -- one after another they added up to seconds
+    const [list, fetched] = await Promise.all([
+      fetchJSON(api.devices, { quiet: true }),
+      fetchJSON(api.info(deviceId), { quiet: true }).catch((error) => ({ failed: error })),
+      loadVendor(),
+    ]);
     if (list.lock?.locked) throw new Error("这台设备已锁定，解锁后才能操作其他设备（右上角的锁）");
     device = (list.devices || []).find((d) => d.device_id === deviceId || d.agent_id === deviceId);
     if (!device) throw new Error("没有这台设备");
     if (!device.online) throw new Error(`${device.display_name} 现在不在线`);
     if (!device.terminal) throw new Error(`${device.display_name} 的客户端（${device.version || "旧版本"}）不支持远程终端，升级到 0.3.0 以上后重试`);
-    info = await fetchJSON(api.info(deviceId), { quiet: true });
-    await loadVendor();
+    if (fetched.failed) throw fetched.failed;
+    info = fetched;
   } catch (error) {
     mount(page, el("div", { class: "page-head" }, el("div", { class: "titles" }, el("h1", {}, "终端"))),
       errorState(error, () => terminalPage(ctx, { params }, api)));
@@ -64,6 +70,14 @@ export async function terminalPage(ctx, { params }, api = GATEWAY_TERMINAL_API) 
   const keys = el("div", { class: "term-keys" }, EXTRA_KEYS.map(([label, bytes]) =>
     el("button", { class: "btn btn-sm", type: "button", onclick: () => { send(bytes); term.focus(); } }, label)));
   const clis = info.clis || [];
+  /** What a tool chip types: its name, or its full path when it is on no PATH (the codex inside the
+   *  ChatGPT / Codex app); PowerShell runs a quoted path only after `&`. */
+  const typed = (cli) => {
+    if (cli.id === "python") return cli.path.split(/[\\/]/).pop().replace(/\.exe$/i, "");
+    const command = cli.command || cli.id;
+    if (!/[\\/]/.test(command)) return command;
+    return /^(pwsh|powershell)/.test(shellId) ? `& "${command}"` : `"${command}"`;
+  };
   const openExternal = api.external ? el("button", { class: "btn btn-sm", type: "button", title: "在这台电脑的终端（Windows Terminal 等）里打开",
     onclick: async () => {
       try {
@@ -91,7 +105,7 @@ export async function terminalPage(ctx, { params }, api = GATEWAY_TERMINAL_API) 
   const cliCard = el("section", { class: "card" },
     el("div", { class: "card-head" }, el("h2", {}, "这台设备上的命令行工具"), el("span", { class: "faint xs" }, `${clis.length} 个 · 点击输入`)),
     el("div", { class: "card-body" }, clis.length ? el("div", { class: "chips" }, clis.map((cli) =>
-      el("button", { class: "chip", type: "button", title: cli.path, onclick: () => { send(`${cli.id === "python" ? cli.path.split(/[\\/]/).pop().replace(/\.exe$/i, "") : cli.id} `); term.focus(); } },
+      el("button", { class: "chip", type: "button", title: cli.path, onclick: () => { send(`${typed(cli)} `); term.focus(); } },
         el("span", {}, cli.name), cli.version ? el("span", { class: "mono faint" }, cli.version) : null)))
       : el("p", { class: "muted small" }, "PATH 里没有找到常见的命令行工具。")));
   mount(page, el("div", { class: "term-shell" }, toolbar, frame, keys), cliCard);

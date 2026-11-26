@@ -265,3 +265,57 @@ def test_cli_gateway_origin_rules(tmp_path, monkeypatch):
     for wanted in ("b", "c", "zzz"):
         with pytest.raises(TermCliError):
             _pick_device(devices, wanted)
+
+
+def test_info_never_waits_for_the_cli_scan(monkeypatch):
+    """Opening a terminal asked for the CLI list, and the ~30 ``--version`` probes took seconds."""
+    release = threading.Event()
+    scans = []
+
+    def slow_scan():
+        scans.append(1)
+        release.wait(5)
+        return [{"id": "git", "name": "Git", "path": "/usr/bin/git", "version": "2.45"}]
+
+    monkeypatch.setattr(terminal, "detect_clis", slow_scan)
+    monkeypatch.setattr(terminal, "detect_shells", lambda *_: [terminal.Shell("sh", "sh", ["/bin/sh"])])
+    terms = terminal.Terminals(home="/tmp")
+
+    async def run():
+        started = time.monotonic()
+        first = await terms.info({})
+        assert time.monotonic() - started < 1 and first["clis"] == [] and first["clis_scanning"]
+        scanning = terms._clis_task
+        again = await terms.info({})  # still scanning: no second scan
+        assert again["clis_scanning"] and terms._clis_task is scanning
+        release.set()
+        await terms._clis_task
+        assert scans == [1]
+        done = await terms.info({})
+        assert done["clis"][0]["id"] == "git" and not done["clis_scanning"]
+        terms._clis = (time.monotonic() - 601, done["clis"])  # stale: rescanned behind the answer
+        stale = await terms.info({})
+        assert stale["clis"][0]["id"] == "git" and stale["clis_scanning"]
+        await terms._clis_task
+        assert scans == [1, 1]
+        refreshed = await terms.info({"refresh": True})  # 刷新 waits for a fresh scan
+        assert refreshed["clis"] and scans == [1, 1, 1]
+
+    asyncio.run(run())
+
+
+def test_warm_scans_ahead():
+    terms = terminal.Terminals(home="/tmp")
+    calls = []
+    terms.shells = lambda: _done(calls.append("shells"))
+    terms._scan_clis = lambda: calls.append("clis")
+
+    async def run():
+        await terms.warm()
+
+    asyncio.run(run())
+    assert calls == ["shells", "clis"]
+
+
+async def _done(_value=None):
+    return []

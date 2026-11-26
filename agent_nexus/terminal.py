@@ -190,16 +190,26 @@ def _version_of(path: str, args: tuple[str, ...]) -> str | None:
 
 
 def detect_clis() -> list[dict]:
+    from . import agent_cli
+    agents = agent_cli.runtimes()  # Claude Code / Codex also outside this process's PATH
     found = []
     for cli_id, label, names, args in CLI_CATALOG:
+        agent = agents.get(cli_id) or {}
+        if agent.get("available"):
+            # ``command``: what to type -- the full path when it is on no PATH (the desktop app's codex)
+            command = cli_id if agent.get("on_path") else agent["path"]
+            found.append((cli_id, label + ("（ChatGPT / Codex 应用自带）" if agent.get("source") == "app" else ""),
+                          agent["path"], args, command))
+            continue
         path = next((p for p in (shutil.which(name) for name in names) if p), None)
         if path:
-            found.append((cli_id, label, path, args))
+            found.append((cli_id, label, path, args, cli_id))
     results: list[dict | None] = [None] * len(found)
 
     def probe(index: int) -> None:
-        cli_id, label, path, args = found[index]
-        results[index] = {"id": cli_id, "name": label, "path": path, "version": _version_of(path, args)}
+        cli_id, label, path, args, command = found[index]
+        results[index] = {"id": cli_id, "name": label, "path": path, "command": command,
+                          "version": _version_of(path, args)}
 
     threads = [threading.Thread(target=probe, args=(i,), daemon=True) for i in range(len(found))]
     for start in range(0, len(threads), 8):
@@ -390,6 +400,8 @@ class Terminals:
         self.account = account or (lambda: None)
         self._shells: list[Shell] | None = None
         self._clis: tuple[float, list[dict]] | None = None
+        #: the CLI scan running in the background (it runs ~30 ``--version`` probes: seconds)
+        self._clis_task: asyncio.Task | None = None
 
     # -- discovery
     async def shells(self) -> list[Shell]:
@@ -400,15 +412,35 @@ class Terminals:
             self._shells_for = key
         return self._shells
 
+    def _scan_clis(self) -> asyncio.Task:
+        if self._clis_task is None or self._clis_task.done():
+            async def scan() -> None:
+                self._clis = (time.monotonic(), await asyncio.to_thread(detect_clis))
+            self._clis_task = asyncio.ensure_future(scan())
+        return self._clis_task
+
+    async def warm(self) -> None:
+        """Find the shells and scan the CLIs before anyone opens a terminal (on connecting)."""
+        await self.shells()
+        if self._clis is None:
+            self._scan_clis()
+
     async def info(self, params: dict) -> dict:
+        """Shells and CLIs at once: the CLI list is the last scan (empty until the first one is
+        done) and a stale one is rescanned in the background. The scan probes ~30 tools'
+        ``--version``, seconds on Windows (az, gcloud, java): opening a terminal waited for it.
+        ``refresh`` waits for a fresh scan (the console's 刷新)."""
         refresh = bool(params.get("refresh"))
         if refresh:
             self._shells = None
         shells = await self.shells()
-        if refresh or self._clis is None or time.monotonic() - self._clis[0] > 600:
-            self._clis = (time.monotonic(), await asyncio.to_thread(detect_clis))
+        if refresh:
+            await self._scan_clis()
+        elif self._clis is None or time.monotonic() - self._clis[0] > 600:
+            self._scan_clis()
         account = self.account()
-        return {"shells": [shell.view() for shell in shells], "clis": self._clis[1],
+        return {"shells": [shell.view() for shell in shells], "clis": self._clis[1] if self._clis else [],
+                "clis_scanning": bool(self._clis_task and not self._clis_task.done()),
                 "platform": sys.platform, "sessions": len(self.sessions), "max_sessions": MAX_SESSIONS,
                 "account": account.name if account is not None else _current_user()}
 

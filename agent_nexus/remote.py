@@ -59,16 +59,31 @@ def _gateway_error(response) -> RemoteError:
                        message or f"网关返回 HTTP {response.status_code}", code)
 
 
+_GATEWAY_HTTP: tuple = (None, None)  # (event loop, httpx.AsyncClient)
+
+
+def gateway_http():
+    """One kept-alive client to the gateway per event loop: a new TLS handshake with a gateway
+    abroad costs two round trips (~0.7 s from China to the US) on every request."""
+    import httpx
+    global _GATEWAY_HTTP
+    loop = asyncio.get_running_loop()
+    owner, client = _GATEWAY_HTTP
+    if client is None or owner is not loop or client.is_closed:
+        client = httpx.AsyncClient(timeout=60, trust_env=False)
+        _GATEWAY_HTTP = (loop, client)
+    return client
+
+
 async def terminal_info(root: Path, device_id: str, *, refresh: bool = False) -> dict:
     import httpx
 
     origin, agent_id, token = credentials(root)
     url = f"{origin}/api/devices/{quote(device_id, safe='')}/terminal" + ("?refresh=1" if refresh else "")
-    async with httpx.AsyncClient(timeout=60, trust_env=False) as http:
-        try:
-            response = await http.get(url, headers=headers(agent_id, token))
-        except httpx.HTTPError:
-            raise RemoteError(502, "无法连接网关", "gateway_unreachable") from None
+    try:
+        response = await gateway_http().get(url, headers=headers(agent_id, token))
+    except httpx.HTTPError:
+        raise RemoteError(502, "无法连接网关", "gateway_unreachable") from None
     if response.status_code != 200:
         raise _gateway_error(response)
     return response.json()

@@ -115,10 +115,10 @@ def main() -> int:
         best = min(candidates)
         cities[key] = [round(best[2], 3), round(best[3], 3)]
     out = ROOT / "agent_nexus" / "geo_cn_cities.json"
-    out.write_text(json.dumps({
+    out.write_text(json.dumps({  # LF on every platform: the file is committed
         "_source": "ip2region city names x GeoNames cities1000 coordinates "
                    "(CC BY 4.0, https://www.geonames.org); scripts/build_cn_cities.py",
-        "cities": cities}, ensure_ascii=False, indent=0, sort_keys=True) + "\n", encoding="utf-8")
+        "cities": cities}, ensure_ascii=False, indent=0, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
     print(f"{len(cities)} of {len(names)} cities written to {out.relative_to(ROOT)}; {len(missing)} fall back to the province")
     print("  e.g.", missing[:25])
     return 0

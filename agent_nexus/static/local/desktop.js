@@ -49,22 +49,28 @@ export async function desktopPage(ctx, { params }) {
 
   let device;
   let RFB;
+  // the tunnel (and the socket's ticket) is prepared while the page loads, not after it
+  let preparing = fetchJSON(`/api/remote/devices/${encodeURIComponent(deviceId)}/desktop/prepare`, { method: "POST", quiet: true })
+    .catch((error) => ({ failed: error }));
+  const h264Check = canDecodeH264();
   try {
-    const list = await fetchJSON("/api/devices", { quiet: true });
+    const [list, rfbModule] = await Promise.all([
+      fetchJSON("/api/devices", { quiet: true }),
+      import("/vendor/novnc/core/rfb.js"),
+    ]);
     if (list.lock?.locked) throw new Error("这台设备已锁定，解锁后才能操作其他设备（右上角的锁）");
     device = (list.devices || []).find((d) => d.device_id === deviceId);
     if (!device) throw new Error("没有这台设备");
     if (!device.online) throw new Error(`${device.display_name} 现在不在线`);
     if (!device.desktop) throw new Error(`${device.display_name} 没有可共享的桌面（无桌面的服务器只能用终端），或客户端低于 0.5.0`);
-    ({ default: RFB } = await import("/vendor/novnc/core/rfb.js"));
-    RFB = withH264(RFB);
+    RFB = withH264(rfbModule.default);
   } catch (error) {
     mount(page, el("div", { class: "page-head" }, el("div", { class: "titles" }, el("h1", {}, "远程桌面"))),
       errorState(error, () => desktopPage(ctx, { params })));
     return;
   }
 
-  let h264 = await canDecodeH264();
+  let h264 = await h264Check;
   const codecTag = el("span", { class: "tag", title: "画面编码" });
   const mark = osMark(device.os_family);
   const status = el("span", { class: "term-status" }, pill("connecting", "正在直连"));
@@ -104,7 +110,10 @@ export async function desktopPage(ctx, { params }) {
     setStatus("connecting", "正在直连");
     routeTag.hidden = true;
     try {
-      const prepared = await fetchJSON(`/api/remote/devices/${encodeURIComponent(deviceId)}/desktop/prepare`, { method: "POST", quiet: true });
+      const prepared = preparing ? await preparing
+        : await fetchJSON(`/api/remote/devices/${encodeURIComponent(deviceId)}/desktop/prepare`, { method: "POST", quiet: true });
+      preparing = null;  // a reconnect prepares again
+      if (prepared.failed) throw prepared.failed;
       routeTag.hidden = false;
       routeTag.textContent = `直连 · ${prepared.route}`;
     } catch (error) {

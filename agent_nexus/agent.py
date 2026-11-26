@@ -345,6 +345,21 @@ class LocalGateway:
         from .osinfo import distro
         if not block.get("distro") and (name := distro()):
             block["distro"] = name  # the console's device icon (Ubuntu, Debian…)
+        # Claude Code / Codex where the user has them (agent_cli): the plugin looks in its own PATH
+        # only, which as the Windows system service misses npm installs and the desktop app's codex.
+        try:
+            from .agent_cli import runtimes as cli_runtimes
+            found = cli_runtimes()
+        except Exception:
+            found = {}
+        if any(item.get("available") for item in found.values()):
+            runtimes = dict(block.get("agent_runtimes") or {}) if isinstance(block.get("agent_runtimes"), dict) else {}
+            for name, item in found.items():
+                if item.get("available"):
+                    entry = dict(runtimes.get(name) or {}) if isinstance(runtimes.get(name), dict) else {}
+                    entry.update(available=True, path_known=True, source=item.get("source"))
+                    runtimes[name] = entry
+            block["agent_runtimes"] = runtimes
         # `anx wake doctor` results (design §8.7): shown in mail_who's agent_runtimes.
         from .link.wake.doctor import load_results
         doctor = load_results(self.root)
