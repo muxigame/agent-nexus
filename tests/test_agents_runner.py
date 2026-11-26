@@ -321,7 +321,7 @@ async def test_acp_session_streams_updates(runs, work, tmp_path):
 async def test_acp_system_prompt_as_embedded_resource_and_other_kind_tool_name(runs, work, tmp_path):
     # dsh accepts embedded context: the system prompt must not become part of the user's first message (dsh titles
     # the session from it); dsh reports its read tool as kind "other", title "read"
-    log, env = argv_log(tmp_path)
+    _log, env = argv_log(tmp_path)
     env["FAKE_ACP"] = "embedded"
     opened = await runs.open({"kind": "dsh", "workdir": work, "prompt": "hi"}, binary=ACP, env=env, run_as=None,
                              system_prompt="SYS")
