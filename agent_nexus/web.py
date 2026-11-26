@@ -399,6 +399,11 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
             device_id = request.path_params["device_id"]
             refresh = request.query_params.get("refresh") == "1"
             prefetch_ticket(device_id, "terminal")  # the page opens its socket next
+            connector = p2p_state["connector"]
+            link = connector.links.get(device_id) if connector is not None else None
+            mesh = p2p_state.get("mesh")
+            if (link is None or not link.alive) and mesh is not None and mesh.preferred():
+                prefetch_ticket(mesh.preferred()[0], "relay")  # likely through the home relay
 
             async def fetch() -> dict:
                 info = await remote.terminal_info(sup.cfg.root, device_id, refresh=refresh)
@@ -523,13 +528,20 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
     relay_failed: dict[str, float] = {}
     RELAY_RETRY_S = 120.0
 
+    #: the device list relay_candidates last fetched: relays change seldom, and a relay that
+    #: fails is skipped through relay_failed anyway (each stream fetched the whole list: ~0.5 s)
+    relay_listing: dict = {"at": float("-inf"), "rows": []}
+    RELAY_LISTING_S = 15.0
+
     async def relay_candidates(exclude: set[str]) -> list[dict]:
         """Online relay devices, the ones we already have a tunnel to first."""
         import time as _time
-        listing = await hub.call("device_admin", {"op": "list"}, timeout=20)
-        connector = p2p_state["connector"]
         now = _time.monotonic()
-        rows = [d for d in (listing or {}).get("devices", [])
+        if now - relay_listing["at"] > RELAY_LISTING_S:
+            listing = await hub.call("device_admin", {"op": "list"}, timeout=20)
+            relay_listing.update(at=now, rows=list((listing or {}).get("devices", [])))
+        connector = p2p_state["connector"]
+        rows = [d for d in relay_listing["rows"]
                 if d.get("relay") and d.get("online") and d.get("device_id") not in exclude
                 and now - relay_failed.get(d.get("device_id"), -1e9) > RELAY_RETRY_S]
         linked = set(getattr(connector, "links", {}) or {})
@@ -578,7 +590,8 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
             relay_id = relay["device_id"]
             try:
                 port, _route = await tunnel_port(relay_id)
-                relay_ticket = await hub.call("remote_ticket", {"device_id": relay_id, "service": "relay"}, timeout=20)
+                relay_ticket = await take_ticket(relay_id, "relay")
+                prefetch_ticket(relay_id, "relay")  # ready for the next stream through it
             except Exception as exc:
                 relay_failed[relay_id] = _time.monotonic()
                 log.info("relay %s unavailable for %s: %s", relay_id, device_id, exc)
