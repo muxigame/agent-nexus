@@ -2,7 +2,7 @@
 // Serve the repository root over HTTP (ES modules do not load from file://):
 //   uv run python -m http.server 8765   →   http://127.0.0.1:8765/docs/mockups/cloud-overview.html
 // Query flags: ?open=<template id> opens a modal/drawer, ?theme=dark|light forces a theme.
-import { renderShell, hydrateIcons, modal, drawer, toast, copy, setTheme, el, logoSVG } from "../../agent_nexus/static/ui/ui.js";
+import { renderShell, hydrateIcons, modal, drawer, toast, copy, setTheme, setStyle, el, logoSVG, appearanceButton } from "../../agent_nexus/static/ui/ui.js";
 
 const NAV = {
   cloud: {
@@ -37,8 +37,12 @@ const NAV = {
 
 const params = new URLSearchParams(location.search);
 if (params.get("theme")) setTheme(params.get("theme"));
-// ?skin=<name> layers docs/mockups/skins/<name>.css over tokens.css + ui.css (style exploration).
+// ?style=auto|pure|mica picks the shipped appearance style (style-pure.css / style-mica.css, see ui.js setStyle).
+if (params.get("style")) setStyle(params.get("style"));
+// ?skin=<name> layers docs/mockups/skins/<name>.css over tokens.css + ui.css (style exploration);
+// the shipped style is switched off so the two do not mix.
 if (params.get("skin")) {
+  delete document.documentElement.dataset.style;
   const link = document.createElement("link");
   link.rel = "stylesheet";
   link.href = new URL(`skins/${params.get("skin")}.css`, import.meta.url).href;
@@ -53,7 +57,7 @@ if (kind) {
   const shell = renderShell(body, { ...config, active: body.dataset.active || "/" });
   shell.setTitle(body.dataset.title || "", [{ label: config.sub, href: "#/" }]);
   shell.setActions(
-    el("button", { class: "btn btn-ghost btn-icon", type: "button", "aria-label": "切换主题", onclick: toggleTheme, html: '<i data-icon="sun"></i>' }),
+    appearanceButton(),
     el("button", { class: "btn btn-ghost btn-icon", type: "button", "aria-label": "帮助", html: '<i data-icon="circle-help"></i>' }));
   shell.page.append(document.getElementById("content").content.cloneNode(true));
   if (body.dataset.wide) shell.page.classList.add("wide");
@@ -64,10 +68,6 @@ if (kind) {
 hydrateIcons();
 for (const node of document.querySelectorAll("[data-logo]")) node.outerHTML = logoSVG(Number(node.dataset.logo) || 32);
 
-function toggleTheme() {
-  const dark = document.documentElement.dataset.theme === "dark" || (!document.documentElement.dataset.theme && matchMedia("(prefers-color-scheme: dark)").matches);
-  setTheme(dark ? "light" : "dark");
-}
 
 function openTemplate(id) {
   const tpl = document.getElementById(id);

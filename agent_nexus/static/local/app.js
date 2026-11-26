@@ -1,5 +1,5 @@
 // The local console (docs/ui-spec.md §4): shell, routing, polling. Runs in the Tauri window and any local browser.
-import { renderShell, createRouter, fetchJSON, el, mount, setTheme, restoreTheme, icon, cacheGets, prefetch } from "/ui/ui.js";
+import { renderShell, createRouter, fetchJSON, el, mount, restoreTheme, icon, cacheGets, prefetch, appearanceButton } from "/ui/ui.js";
 import { mountInbox } from "/ui/inbox.js";
 import { hubHost } from "/ui/invite.js";
 import { overviewPage } from "/local/overview.js";
@@ -35,15 +35,9 @@ const NAV = [
   { path: "/settings", label: "设置", icon: "settings" },
 ];
 
-function toggleTheme() {
-  const root = document.documentElement;
-  const dark = root.dataset.theme === "dark" || (!root.dataset.theme && matchMedia("(prefers-color-scheme: dark)").matches);
-  setTheme(dark ? "light" : "dark");
-}
 
 const shell = renderShell(document.body, { sub: "本机", nav: NAV, status: { state: "connecting", label: "正在读取…" } });
-shell.setActions(lockButton(), el("button", { class: "btn btn-ghost btn-icon", type: "button", "aria-label": "切换主题", title: "切换主题", onclick: toggleTheme },
-  icon("sun", { size: 18 })));
+shell.setActions(lockButton(), appearanceButton());
 
 /** The Tauri shell hides the window without making the document hidden (WebView2); it tells us instead. */
 export function visible() {

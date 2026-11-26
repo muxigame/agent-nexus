@@ -1,5 +1,5 @@
 // 本机 · 设置 (docs/ui-spec.md §4.5): autostart, updates, this machine, appearance, quit.
-import { el, mount, icon, fetchJSON, toast, confirmDialog, relTime, tokenField, setTheme, errorState, modal } from "/ui/ui.js";
+import { el, mount, icon, fetchJSON, toast, confirmDialog, relTime, tokenField, appearanceControls, errorState, modal } from "/ui/ui.js";
 import { lockPasswordCard } from "/local/devices.js";
 
 function card(title, ...rows) {
@@ -107,10 +107,7 @@ export async function settingsPage(ctx) {
       } catch { box.checked = !box.checked; }
     } });
 
-  const themeMode = (() => { try { return localStorage.getItem("anx-theme") || "system"; } catch { return "system"; } })();
-  const themes = el("div", { class: "segmented", role: "group", "aria-label": "主题" },
-    [["system", "跟随系统"], ["light", "浅色"], ["dark", "深色"]].map(([value, label]) => el("button", { type: "button", "aria-pressed": String(themeMode === value),
-      onclick: (event) => { setTheme(value); for (const b of themes.querySelectorAll("button")) b.setAttribute("aria-pressed", String(b === event.currentTarget)); } }, label)));
+  const looks = appearanceControls();
 
   const quit = el("button", { class: "btn btn-danger", type: "button", onclick: async () => {
     if (!await confirmDialog({ title: "退出 Agent Nexus？", danger: true, confirmLabel: "退出",
@@ -133,7 +130,7 @@ export async function settingsPage(ctx) {
         el("p", { class: "faint xs" }, "插件安装在数据目录的 plugins/ 下，插件数据在 plugin-data/，凭据在 secrets/。"))),
     accounts,
     lockPasswordCard(),
-    card("外观", setting("主题", "", themes)),
+    card("外观", setting("外观风格", "自动：Windows 上用 Win11 云母，其他系统用纯净白", looks.style), setting("明暗", "只影响这个浏览器", looks.theme)),
     card("高级",
       system ? setting("重启核心服务", "停止所有插件后由系统服务立即重新启动", quit) : setting("退出", "停止所有插件并退出", quit))));
   renderUpdate(update);

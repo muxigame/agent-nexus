@@ -544,6 +544,90 @@ export function setTheme(mode) {
   try { localStorage.setItem("anx-theme", mode); } catch { /* storage may be unavailable */ }
 }
 
+/** The remembered light/dark choice: "system" | "light" | "dark". */
+export function themeMode() {
+  try { const mode = localStorage.getItem("anx-theme"); return mode === "light" || mode === "dark" ? mode : "system"; } catch { return "system"; }
+}
+
+// Appearance style (skin), independent of light/dark. /ui/appearance.js applies it before first paint;
+// the stylesheets /ui/style-pure.css and /ui/style-mica.css are scoped under <html data-style>.
+export const STYLES = [["auto", "自动"], ["pure", "纯净白"], ["mica", "Win11 云母"]];
+export const THEMES = [["system", "跟随系统"], ["light", "亮"], ["dark", "暗"]];
+
+/** True on Windows (User-Agent Client Hints first, then the UA string). */
+export function isWindows() {
+  try { const platform = navigator.userAgentData?.platform; if (platform) return /windows/i.test(platform); } catch { /* ignore */ }
+  return /windows/i.test(navigator.userAgent || "") || /^win/i.test(navigator.platform || "");
+}
+
+/** The remembered style choice: "auto" | "pure" | "mica". */
+export function styleMode() {
+  try { const mode = localStorage.getItem("anx-style"); return mode === "pure" || mode === "mica" ? mode : "auto"; } catch { return "auto"; }
+}
+
+/** setStyle("auto" | "pure" | "mica"); auto is mica on Windows and pure elsewhere. Remembered per browser. */
+export function setStyle(mode) {
+  const value = mode === "pure" || mode === "mica" ? mode : "auto";
+  document.documentElement.dataset.style = value === "auto" ? (isWindows() ? "mica" : "pure") : value;
+  try { localStorage.setItem("anx-style", value); } catch { /* storage may be unavailable */ }
+}
+
 export function restoreTheme() {
   try { const mode = localStorage.getItem("anx-theme"); if (mode) setTheme(mode); } catch { /* ignore */ }
+  if (!document.documentElement.dataset.style) setStyle(styleMode());
+}
+
+/** Flip between light and dark from whatever is showing now (the topbar sun button). */
+export function toggleTheme() {
+  const root = document.documentElement;
+  const dark = root.dataset.theme === "dark" || (!root.dataset.theme && matchMedia("(prefers-color-scheme: dark)").matches);
+  setTheme(dark ? "light" : "dark");
+}
+
+/** The 外观 settings: two segmented groups (风格 and 明暗), each applied and remembered at once. */
+export function appearanceControls() {
+  const group = (label, options, current, apply) => {
+    const node = el("div", { class: "segmented", role: "group", "aria-label": label },
+      options.map(([value, text]) => el("button", { type: "button", "data-value": value, "aria-pressed": String(current === value),
+        onclick: (event) => {
+          apply(value);
+          for (const button of node.children) button.setAttribute("aria-pressed", String(button === event.currentTarget));
+        } }, text)));
+    return node;
+  };
+  const style = group("外观风格", STYLES, styleMode(), setStyle);
+  const theme = group("明暗", THEMES, themeMode(), setTheme);
+  return { style, theme };
+}
+
+/** Topbar button that opens a small 外观 panel with both groups, so 跟随系统 and the style stay one click away. */
+export function appearanceButton() {
+  let panel = null;
+  const close = () => {
+    if (!panel) return;
+    panel.remove(); panel = null;
+    document.removeEventListener("pointerdown", outside, true);
+    document.removeEventListener("keydown", onKey, true);
+    button.setAttribute("aria-expanded", "false");
+  };
+  const outside = (event) => { if (panel && !panel.contains(event.target) && !button.contains(event.target)) close(); };
+  const onKey = (event) => { if (event.key === "Escape") { close(); button.focus(); } };
+  const open = () => {
+    const { style, theme } = appearanceControls();
+    panel = el("div", { class: "menu appearance-menu", role: "dialog", "aria-label": "外观" },
+      el("div", { class: "appearance-row" }, el("span", { class: "appearance-label" }, "风格"), style),
+      el("div", { class: "appearance-row" }, el("span", { class: "appearance-label" }, "明暗"), theme));
+    document.body.append(panel);
+    const rect = button.getBoundingClientRect();
+    panel.style.position = "fixed";
+    panel.style.top = `${Math.round(rect.bottom + 6)}px`;
+    panel.style.right = `${Math.max(8, Math.round(window.innerWidth - rect.right))}px`;
+    document.addEventListener("pointerdown", outside, true);
+    document.addEventListener("keydown", onKey, true);
+    button.setAttribute("aria-expanded", "true");
+    panel.querySelector("button")?.focus();
+  };
+  const button = el("button", { class: "btn btn-ghost btn-icon", type: "button", "aria-label": "外观", title: "外观",
+    "aria-haspopup": "dialog", "aria-expanded": "false", onclick: () => (panel ? close() : open()) }, icon("sun", { size: 18 }));
+  return button;
 }

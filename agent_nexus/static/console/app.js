@@ -1,5 +1,5 @@
 // The gateway console (docs/ui-spec.md §3): shell, routing, polling.
-import { renderShell, createRouter, fetchJSON, el, mount, setTheme, restoreTheme, icon } from "/ui/ui.js";
+import { renderShell, createRouter, fetchJSON, el, mount, restoreTheme, icon, appearanceButton } from "/ui/ui.js";
 import { mountInbox } from "/ui/inbox.js";
 import { overviewPage, devicesPage, settingsPage, pluginsPage } from "/console/pages.js";
 import { renderDownloads } from "/console/downloads.js";
@@ -29,17 +29,12 @@ async function logout() {
   location.href = "/auth/login";
 }
 
-function toggleTheme() {
-  const root = document.documentElement;
-  const dark = root.dataset.theme === "dark" || (!root.dataset.theme && matchMedia("(prefers-color-scheme: dark)").matches);
-  setTheme(dark ? "light" : "dark");
-}
 
 const shell = renderShell(document.body, {
   sub: "云端控制台", nav: NAV, status: { state: "connecting", label: "正在连接网关…" },
   footer: [{ label: "退出登录", icon: "log-out", onClick: logout }],
 });
-shell.setActions(el("button", { class: "btn btn-ghost btn-icon", type: "button", "aria-label": "切换主题", title: "切换主题", onclick: toggleTheme }, icon("sun", { size: 18 })));
+shell.setActions(appearanceButton());
 
 /** Everything a page needs: where to draw, the shell, and a way to poll while it is shown. */
 let cleanup = [];

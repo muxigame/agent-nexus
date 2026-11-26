@@ -1,7 +1,7 @@
 // Console pages: overview, devices (with invites), settings (docs/ui-spec.md §3.1, §3.2, §3.6).
 import {
   el, mount, icon, iconHTML, fetchJSON, toast, modal, confirmDialog, copy, tokenField, emptyState, errorState,
-  skeletonRows, pill, relTime, setTheme, bytes,
+  skeletonRows, pill, relTime, appearanceControls, bytes,
 } from "/ui/ui.js";
 import { qrSVG } from "/ui/qr.js";
 import { osMark } from "/ui/os-icons.js";
@@ -393,12 +393,7 @@ export async function settingsPage(ctx) {
       el("div", { class: "step" }, el("div", { class: "step-body" }, el("span", { class: "step-title" }, title), el("span", { class: "step-desc" }, desc))))));
   }
   showGuide("chatgpt");
-  const themeNow = (() => { try { return localStorage.getItem("anx-theme") || "system"; } catch { return "system"; } })();
-  const theme = el("div", { class: "segmented" }, [["system", "跟随系统"], ["light", "浅色"], ["dark", "深色"]].map(([value, text]) =>
-    el("button", { type: "button", "aria-pressed": String(themeNow === value), onclick: (event) => {
-      setTheme(value);
-      for (const button of event.currentTarget.parentElement.children) button.setAttribute("aria-pressed", String(button === event.currentTarget));
-    } }, text)));
+  const looks = appearanceControls();
   const hours = (s) => (s % 86400 === 0 ? `${s / 86400} 天` : `${Math.round(s / 3600)} 小时`);
   mount(page,
     head("设置", "网关信息、AI 客户端的接入方法和本浏览器的外观。"),
@@ -430,7 +425,11 @@ export async function settingsPage(ctx) {
           el("dt", {}, "最长有效期"), el("dd", {}, hours(data.invites.max_ttl_s))),
           el("p", { class: "hint", style: { marginTop: "8px" } }, "在 gateway.json 的 invites.default_ttl_s / max_ttl_s 修改。"))),
       el("section", { class: "card" }, el("div", { class: "card-head" }, el("h2", {}, "外观")),
-        el("div", { class: "card-body stack" }, theme, el("span", { class: "hint" }, "只影响这个浏览器。")))));
+        el("div", { class: "card-body stack" },
+          el("div", { class: "field" }, el("span", { class: "field-label" }, "外观风格"), el("div", {}, looks.style),
+            el("span", { class: "hint" }, "自动：Windows 上用 Win11 云母，其他系统用纯净白。")),
+          el("div", { class: "field" }, el("span", { class: "field-label" }, "明暗"), el("div", {}, looks.theme),
+            el("span", { class: "hint" }, "只影响这个浏览器。"))))));
 }
 
 // ---------------------------------------------------------------- plugins: 插件库 + per device

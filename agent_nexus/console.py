@@ -119,7 +119,9 @@ class Console:
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>登录 · Agent Nexus</title>
 <link rel="icon" href="/console/favicon.svg" type="image/svg+xml">
+<script src="/ui/appearance.js"></script>
 <link rel="stylesheet" href="/ui/tokens.css"><link rel="stylesheet" href="/ui/ui.css">
+<link rel="stylesheet" href="/ui/style-pure.css"><link rel="stylesheet" href="/ui/style-mica.css">
 </head><body>
 <main class="auth">
   <form class="auth-card" method="post" action="/auth/login">
