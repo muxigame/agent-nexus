@@ -87,7 +87,9 @@ while True:
             emit({"jsonrpc": "2.0", "id": rid, "error": {"code": -32000, "message": "no credentials"}})
             continue
         emit({"jsonrpc": "2.0", "id": rid, "result": {"protocolVersion": 1,
-                                                      "agentCapabilities": {"loadSession": mode != "noload"}}})
+                                                      "agentCapabilities": {
+                                                          "loadSession": mode != "noload",
+                                                          "promptCapabilities": {"embeddedContext": mode == "embedded"}}}})
     elif method == "session/new":
         session = "acp-sess-1"
         emit({"jsonrpc": "2.0", "id": rid, "result": {"sessionId": session}})
@@ -98,6 +100,9 @@ while True:
         emit({"jsonrpc": "2.0", "id": rid, "result": None})
     elif method == "session/prompt":
         text = params["prompt"][0]["text"]
+        resources = [b["resource"].get("text", "") for b in params["prompt"][1:] if b.get("type") == "resource"]
+        if resources:
+            text += f" [res:{resources[0]}]"
         update("agent_thought_chunk", content={"type": "text", "text": "thinking"})
         update("future_update_kind", whatever=1)
         if "perm" in text:
@@ -116,6 +121,12 @@ while True:
                    content=[{"type": "content", "content": {"type": "text", "text": f"chosen={chosen}"}},
                             {"type": "diff", "path": "b.txt", "oldText": "a\n", "newText": "b\n"}])
             update("agent_message_chunk", content={"type": "text", "text": f"perm: {chosen}"})
+            emit({"jsonrpc": "2.0", "id": rid, "result": {"stopReason": "end_turn"}})
+        elif "otherkind" in text:
+            update("tool_call", toolCallId="tc2", title="read", kind="other", status="pending",
+                   rawInput={"file_path": "a.txt"})
+            update("tool_call_update", toolCallId="tc2", status="completed",
+                   content=[{"type": "content", "content": {"type": "text", "text": "hello"}}])
             emit({"jsonrpc": "2.0", "id": rid, "result": {"stopReason": "end_turn"}})
         elif "slow" in text:
             update("agent_message_chunk", content={"type": "text", "text": "working"})

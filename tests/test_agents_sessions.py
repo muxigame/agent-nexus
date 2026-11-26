@@ -559,3 +559,42 @@ def test_codex_desktop_fork_title_past_a_huge_compacted_record(tmp_path):
     path.write_text("\n".join(lines[:4] + lines[5:]) + "\n", encoding="utf-8")
     found = by_id(S.discover(None, tmp_path, kind="codex", env={}))
     assert found[("codex", sid)]["title"] == "父会话的第一个问题"
+
+
+def test_read_dsh_v4_records(tmp_path):
+    # record shapes from a real DeepSeek Harness 0.2.2 session.v4 (plain .jsonl here; .zstd is the same text)
+    sid = "16e88bcd-3cb3-49f4-84b0-a0884471fd7a"
+    folder = tmp_path / ".dsh" / "sessions" / "--C-w--" / sid
+    folder.mkdir(parents=True)
+    recs = [
+        {"type": "session", "version": 4, "id": sid, "createdAt": 1795718648661, "cwd": "C:\\w"},
+        {"type": "system/message", "seq": 7, "time": 1795718648700,
+         "data": {"message": {"role": "system", "content": [{"type": "text", "text": "You are DSH"}]}}},
+        {"type": "user/message", "seq": 8, "time": 1795718648857,
+         "data": {"content": [{"type": "text", "text": "读 a.txt"},
+                              {"type": "resource", "resource": {"uri": "anx://system-prompt", "text": "SYS"}}],
+                  "source": {"kind": "user"}, "role": "user"}},
+        {"type": "user/message", "seq": 9, "time": 1795718648858,
+         "data": {"content": [{"type": "text", "text": "<system-reminder>cwd</system-reminder>"}],
+                  "source": {"kind": "runtime-context"}, "role": "user"}},
+        {"type": "assistant/message", "seq": 15, "time": 1795718649315,
+         "data": {"message": {"role": "assistant", "content": [
+             {"type": "reasoning", "text": "use read"},
+             {"type": "tool-call", "id": "call_1", "name": "read", "arguments": "{\"file_path\": \"a.txt\"}"}]}}},
+        {"type": "tool/call", "seq": 16, "time": 1795718649316, "data": {"callId": "call_1", "name": "read"}},
+        {"type": "tool/result", "seq": 17, "time": 1795718649325,
+         "data": {"message": {"role": "tool", "toolCallId": "call_1", "content": [{"type": "text", "text": "hello"}],
+                              "isError": False}}},
+        {"type": "assistant/message", "seq": 21, "time": 1795718649846,
+         "data": {"message": {"role": "assistant", "content": [{"type": "reasoning", "text": ""},
+                                                                 {"type": "text", "text": "hello"}]}}},
+        {"type": "turn/end", "seq": 23, "time": 1795718649847, "data": {"reason": {"kind": "completed"}}},
+    ]
+    (folder / "session.v4.jsonl").write_text("\n".join(json.dumps(r) for r in recs) + "\n", encoding="utf-8")
+    events = S.read(None, tmp_path, "dsh", sid, env={})
+    events = events.get("events", events) if isinstance(events, dict) else events
+    shape = [(e["type"], e.get("name"), e.get("text")) for e in events if e["type"] != "status"]
+    assert shape == [("user", None, "读 a.txt"), ("thinking", None, "use read"), ("tool", "read", None),
+                     ("message", None, "hello")]
+    tool = next(e for e in events if e["type"] == "tool")
+    assert tool["status"] == "ok" and tool["output"] == "hello" and tool["input"] == {"file_path": "a.txt"}

@@ -732,6 +732,7 @@ class Acp(Adapter):
         self._next_id = 0
         self._calls: dict[int, str] = {}
         self._queued: list[str] = []
+        self.embedded_context = False
         self._loading = False
         self._permissions: dict[str, dict] = {}
         self._approval_n = 0
@@ -764,15 +765,23 @@ class Acp(Adapter):
     def begin_turn(self, prompt: str) -> list[dict]:
         self.turn_active, self.stopping = True, False
         self.turns += 1
-        text = self._with_prefix(prompt)
         if not self.ready:
-            self._queued.append(text)
+            self._queued.append(prompt)
             return []
-        self._prompt(text)
+        self._prompt(prompt)
         return []
 
     def _prompt(self, text: str) -> None:
-        self._call("session/prompt", {"sessionId": self.session_id, "prompt": [{"type": "text", "text": text}]})
+        """One ``session/prompt``. ACP has no system-prompt field: on the first turn the console's system prompt
+        goes as an embedded ``resource`` block when the agent accepts them (so the agent's own title and history
+        show the user's words, seen with dsh), else in front of the text."""
+        blocks: list[dict] = []
+        if self._prefix_pending and getattr(self, "embedded_context", False):
+            self._prefix_pending = False
+            blocks.append({"type": "resource", "resource": {"uri": "anx://system-prompt", "mimeType": "text/markdown",
+                                                            "text": self.opts.system_prompt}})
+        blocks.insert(0, {"type": "text", "text": self._with_prefix(text)})
+        self._call("session/prompt", {"sessionId": self.session_id, "prompt": blocks})
 
     def stop(self) -> list[dict]:
         self.stopping = True
@@ -815,6 +824,8 @@ class Acp(Adapter):
                 return []
             caps = result.get("agentCapabilities") if isinstance(result, dict) else None
             self.can_load = bool(isinstance(caps, dict) and caps.get("loadSession"))
+            prompt_caps = caps.get("promptCapabilities") if isinstance(caps, dict) else None
+            self.embedded_context = bool(isinstance(prompt_caps, dict) and prompt_caps.get("embeddedContext"))
             cwd = self.opts.workdir
             if self.session_id and self.can_load:
                 self._loading = True
@@ -890,7 +901,7 @@ class Acp(Adapter):
             raw = call.get("rawInput")
             known = self._tools.get(str(call.get("toolCallId") or ""), {})
             title = str(call.get("title") or known.get("title") or "")
-            tool = str(call.get("kind") or known.get("name") or title or "tool")
+            tool = (_acp_tool_name(call.get("kind"), title) if call.get("kind") else known.get("name")) or title or "tool"
             summary = tool_title("", raw) if isinstance(raw, dict) and tool_title("", raw) else title
             return [{"type": "approval", "id": approval_id, "tool": tool, "summary": summary,
                      "input": _small(raw) if raw is not None else None, "state": "pending",
@@ -956,7 +967,7 @@ class Acp(Adapter):
         if update.get("title") is not None:
             known["title"] = event["title"] = str(update["title"])[:200]
         if update.get("kind") is not None:
-            known["name"] = event["name"] = str(update["kind"])
+            known["name"] = event["name"] = _acp_tool_name(update.get("kind"), update.get("title") or known.get("title"))
         elif new:
             event["name"] = known.get("name") or "tool"
         if update.get("rawInput") is not None:
@@ -1100,6 +1111,15 @@ def make(d: AgentDef, opts: AdapterOptions, *, adapter: str | None = None) -> Ad
     if name == "acp":
         return Acp(d, opts)
     return Text(d, opts)
+
+
+def _acp_tool_name(kind: Any, title: Any) -> str:
+    """ACP's ``kind`` (read / edit / execute / ... / other) names the tool, except ``other``: then the title does
+    (dsh reports its ``read`` tool as kind ``other``, title ``read``)."""
+    kind = str(kind or "")
+    if kind in ("", "other") and title:
+        return str(title)[:60]
+    return kind or "tool"
 
 
 def fallback(d: AgentDef, opts: AdapterOptions, session_id: str | None) -> Adapter | None:

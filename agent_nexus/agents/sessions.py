@@ -1446,7 +1446,63 @@ def _generic_feed(builder: _Builder, records: list[dict]) -> None:
             continue
 
 
+def _dsh_text(content: Any) -> str:
+    """Only the ``text`` blocks: an embedded ``resource`` (the console's system prompt) is not the user's words."""
+    if isinstance(content, str):
+        return content
+    return "".join(str(b.get("text") or "") for b in content or [] if isinstance(b, dict) and b.get("type") == "text")
+
+
+def _dsh_v4_one(builder: _Builder, record: dict) -> bool:
+    """DeepSeek Harness ``session.v4`` records (checked on a real device): ``user/message`` (only ``source.kind ==
+    "user"`` is the person; runtime-context / skill-catalog are injected), ``assistant/message`` with ``reasoning`` /
+    ``text`` / ``tool-call`` blocks, ``tool/result`` and ``turn/end``. Returns False for anything else."""
+    rtype = record.get("type")
+    data = record.get("data")
+    if not isinstance(rtype, str) or "/" not in rtype or not isinstance(data, dict):
+        return False
+    t = _ts(record.get("time"))
+    if rtype == "user/message":
+        if (data.get("source") or {}).get("kind") == "user":
+            text = _dsh_text(data.get("content")).strip()
+            if text:
+                builder.add({"type": "user", "text": text}, t)
+        return True
+    if rtype == "assistant/message":
+        message = data.get("message") if isinstance(data.get("message"), dict) else {}
+        for block in message.get("content") or []:
+            if not isinstance(block, dict):
+                continue
+            kind = block.get("type")
+            if kind == "reasoning" and str(block.get("text") or "").strip():
+                builder.add({"type": "thinking", "text": block["text"]}, t)
+            elif kind == "text" and str(block.get("text") or "").strip():
+                builder.add({"type": "message", "role": "assistant", "text": block["text"]}, t)
+            elif kind == "tool-call":
+                name = str(block.get("name") or "tool")
+                args = _codex_args(block.get("arguments"))
+                builder.tool(block.get("id"), t, name=name, title=_title_for_tool(name, args),
+                             input=_shrink(args if isinstance(args, dict) else {"input": args}))
+        return True
+    if rtype == "tool/result":
+        message = data.get("message") if isinstance(data.get("message"), dict) else {}
+        builder.tool(message.get("toolCallId") or (message.get("source") or {}).get("callId"), t,
+                     output=_text_of(message.get("content")), status="error" if message.get("isError") else "ok")
+        return True
+    if rtype == "turn/end":
+        reason = str((data.get("reason") or {}).get("kind") or "")
+        if reason and reason != "completed":
+            builder.add({"type": "status", "state": "stopped" if "cancel" in reason or "interrupt" in reason
+                         else "failed", "reason": reason}, t)
+        return True
+    return rtype in ("tool/call", "session/title", "turn/start", "step/start", "step/end", "system/message",
+                     "agent/inbox/spliced", "request/header", "request/context", "permission/preset", "sandbox/mode",
+                     "approval/policy") or rtype.startswith("session-log-")
+
+
 def _generic_one(builder: _Builder, record: dict) -> None:
+    if _dsh_v4_one(builder, record):
+        return
     t = _ts(record.get("timestamp") or record.get("ts") or record.get("time") or record.get("createdAt"))
     for key in ("payload", "data", "event", "record"):
         inner = record.get(key)

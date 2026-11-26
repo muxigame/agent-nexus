@@ -317,6 +317,22 @@ async def test_acp_session_streams_updates(runs, work, tmp_path):
     assert reader.text().endswith("acp: two") and len(lines(log)) == 1
 
 
+
+async def test_acp_system_prompt_as_embedded_resource_and_other_kind_tool_name(runs, work, tmp_path):
+    # dsh accepts embedded context: the system prompt must not become part of the user's first message (dsh titles
+    # the session from it); dsh reports its read tool as kind "other", title "read"
+    log, env = argv_log(tmp_path)
+    env["FAKE_ACP"] = "embedded"
+    opened = await runs.open({"kind": "dsh", "workdir": work, "prompt": "hi"}, binary=ACP, env=env, run_as=None,
+                             system_prompt="SYS")
+    reader = Reader(runs, opened["rid"])
+    await reader.until(ended(1))
+    assert reader.text().endswith("acp: hi [res:SYS]")
+    await runs.send({"rid": opened["rid"], "prompt": "otherkind"})
+    events = await reader.until(ended(2))
+    tool = next(e for e in events if e["type"] == "tool" and e["id"] == "tc2")
+    assert tool["name"] == "read"
+
 @pytest.mark.parametrize("allow,remember,chosen,status", [(True, True, "always", "ok"), (False, False, "no", "error")])
 async def test_acp_permission_request(runs, work, allow, remember, chosen, status):
     opened = await runs.open({"kind": "dsh", "workdir": work, "prompt": "perm"}, binary=ACP, run_as=None)
