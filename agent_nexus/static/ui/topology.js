@@ -40,6 +40,39 @@ const GATEWAY = "__gateway";
 const RAD = Math.PI / 180;
 const clamp = (value, low, high) => Math.max(low, Math.min(high, value));
 
+/**
+ * Follow the drag that ``down`` (a pointerdown) starts: ``move(e)`` per move, ``end(e, cancelled)``
+ * once. It ends on pointerup -- and also on pointercancel (the browser took the gesture over),
+ * the window losing focus, or a mouse move with no button held: a release outside the window,
+ * or one the page never saw, used to leave the globe turning with a mouse nobody pressed.
+ */
+export function followDrag(down, move, end) {
+  const id = down.pointerId;
+  let done = false;
+  const finish = (e, cancelled) => {
+    if (done) return;
+    done = true;
+    window.removeEventListener("pointermove", onMove);
+    window.removeEventListener("pointerup", onUp);
+    window.removeEventListener("pointercancel", onCancel);
+    window.removeEventListener("blur", onBlur);
+    end(e, cancelled);
+  };
+  const onMove = (e) => {
+    if (e.pointerId !== id) return;
+    if (e.pointerType === "mouse" && e.buttons === 0) { finish(e, true); return; }
+    move(e);
+  };
+  const onUp = (e) => { if (e.pointerId === id) finish(e, false); };
+  const onCancel = (e) => { if (e.pointerId === id) finish(e, true); };
+  const onBlur = () => finish(null, true);
+  window.addEventListener("pointermove", onMove);
+  window.addEventListener("pointerup", onUp);
+  window.addEventListener("pointercancel", onCancel);
+  window.addEventListener("blur", onBlur);
+  return finish;
+}
+
 function shortName(text, max = 10) {
   const chars = Array.from(text || "");
   return chars.length > max ? chars.slice(0, max - 1).join("") + "…" : chars.join("");
@@ -687,9 +720,8 @@ export function topology(data, actions = {}, { layout = "rings" } = {}) {
             card.hidden = true;
             group.setAttribute("transform", `translate(${dx} ${dy})`);
           };
-          const up = (e) => {
-            group.removeEventListener("pointermove", move);
-            group.removeEventListener("pointerup", up);
+          const up = (e, cancelled) => {
+            if (cancelled) { group.removeAttribute("transform"); return; }
             if (!moved) { openPanel(id); return; }
             const now = toSvg(e);
             const at = P.invert(origin[0] + now.x - start.x, origin[1] + now.y - start.y);
@@ -697,8 +729,7 @@ export function topology(data, actions = {}, { layout = "rings" } = {}) {
             group.classList.add("topo-saving");
             actions.locate(device, { lat: Math.round(at[0] * 100) / 100, lon: Math.round(at[1] * 100) / 100, label: "手动设置" });
           };
-          group.addEventListener("pointermove", move);
-          group.addEventListener("pointerup", up);
+          followDrag(event, move, up);
         });
       }
       group.addEventListener("mouseenter", () => { if (panel.hidden) { light(id); showCard(id); } });
@@ -734,18 +765,16 @@ export function topology(data, actions = {}, { layout = "rings" } = {}) {
               ghost.style.left = `${e.clientX + 8}px`; ghost.style.top = `${e.clientY + 8}px`;
               card.hidden = true;
             };
-            const up = (e) => {
-              window.removeEventListener("pointermove", move);
-              window.removeEventListener("pointerup", up);
-              if (!ghost) { if (!device.self) openPanel(device.device_id); return; }
+            const up = (e, cancelled) => {
+              if (!ghost) { if (!cancelled && !device.self) openPanel(device.device_id); return; }
               ghost.remove();
+              if (cancelled) return;
               const box = picture.getBoundingClientRect();
               if (e.clientX < box.left || e.clientX > box.right || e.clientY < box.top || e.clientY > box.bottom) return;
               const at = P.invert(toSvg(e).x, toSvg(e).y);
               if (at) actions.locate(device, { lat: Math.round(at[0] * 100) / 100, lon: Math.round(at[1] * 100) / 100, label: "手动设置" });
             };
-            window.addEventListener("pointermove", move);
-            window.addEventListener("pointerup", up);
+            followDrag(event, move, up);
           });
           return chip;
         }));
@@ -792,14 +821,8 @@ export function topology(data, actions = {}, { layout = "rings" } = {}) {
           view.lat = from.lat + dy / P.R / RAD;
           redraw();
         };
-        const up = () => {
-          window.removeEventListener("pointermove", move);
-          window.removeEventListener("pointerup", up);
-          stage.classList.remove("panning");
-        };
         // on window: the picture is rebuilt while dragging
-        window.addEventListener("pointermove", move);
-        window.addEventListener("pointerup", up);
+        followDrag(event, move, () => stage.classList.remove("panning"));
       });
     }
 

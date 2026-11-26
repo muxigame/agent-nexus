@@ -40,6 +40,7 @@ if WINDOWS:
     EXTENDED_STARTUPINFO_PRESENT = 0x0008_0000
     CREATE_UNICODE_ENVIRONMENT = 0x0000_0400
     CREATE_NO_WINDOW = 0x0800_0000
+    CREATE_NEW_CONSOLE = 0x0000_0010
     STARTF_USESTDHANDLES = 0x0100
     PROC_THREAD_ATTRIBUTE_HANDLE_LIST = 0x0002_0002
     PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE = 0x0002_0016
@@ -316,6 +317,23 @@ def spawn(session: int, argv: list[str], cwd, env: dict[str, str] | None, log_fi
         if attributes is not None:
             _k32.DeleteProcThreadAttributeList(attributes)
         null.close()
+
+
+def open_window(session: int, argv: list[str], cwd, env: dict[str, str] | None) -> int:
+    """Start ``argv`` as the user of ``session`` in a window of its own on their desktop (a console
+    program gets a new console; nothing is inherited, no standard handles): what 在本机终端打开
+    needs from the system service, whose own children would run unseen in session 0. The pid."""
+    attributes = _attribute_list(1)  # empty, but EXTENDED_STARTUPINFO_PRESENT wants one
+    try:
+        startup = _StartupInfoEx()
+        startup.StartupInfo.cb = ctypes.sizeof(_StartupInfoEx)
+        startup.StartupInfo.lpDesktop = "winsta0\\default"
+        startup.lpAttributeList = ctypes.cast(attributes, ctypes.c_void_p)
+        pid, process = _create(session, argv, cwd, env, CREATE_NEW_CONSOLE, startup, inherit=False)
+        _k32.CloseHandle(process)
+        return pid
+    finally:
+        _k32.DeleteProcThreadAttributeList(attributes)
 
 
 # --------------------------------------------------------------------------- ConPTY as the user

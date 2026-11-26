@@ -180,3 +180,49 @@ def test_external_command_runs_anx_term_with_the_console_python(tmp_path, monkey
     command = remote.external_command(tmp_path, "pc-b", "pwsh")
     assert command[1:] == ["-m", "agent_nexus.cli", "--root", str(tmp_path), "term", "pc-b", "--shell", "pwsh"]
     assert not command[0].lower().endswith("pythonw.exe")
+
+
+def test_external_command_goes_through_this_client_when_given_its_console(tmp_path):
+    from agent_nexus import remote
+    command = remote.external_command(tmp_path, "pc-b", None, "http://127.0.0.1:8399")
+    assert command[-4:] == ["term", "pc-b", "--console", "http://127.0.0.1:8399"]
+
+
+def test_the_system_service_opens_the_terminal_window_as_the_user_on_their_desktop(tmp_path, monkeypatch):
+    """A window the service (SYSTEM) started itself opened in session 0, unseen: 在本机终端打开 did nothing."""
+    import subprocess
+
+    from agent_nexus import remote, winsession
+    monkeypatch.setattr(remote.sys, "platform", "win32")
+    monkeypatch.setattr(winsession, "is_system", lambda: True)
+    monkeypatch.setattr(winsession, "active_session", lambda: {"id": 1, "uid": 1, "user": "roc"})
+    wt_dir = tmp_path / "WindowsApps"
+    wt_dir.mkdir()
+    (wt_dir / "wt.exe").write_text("")
+    (wt_dir / "wt.exe").chmod(0o755)
+    monkeypatch.setattr(winsession, "environment", lambda session: {"Path": str(wt_dir), "USERPROFILE": str(tmp_path)})
+    monkeypatch.setenv("PATHEXT", ".EXE")
+    opened = []
+    monkeypatch.setattr(winsession, "open_window", lambda session, argv, cwd, env: opened.append((session, argv, cwd, env)) or 42)
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: pytest.fail("not as SYSTEM in session 0"))
+
+    result = remote.open_external(tmp_path, "pc-b", title="a;b", console="http://127.0.0.1:8399")
+    assert result == {"opened": "windows-terminal"}
+    session, argv, cwd, env = opened[0]
+    assert session == 1 and cwd == str(tmp_path) and env["PYTHONUTF8"] == "1"
+    assert argv[1:5] == ["new-tab", "--title", "a b", "--"]  # wt splits at ";"
+    assert argv[-2:] == ["--console", "http://127.0.0.1:8399"]
+
+    monkeypatch.setattr(winsession, "active_session", lambda: None)
+    with pytest.raises(remote.RemoteError) as nobody:
+        remote.open_external(tmp_path, "pc-b", console="http://127.0.0.1:8399")
+    assert nobody.value.code == "no_desktop"
+
+
+def test_anx_term_takes_only_this_computers_client_as_console():
+    from agent_nexus.term_cli import TermCliError, console_origin
+    assert console_origin("http://127.0.0.1:8399") == "http://127.0.0.1:8399"
+    assert console_origin("127.0.0.1:8399") == "http://127.0.0.1:8399"
+    for bad in ("https://hub.example.test", "http://10.0.0.2:8399", "http://127.0.0.1"):
+        with pytest.raises(TermCliError):
+            console_origin(bad)

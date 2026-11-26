@@ -171,6 +171,38 @@ test("the terminal and desktop pages draw before the network answers", () => {
   assert.match(ui, /if \(!options\.keepCache && swr\.store\.size\)/);
 });
 
+test("a drag on the globe ends however the button is let go", () => {
+  // followDrag, taken out of topology.js (which imports /ui/ paths node cannot load)
+  const source = fs.readFileSync(path.join(STATIC, "ui/topology.js"), "utf8");
+  const body = source.match(/export function followDrag\(down, move, end\) \{[\s\S]*?\n\}\n/)[0].replace("export ", "");
+  const listeners = {};
+  const fakeWindow = {
+    addEventListener: (type, fn) => { (listeners[type] ||= new Set()).add(fn); },
+    removeEventListener: (type, fn) => { listeners[type]?.delete(fn); },
+  };
+  const followDrag = new Function("window", `${body}; return followDrag;`)(fakeWindow);
+  const fire = (type, event) => { for (const fn of [...(listeners[type] || [])]) fn(event); };
+  const attached = () => Object.values(listeners).reduce((n, set) => n + set.size, 0);
+
+  const run = (finishWith) => {
+    const log = [];
+    followDrag({ pointerId: 1 }, (e) => log.push(["move", e.clientX]), (e, cancelled) => log.push(["end", cancelled]));
+    fire("pointermove", { pointerId: 1, pointerType: "mouse", buttons: 1, clientX: 5 });
+    fire("pointermove", { pointerId: 2, pointerType: "mouse", buttons: 1, clientX: 9 });  // another pointer
+    finishWith();
+    fire("pointermove", { pointerId: 1, pointerType: "mouse", buttons: 0, clientX: 7 });  // after the end: nothing
+    return log;
+  };
+  assert.deepEqual(run(() => fire("pointerup", { pointerId: 1 })), [["move", 5], ["end", false]]);
+  // released outside the window: the next move has no button held
+  assert.deepEqual(run(() => {}), [["move", 5], ["end", true]]);
+  assert.deepEqual(run(() => fire("pointercancel", { pointerId: 1 })), [["move", 5], ["end", true]]);
+  assert.deepEqual(run(() => fire("blur", {})), [["move", 5], ["end", true]]);
+  assert.equal(attached(), 0);
+  // every drag in the topology goes through it
+  assert.ok(!/addEventListener\("pointerup"/.test(source.replace(body, "")));
+});
+
 test("the console page routes to the terminal and loads xterm from /console/ only", () => {
   const app = fs.readFileSync(path.join(STATIC, "console/app.js"), "utf8");
   assert.match(app, /"\/terminal\/:device"/);

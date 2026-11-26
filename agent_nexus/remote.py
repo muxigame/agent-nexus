@@ -274,26 +274,55 @@ def _console_python() -> str:
     return str(exe)
 
 
-def external_command(root: Path, device_id: str, shell: str | None = None) -> list[str]:
+def external_command(root: Path, device_id: str, shell: str | None = None, console: str | None = None) -> list[str]:
+    """``anx term <device>``; with ``console`` (this client's own console, http://127.0.0.1:<port>)
+    it goes through the client -- its route (direct / relay) and its credential, which the user's
+    own process cannot read on Windows (the system service keeps it)."""
     command = [_console_python(), "-m", "agent_nexus.cli", "--root", str(root), "term", device_id]
     if shell:
         command += ["--shell", shell]
+    if console:
+        command += ["--console", console]
     return command
 
 
-def open_external(root: Path, device_id: str, *, shell: str | None = None, title: str | None = None) -> dict:
-    """Open ``anx term <device>`` in this computer's own terminal: Windows Terminal when installed."""
-    command = external_command(root, device_id, shell)
-    env = {**os.environ, "PYTHONUTF8": "1"}
-    env.pop("VIRTUAL_ENV", None)
+def _windows_terminal_argv(env: dict, title: str, command: list[str]) -> tuple[list[str], str]:
+    path = next((value for key, value in env.items() if key.upper() == "PATH"), None)
+    wt = shutil.which("wt.exe", path=path) or shutil.which("wt", path=path)
+    if wt:
+        # wt.exe splits its command line at ";" (several tabs): none in the title
+        return [wt, "new-tab", "--title", title.replace(";", " "), "--", *command], "windows-terminal"
+    return command, "console"
+
+
+def open_external(root: Path, device_id: str, *, shell: str | None = None, title: str | None = None,
+                  console: str | None = None) -> dict:
+    """Open ``anx term <device>`` in this computer's own terminal: Windows Terminal when installed.
+
+    The Windows client runs as the system service: a window it started itself would open in
+    session 0, where nobody sees it (the button did nothing). It opens as the user at the
+    screen, on their desktop, with their environment (their Windows Terminal)."""
+    command = external_command(root, device_id, shell, console)
     title = (title or device_id)[:80]
     if sys.platform == "win32":
-        wt = shutil.which("wt.exe") or shutil.which("wt")
-        if wt:
-            subprocess.Popen([wt, "new-tab", "--title", title, "--", *command], env=env, close_fds=True)
-            return {"opened": "windows-terminal"}
-        subprocess.Popen(command, env=env, creationflags=subprocess.CREATE_NEW_CONSOLE, close_fds=True)
-        return {"opened": "console"}
+        from . import winsession
+        if winsession.is_system():
+            session = winsession.active_session()
+            if not session:
+                raise RemoteError(409, "这台电脑上现在没有登录的桌面用户，没有地方打开终端窗口", "no_desktop")
+            env = {**winsession.environment(int(session["uid"])), "PYTHONUTF8": "1"}
+            argv, opened = _windows_terminal_argv(env, title, command)
+            cwd = env.get("USERPROFILE") or None
+            winsession.open_window(int(session["uid"]), argv, cwd, env)
+            return {"opened": opened}
+        env = {**os.environ, "PYTHONUTF8": "1"}
+        env.pop("VIRTUAL_ENV", None)
+        argv, opened = _windows_terminal_argv(env, title, command)
+        subprocess.Popen(argv, env=env, close_fds=True,
+                         creationflags=subprocess.CREATE_NEW_CONSOLE if opened == "console" else 0)
+        return {"opened": opened}
+    env = {**os.environ, "PYTHONUTF8": "1"}
+    env.pop("VIRTUAL_ENV", None)
     if sys.platform == "darwin":
         script = " ".join(_sh_quote(part) for part in command)
         subprocess.Popen(["osascript", "-e", f'tell application "Terminal" to do script "{script}"'], env=env)

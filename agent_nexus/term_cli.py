@@ -176,12 +176,12 @@ def _size() -> tuple[int, int]:
     return size.columns, size.lines
 
 
-async def run_session(origin: str, auth: dict, device_id: str, shell: str) -> int:
+async def run_session(origin: str, auth: dict, device_id: str, shell: str, base: str = "/api/devices") -> int:
     from websockets.asyncio.client import connect
 
     cols, rows = _size()
     scheme = "wss" if origin.startswith("https") else "ws"
-    url = f"{scheme}://{urlsplit(origin).netloc}/api/devices/{quote(device_id, safe='')}/terminal/ws?shell={quote(shell)}&cols={cols}&rows={rows}"
+    url = f"{scheme}://{urlsplit(origin).netloc}{base}/{quote(device_id, safe='')}/terminal/ws?shell={quote(shell)}&cols={cols}&rows={rows}"
     loop = asyncio.get_running_loop()
     keys: asyncio.Queue[bytes] = asyncio.Queue()
     stop = threading.Event()
@@ -290,8 +290,52 @@ def _pick_device(devices: list[dict], wanted: str | None) -> dict:
     return usable[int(choice) - 1]
 
 
+def console_origin(raw: str) -> str:
+    """``--console``: this computer's own client, which alone may be used this way."""
+    parts = urlsplit(raw if "://" in raw else f"http://{raw}")
+    if parts.scheme != "http" or parts.hostname not in ("127.0.0.1", "localhost", "::1") or not parts.port:
+        raise TermCliError("--console must be this computer's client: http://127.0.0.1:<port>")
+    return f"http://{parts.netloc}"
+
+
+class LocalClient:
+    """The client on this computer (``--console``): it lists the devices and opens the terminal
+    with its own credential and route (直连 / 中转) -- the 在本机终端打开 button's way, from a
+    window running as the user, who on Windows cannot read the system service's credential."""
+    def __init__(self, origin: str):
+        self.origin = origin
+        self.headers: dict = {}
+
+    def get(self, path: str) -> dict:
+        response = httpx.get(f"{self.origin}{path}", timeout=60, trust_env=False)
+        body = response.json() if response.headers.get("content-type", "").startswith("application/json") else {}
+        if response.status_code != 200:
+            raise TermCliError(body.get("message") or body.get("error") or f"{path}: HTTP {response.status_code}")
+        return body
+
+
+def _term_via_client(args) -> int:
+    client = LocalClient(console_origin(args.console))
+    listing = client.get("/api/devices")
+    if (listing.get("lock") or {}).get("locked"):
+        raise TermCliError("这台设备已锁定，解锁后才能操作其他设备（本机控制台右上角的锁）")
+    devices = [d for d in listing.get("devices", []) if not d.get("self")]
+    device = _pick_device(devices, args.device)
+    device_id = device["device_id"]
+    shell = args.shell or ""
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        raise TermCliError("anx term needs an interactive terminal")
+    print(f"\x1b[90m→ {device.get('display_name')} ({device_id}) · Ctrl+] q 退出\x1b[0m", flush=True)
+    with RawTerminal():
+        code = asyncio.run(run_session(client.origin, {}, device_id, shell, base="/api/remote/devices"))
+    print(f"\r\n\x1b[90m[{device.get('display_name')}: 会话结束]\x1b[0m", flush=True)
+    return code
+
+
 def cmd_term(args, root: Path) -> int:
     try:
+        if getattr(args, "console", None):
+            return _term_via_client(args)
         from .join import joined
         if not args.gateway and joined(root):
             from .lock import Lock
@@ -346,5 +390,6 @@ def add_parser(sub) -> None:
     p.add_argument("device", nargs="?", help="device id or display name (asks when omitted)")
     p.add_argument("--shell", help="shell id on that device (see --shells); default: the device's default shell")
     p.add_argument("--gateway", help="gateway address (default: the gateway this device joined)")
+    p.add_argument("--console", help="through this computer's client (http://127.0.0.1:<port>): its route and credential")
     p.add_argument("--list", action="store_true", help="list devices and whether they offer a terminal")
     p.add_argument("--shells", action="store_true", help="list the device's shells and command-line tools")

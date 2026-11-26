@@ -913,8 +913,10 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
             remote.credentials(sup.cfg.root)  # joined, with a readable credential
             shell = body.get("shell") if isinstance(body.get("shell"), str) and len(body.get("shell")) <= 64 else None
             title = body.get("title") if isinstance(body.get("title"), str) else None
+            # through this client (its route and credential): the console's own address, which
+            # the guard in front of it has already checked is this machine's
             result = await run_in_threadpool(remote.open_external, sup.cfg.root, request.path_params["device_id"],
-                                             shell=shell, title=title)
+                                             shell=shell, title=title, console=f"http://{request.url.netloc}")
         except LockError as exc:
             return lock_error(exc)
         except remote.RemoteError as exc:
