@@ -49,7 +49,7 @@ SETTLE_FRAMES = 4
 FENCE = -312
 FENCE_REQUEST = 1 << 31
 #: updates in flight at most, and the bytes allowed before the first measure / at the least
-MAX_INFLIGHT = 4
+MAX_INFLIGHT = 8
 INITIAL_WINDOW = 512 * 1024
 MIN_WINDOW = 96 * 1024
 #: seconds of fence answers behind the round-trip minimum and the delivery rate
@@ -632,17 +632,17 @@ class Flow:
         """Until another update may go out; raises when the viewer stopped answering."""
         if not self.enabled:
             return
-        started = None
         while self.inflight and (len(self.inflight) >= MAX_INFLIGHT or self.bytes >= self.budget()):
             now = time.monotonic()
             if now - self.last_ack > STALL_TIMEOUT:
                 raise ConnectionError("the viewer stopped answering")
-            started = started or now
+            # only a full byte window says the link is the limit (a full frame count: just a long round trip)
+            by_bytes = self.bytes >= self.budget()
             self.event.clear()
             with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(self.event.wait(), 1.0)
-        if started is not None:
-            self.blocked += time.monotonic() - started
+            if by_bytes:
+                self.blocked += time.monotonic() - now
 
 
 class Session:
@@ -867,7 +867,7 @@ class Session:
         await self._send([struct.pack(">HHHHi", 0, 0, *size, DESKTOP_SIZE)])
 
     def _control(self) -> None:
-        """Once a second: follow the link. Congested (waiting for answers, round trips growing):
+        """Once a second: follow the link. Congested (the byte window full, or round trips growing):
         down to what the viewer took in; clear: up again, step by step, to the quality's ceiling."""
         now = time.monotonic()
         span = now - self.control_at
@@ -879,7 +879,8 @@ class Session:
         rate = self.flow.rate()
         queued = self.flow.rtt_recent() - self.flow.rtt_min()
         target = self.target
-        if blocked > 0.3 and rate is not None:
+        congested = blocked > 0.3 or queued > max(0.1, self.flow.rtt_min())
+        if congested and rate is not None:
             target = min(target, rate * 8 * 0.85)
         elif blocked < 0.05 and queued < max(0.04, self.flow.rtt_min() * 0.5) and now - self.raised_at > 2.0:
             target *= 1.5
