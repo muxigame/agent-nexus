@@ -15,6 +15,7 @@ anyone logged on, ``active`` falls back to SYSTEM. A per-user manager never swit
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sys
@@ -225,6 +226,11 @@ def hand_over(account: Account, *directories: Path) -> None:
                                capture_output=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             except OSError:
                 pass
+        return
+    if not hasattr(os, "chown"):  # Windows without a session account: nothing to hand over
+        for directory in directories:
+            with contextlib.suppress(OSError):
+                directory.mkdir(parents=True, exist_ok=True)
         return
     for directory in directories:
         try:

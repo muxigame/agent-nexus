@@ -260,3 +260,12 @@ def test_readonly_files_removed(tmp_path):
     (run / "f").write_text("x")
     os.chmod(run / "f", 0o444)
     assert tmp.clean(rid="ro")["removed"] == 1
+
+
+def test_create_with_account_where_chown_does_not_exist(tmp_path, monkeypatch):
+    # Windows CI: os.chown is POSIX-only; an account without a Windows session must not crash hand_over
+    from agent_nexus.accounts import Account
+    monkeypatch.delattr(os, "chown", raising=False)
+    tmp = T.TmpDirs(tmp_path)
+    path = tmp.create("r3", Account("me", 0, 0, str(tmp_path), "/bin/sh", []))
+    assert path.is_dir()
