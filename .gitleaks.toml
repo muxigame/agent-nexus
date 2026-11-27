@@ -13,4 +13,7 @@ paths = [
 regexes = [
   '''^Xk9vQ2mPz7Lr4tWb$''',
   '''^z-YIYCcsy9zJ6LUB_qpoCqFvrZ5W9pbw9QxX7_pjka0$''',
+  # the agent chat's API provider tests (tests/test_agents_api.py, tests/test_api_admin_ui.cjs)
+  '''^sk-test-0123456789abcd$''',
+  '''^sk-abcdef123456$''',
 ]
