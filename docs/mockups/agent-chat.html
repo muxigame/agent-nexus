@@ -17,7 +17,8 @@
      ?state=new     start on a new conversation (#/chat?new=1) instead of the active session
      ?state=first   a device with no sessions at all
      ?keep=1        keep the stored chat state (anx-chat:local) from the last visit instead of starting clean
-     ?side=open     open the session drawer (narrow widths)
+     ?side=open     open the session drawer (narrow widths; wide layouts show the list already)
+     ?collapsed=1   start with the session list collapsed (the stored `sideClosed`, wide layouts)
      ?menu=agent|dir|more|perm|device   open that popover once loaded
      ?answer=1      answer the pending approval (shows the resolved state) -->
 <body>
@@ -29,6 +30,7 @@ import { createFakeApi } from "./agent-fake-api.js";
 const q = new URLSearchParams(location.search);
 if (!q.get("keep")) {
   try { localStorage.removeItem(chatStorageKey(true)); } catch { /* private mode */ }
+  if (q.get("collapsed")) try { localStorage.setItem(chatStorageKey(true), JSON.stringify({ sideClosed: true })); } catch { /* private mode */ }
   if (!location.hash || location.hash === "#/") {
     history.replaceState(null, "", q.get("state") ? "#/chat?new=1" : "#/chat?device=dev-mbp&kind=claude&session=c-7f3a");
   }
@@ -96,7 +98,7 @@ const later = (ms) => new Promise((r) => setTimeout(r, ms));
   if (q.get("side") === "open") document.querySelector(".chat-side-toggle")?.click();
   if (q.get("answer")) document.querySelector(".chat-approval .btn-primary")?.click();
   const menu = q.get("menu");
-  const sel = { agent: ".chat-pick-agent", dir: ".chat-pick-dir", more: ".chat-more", perm: ".chat-pick:nth-of-type(4)", device: ".chat-bar .chat-pick" }[menu];
+  const sel = { agent: ".chat-chip-agent", dir: ".chat-chip-dir", more: ".chat-more", perm: ".chat-chip-perm", device: ".chat-chip-device" }[menu];
   if (sel) document.querySelector(sel)?.click();
 })();
 </script>

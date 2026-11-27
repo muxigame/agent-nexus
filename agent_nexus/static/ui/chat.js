@@ -1,5 +1,6 @@
-// Agent chat (docs/agent-chat.md §3, §4, §10, §11, §16): session sidebar grouped by CLI, target bar
-// (运行设备 / Agent / 目录 / 权限 / ⋯), unified event stream, composer with the context-usage ring.
+// Agent chat (docs/agent-chat.md §3, §4, §10, §11, §16): session sidebar grouped by CLI, a light head line
+// (会话列表 · title · ⋯), unified event stream, composer with a chip row (运行设备 / Agent / 目录 / 权限) and the
+// context-usage ring.
 //
 //   import { mountChat } from "/ui/chat.js";
 //   const chat = mountChat(container, api, {onLogin(kind, device, command, info) {…}, onEditPrompts(device) {…},
@@ -337,7 +338,14 @@ export function mountChat(container, api, opts = {}) {
     sideList);
   const scrim = el("div", { class: "chat-scrim", onclick: () => toggleSide(false) });
 
-  const bar = el("div", { class: "chat-bar", role: "toolbar", "aria-label": "对话设置" });
+  // A light head line (session toggle · title · ⋯) and the composer's chip row (运行设备 / Agent / 目录 / 权限).
+  const sideBtn = el("button", { class: "btn btn-ghost btn-icon btn-sm chat-side-toggle", type: "button", "aria-label": "会话列表", title: "会话列表", onclick: () => sideButton() }, icon("panel-left", { size: 17 }));
+  const headTitle = el("span", { class: "chat-head-title truncate" });
+  const moreBtn = el("button", { class: "btn btn-ghost btn-icon btn-sm chat-more", type: "button", "aria-label": "更多设置", title: "提示词预设、工作上下文、临时目录", "aria-haspopup": "menu",
+    onclick: (event) => moreMenu(event.currentTarget) }, icon("ellipsis", { size: 18 }));
+  const head = el("div", { class: "chat-head" }, sideBtn, headTitle, moreBtn);
+  const chips = el("div", { class: "chat-chips", role: "toolbar", "aria-label": "对话设置" });
+  chips.addEventListener("scroll", () => chipsEdge(), { passive: true });
   const ctxLine = el("div", { class: "chat-ctxline", hidden: true });
   const stream = el("div", { class: "chat-stream", role: "log", "aria-label": "对话内容", "aria-live": "off" });
   const working = el("div", { class: "chat-working", hidden: true }, el("span", { class: "chat-dots", "aria-hidden": "true" }, el("i"), el("i"), el("i")), el("span", {}));
@@ -348,20 +356,23 @@ export function mountChat(container, api, opts = {}) {
 
   const input = el("textarea", { class: "chat-input", rows: 1, "aria-label": "消息", placeholder: "" });
   const sendBtn = el("button", { class: "btn btn-primary btn-icon chat-send", type: "button", "aria-label": "发送", title: "发送（Enter）", onclick: () => send() }, xicon("arrow-up", { size: 18 }));
-  const stopBtn = el("button", { class: "btn chat-stop", type: "button", hidden: true, onclick: () => stop() }, icon("square", { size: 13 }), "停止");
-  const composerNote = el("div", { class: "chat-note" });
+  const stopBtn = el("button", { class: "btn chat-stop", type: "button", hidden: true, "aria-label": "停止", title: "停止这一轮", onclick: () => stop() }, icon("square", { size: 13 }), el("span", { class: "chat-stop-text" }, "停止"));
+  const composerNote = el("div", { class: "chat-note", hidden: true });
   // a button: phones show no title tooltip, so a tap shows the figures
   const usageNode = el("button", { class: "chat-usage", type: "button", hidden: true, onclick: () => {
     const view = usageView(S.usage);
     if (view) toast(`上下文${view.title}`, { type: "info", timeout: 5000 });
   } });
   const composer = el("div", { class: "chat-composer" },
+    composerNote,
     input,
-    el("div", { class: "chat-composer-foot" }, composerNote, el("div", { class: "chat-composer-actions" }, usageNode, stopBtn, sendBtn)));
-  const main = el("section", { class: "chat-main", "aria-label": "对话" }, bar, ctxLine, el("div", { class: "chat-body" }, scroller, jump), el("div", { class: "chat-composer-wrap" }, composer), live);
-  const root = el("div", { class: "chat card" }, side, scrim, main);
+    el("div", { class: "chat-composer-foot" }, chips, el("div", { class: "chat-composer-actions" }, usageNode, stopBtn, sendBtn)));
+  const main = el("section", { class: "chat-main", "aria-label": "对话" }, head, ctxLine, el("div", { class: "chat-body" }, scroller, jump), el("div", { class: "chat-composer-wrap" }, composer), live);
+  const root = el("div", { class: "chat" }, side, scrim, main);
   if (opts.height) root.style.setProperty("--chat-h", typeof opts.height === "number" ? `${opts.height}px` : opts.height);
-  if (store.read().sideCollapsed) root.classList.add("side-collapsed");
+  // Wide layouts open the session list by default. Only a collapse made with this version (`sideClosed`) keeps
+  // it closed: the older `sideCollapsed` preference is dropped once.
+  { const stored = store.read(); if ("sideCollapsed" in stored) store.write({ sideCollapsed: undefined }); if (stored.sideClosed === true) root.classList.add("side-collapsed"); }
   mount(container, root);
 
   const call = (op, params = {}) => callOp(api, op, params, S.device);
@@ -443,24 +454,24 @@ export function mountChat(container, api, opts = {}) {
     main.inert = modalSide;
     if (modalSide) side.setAttribute("aria-modal", "true"); else side.removeAttribute("aria-modal");
     if (open) (sideList.querySelector(".chat-sess.active .chat-sess-main") || search).focus();
-    else if (was && side.contains(document.activeElement)) bar.querySelector(".chat-side-toggle")?.focus();
+    else if (was && side.contains(document.activeElement)) sideBtn.focus();
   }
-  // wide layouts: the list can be collapsed (remembered, §16.2); the bar's toggle brings it back
+  // wide layouts: the list is open by default and can be collapsed (remembered, §16.2); the head's toggle brings it back
   function setCollapsed(on) {
     root.classList.toggle("side-collapsed", on);
-    store.write({ sideCollapsed: on });
-    if (on) bar.querySelector(".chat-side-toggle")?.focus(); else (sideList.querySelector(".chat-sess.active .chat-sess-main") || search).focus();
+    store.write({ sideClosed: on });
+    if (on) sideBtn.focus(); else (sideList.querySelector(".chat-sess.active .chat-sess-main") || search).focus();
   }
   function sideButton() {
-    // the same breakpoint as the `@container chat (max-width: 899px)` drawer layout
-    if (root.clientWidth < 900) toggleSide(!root.classList.contains("side-open")); else setCollapsed(!root.classList.contains("side-collapsed"));
+    // the same breakpoint as the `@container chat (max-width: 719px)` drawer layout
+    if (root.clientWidth < 720) toggleSide(!root.classList.contains("side-open")); else setCollapsed(!root.classList.contains("side-collapsed"));
   }
   root.addEventListener("keydown", (event) => {
     if (event.key !== "Escape" || !root.classList.contains("side-open") || event.defaultPrevented) return;
     if (openPop || event.target.closest?.(".chat-rename")) return;  // a menu or the rename field takes it first
     event.preventDefault();
     toggleSide(false);
-    bar.querySelector(".chat-side-toggle")?.focus();
+    sideBtn.focus();
   });
   // Growing past the narrow layout with the drawer open: the chat is usable again.
   window.addEventListener("resize", () => { if (root.isConnected && main.inert && !narrow()) main.inert = false; });
@@ -749,7 +760,9 @@ export function mountChat(container, api, opts = {}) {
       el("button", { class: "chat-sess-main", type: "button", "aria-current": active ? "true" : null, title: s.cwd || "", onclick: () => openSession(s) },
         showKind ? kindMark(s.kind) : null,
         el("span", { class: "chat-sess-body" }, title,
-          el("span", { class: "chat-sess-sub" }, el("span", { class: "truncate" }, shortPath(s.cwd) || "—"), el("span", { class: "chat-sess-time" }, relTime(s.updated_at))))),
+          el("span", { class: "chat-sess-sub" }, el("span", { class: "truncate" }, shortPath(s.cwd) || "—"),
+            s.subagents > 0 ? el("span", { class: "chat-sess-subagents", title: `${s.subagents} 个子代理会话` }, `子代理 ${s.subagents}`) : null,
+            el("span", { class: "chat-sess-time" }, relTime(s.updated_at))))),
       more);
     node.addEventListener("contextmenu", (event) => {
       event.preventDefault();
@@ -831,47 +844,50 @@ export function mountChat(container, api, opts = {}) {
     }
   }
 
-  // ============================================================ rendering: target bar
+  // ============================================================ rendering: head line + the composer's chips
 
-  function pick({ label, value, iconNode = null, onClick, title = "", cls = "", expanded = true }) {
-    return el("button", { class: `chat-pick ${cls}`, type: "button", "aria-haspopup": "true", "aria-expanded": "false", title: title || null, onclick: onClick },
-      iconNode,
-      el("span", { class: "chat-pick-text" }, el("span", { class: "chat-pick-label" }, label), el("span", { class: "chat-pick-value" }, value)),
-      expanded ? icon("chevron-down", { size: 14, cls: "chat-pick-caret" }) : null);
+  /** One chip of the composer's settings row: a small icon and a short value; the full text is its name. */
+  function chip({ name, value, iconNode = null, onClick, cls = "" }) {
+    return el("button", { class: `chat-chip ${cls}`, type: "button", "aria-haspopup": "true", "aria-expanded": "false", title: name, "aria-label": name, onclick: onClick },
+      iconNode, el("span", { class: "chat-chip-value" }, typeof value === "string" ? el("span", { class: "truncate" }, value) : value));
   }
 
   function renderBar() {
     const info = agentInfo();
     const status = info ? installStatus(info) : agentStatus(null);
-    const device = pick({ label: "运行设备", value: deviceName(), iconNode: icon(S.devices.find((d) => d.id === S.device)?.self === false ? "monitor" : "laptop", { size: 15, cls: "chat-pick-icon" }),
-      onClick: (event) => deviceMenu(event.currentTarget) });
-    const agentValue = el("span", { class: "chat-agent-value" },
-      S.kind ? el("span", { class: `dot ${status.tone === "neutral" ? "" : status.tone}` }) : null,
-      el("span", { class: "truncate" }, S.kind ? kindShort(S.kind, info) : S.loading ? "检测中…" : "选择 Agent"),
-      S.kind ? el("span", { class: "chat-agent-status" }, status.label) : null);
-    const agent = pick({ label: "Agent", value: agentValue, onClick: (event) => agentMenu(event.currentTarget), cls: "chat-pick-agent" });
+    const remote = S.devices.find((d) => d.id === S.device)?.self === false;
+    const device = chip({ name: `运行设备：${deviceName()}`, value: deviceName(), cls: `chat-chip-device ${deviceName().length <= 6 ? "fit" : ""}`,
+      iconNode: icon(remote ? "monitor" : "laptop", { size: 14, cls: "chat-chip-icon" }), onClick: (event) => deviceMenu(event.currentTarget) });
+    const agentName = S.kind ? kindShort(S.kind, info) : S.loading ? "检测中…" : "选择 Agent";
+    const agent = chip({ name: `Agent：${S.kind ? `${kindLabel(S.kind, info)} · ${status.label}` : agentName}`, cls: `chat-chip-agent ${agentName.length <= 8 ? "fit" : ""}`,
+      iconNode: S.kind ? el("span", { class: `dot ${status.tone === "neutral" ? "" : status.tone}`, "aria-hidden": "true" }) : icon("bot", { size: 14, cls: "chat-chip-icon" }),
+      value: [el("span", { class: "truncate" }, agentName), S.kind && status.tone !== "ok" ? el("span", { class: "chat-chip-status" }, status.label) : null],
+      onClick: (event) => agentMenu(event.currentTarget) });
     const base = S.workdir ? shortPath(S.workdir).split(/[\\/]/).filter(Boolean).pop() || S.workdir : "";
-    const dirValue = S.workdir ? [el("span", { class: "chat-dir-full" }, shortPath(S.workdir)), el("span", { class: "chat-dir-base" }, base)] : "选择目录";
-    const dir = pick({ label: "目录", value: dirValue, title: S.workdir, iconNode: xicon("folder", { size: 15, cls: "chat-pick-icon" }),
-      onClick: (event) => dirMenu(event.currentTarget), cls: `chat-pick-dir ${S.workdir ? "" : "no-dir"}` });
-    const perm = pick({ label: "权限", value: el("span", { class: "chat-perm-text" }, permLabel()), title: `权限：${permLabel()}`, iconNode: icon(S.permission === "full" ? "triangle-alert" : "shield-check", { size: 15, cls: "chat-pick-icon" }),
-      onClick: (event) => permissionMenu(event.currentTarget), cls: S.permission === "full" ? "danger" : "" });
-    const more = el("button", { class: "btn btn-ghost btn-icon btn-sm chat-more", type: "button", "aria-label": "更多设置", title: "提示词预设、工作上下文、临时目录", "aria-haspopup": "menu",
-      onclick: (event) => moreMenu(event.currentTarget) }, icon("ellipsis", { size: 18 }));
-    const sideBtn = el("button", { class: "btn btn-ghost btn-icon btn-sm chat-side-toggle", type: "button", "aria-label": "会话列表", title: "会话列表", onclick: () => sideButton() }, icon("panel-left", { size: 18 }));
-    const picks = el("div", { class: "chat-bar-picks" }, device, el("span", { class: "chat-bar-sep", "aria-hidden": "true" }), agent, dir, perm);
-    picks.addEventListener("scroll", () => barEdge(picks), { passive: true });
-    mount(bar, sideBtn, picks, more);
-    requestAnimationFrame(() => barEdge(picks));
+    const dir = chip({ name: S.workdir ? `目录：${S.workdir}` : "目录：未选择", value: S.workdir ? base : "选择目录", cls: `chat-chip-dir ${S.workdir ? "" : "no-dir"}`,
+      iconNode: xicon("folder", { size: 14, cls: "chat-chip-icon" }), onClick: (event) => dirMenu(event.currentTarget) });
+    const perm = chip({ name: `权限：${permLabel()}`, value: permShort(), cls: `chat-chip-perm ${S.permission === "full" ? "danger" : ""}`,
+      iconNode: icon(S.permission === "full" ? "triangle-alert" : "shield-check", { size: 14, cls: "chat-chip-icon" }), onClick: (event) => permissionMenu(event.currentTarget) });
+    mount(chips, device, agent, dir, perm);
+    requestAnimationFrame(() => chipsEdge());
+    renderTitle();
     renderCtxLine();
   }
+  // the chip's short form of the permission ("沙箱内自动"); the menu and the chip's name keep the full one
+  function permShort() { return S.permission === "ask" && noApprovals() ? NO_APPROVAL_ASK[0].replace(/执行$/, "") : permLabel(); }
 
-  // Pickers cut off at the right edge fade out, so the strip reads as scrollable (⋯ stays visible beside it).
-  function barEdge(picks) {
-    const max = picks.scrollWidth - picks.clientWidth;
-    picks.classList.toggle("fade-end", max > 2 && picks.scrollLeft < max - 2);
+  function renderTitle() {
+    const text = S.session ? sessionTitle(S.session) : S.rid ? "对话进行中" : "新对话";
+    headTitle.textContent = text;
+    headTitle.title = S.session?.cwd ? `${text} · ${S.session.cwd}` : text;
   }
-  window.addEventListener("resize", () => { const picks = bar.querySelector(".chat-bar-picks"); if (picks && root.isConnected) barEdge(picks); });
+
+  // Chips cut off at the right edge fade out, so the row reads as scrollable (phones scroll it sideways).
+  function chipsEdge() {
+    const max = chips.scrollWidth - chips.clientWidth;
+    chips.classList.toggle("fade-end", max > 2 && chips.scrollLeft < max - 2);
+  }
+  window.addEventListener("resize", () => { if (root.isConnected) chipsEdge(); });
 
   function renderCtxLine() {
     const c = S.context;
@@ -1300,25 +1316,28 @@ export function mountChat(container, api, opts = {}) {
     const running = ["starting", "running"].includes(S.runState);
     const name = S.kind ? kindShort(S.kind, agentInfo()) : "Agent";
     input.disabled = !!blocked && !S.rid;
-    input.placeholder = running ? `${name} 正在工作，可以先写下一条…` : `给 ${name} 发消息`;
+    // the key hint only where there is a keyboard (phones have no Shift); the title keeps it everywhere
+    const keys = window.matchMedia?.("(pointer: fine)").matches ? "（Enter 发送，Shift+Enter 换行）" : "";
+    input.placeholder = running ? `${name} 正在工作，可以先写下一条…` : `给 ${name} 发消息${keys}`;
+    input.title = "Enter 发送 · Shift+Enter 换行";
     stopBtn.hidden = !running;
     sendBtn.disabled = (!!blocked && !S.rid) || running || !input.value.trim();
     sendBtn.title = running ? "等这一轮结束后发送" : "发送（Enter）";
     composer.classList.toggle("blocked", !!blocked && !S.rid);
+    renderTitle();
+    // One small line above the input, only for state that matters now (the permission shows in its chip).
     if (blocked && !S.rid) {
       mount(composerNote, el("span", { class: "chat-note-warn" }, icon("info", { size: 14 }), blocked.text),
         blocked.action ? el("button", { class: "btn btn-sm", type: "button", onclick: blocked.action.onClick }, icon(blocked.action.icon, { size: 13 }), blocked.action.label) : null);
     } else {
       mount(composerNote,
-        el("span", { class: "chat-note-keys" }, el("kbd", {}, "Enter"), " 发送 · ", el("kbd", {}, "Shift"), "+", el("kbd", {}, "Enter"), " 换行"),
         S.session && !S.rid ? el("span", { class: "chat-note-resume" }, canResume(S.session.kind)
-          ? "· 将续接这个会话" : `· ${kindShort(S.session.kind, agentInfo(S.session.kind))} 不支持续接，发消息会开一个新对话`) : null,
-        S.permission === "ask" && noApprovals() ? el("span", { class: "chat-note-resume", title: `${name} ${NO_APPROVAL_ASK[1]}` }, `· ${NO_APPROVAL_ASK[0]}：不会逐项询问`) : null,
-        S.permission === "full" ? el("span", { class: "chat-note-danger" }, icon("triangle-alert", { size: 13 }), "完全信任") : null,
+          ? "将续接这个会话" : `${kindShort(S.session.kind, agentInfo(S.session.kind))} 不支持续接，发消息会开一个新对话`) : null,
         S.context.mode === "gateway" && agentInfo()?.gateway_mcp === false
           ? el("span", { class: "chat-note-warn", title: `经网关模式需要 ${name} 配置 Agent Nexus MCP 连接器，否则它调用不了 use_device` },
             icon("triangle-alert", { size: 13 }), `${name} 没有配置网关连接器`) : null);
     }
+    composerNote.hidden = !composerNote.childElementCount;
   }
 
   // ============================================================ the event stream
@@ -1925,8 +1944,7 @@ export function mountChat(container, api, opts = {}) {
   /** The page put the (persistent) chat back into the document. */
   function attached() {
     if (destroyed) return;
-    const picks = bar.querySelector(".chat-bar-picks");
-    requestAnimationFrame(() => { if (picks) barEdge(picks); kindsEdge(); if (stick) scrollToEnd(true); else jump.hidden = false; });
+    requestAnimationFrame(() => { chipsEdge(); kindsEdge(); if (stick) scrollToEnd(true); else jump.hidden = false; });
     if (!S.loading && S.device !== undefined) {
       refreshSessions(); refreshRuns();
       // back from Agent 设置 (a key set, models added or enabled there): the pickers and the composer re-read it

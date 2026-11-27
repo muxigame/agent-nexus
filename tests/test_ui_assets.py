@@ -136,3 +136,18 @@ def test_api_admin_tab_assets(which, monkeypatch, tmp_path):
     for op in ("agent_api_providers", "agent_api_provider_save", "agent_api_provider_delete", "agent_api_key_set",
                "agent_api_test", "agent_api_models"):
         assert f'"{op}"' in script, op
+
+
+def test_chat_layout_v3_assets():
+    """对话 page layout: no card, a light head line, the settings as chips in the composer (and the mockup drives them)."""
+    from pathlib import Path
+    chat = (UI_DIR / "chat.js").read_text(encoding="utf-8")
+    css = (UI_DIR / "ui.css").read_text(encoding="utf-8")
+    assert 'class: "chat card"' not in chat and 'class: "chat" }' in chat
+    assert '"chat-chips"' in chat and '"chat-head"' in chat and '"chat-bar"' not in chat
+    for rule in (".chat-head {", ".chat-chips {", ".chat-chip {"):
+        assert rule in css, rule
+    mockup = (Path(__file__).resolve().parents[1] / "docs" / "mockups" / "agent-chat.html").read_text(encoding="utf-8")
+    for selector in (".chat-chip-agent", ".chat-chip-dir", ".chat-chip-perm", ".chat-chip-device", ".chat-more"):
+        assert selector in mockup, selector
+    assert ".chat-bar" not in mockup and ".chat-pick" not in mockup
