@@ -202,6 +202,19 @@ def peer_session(peer: tuple, local: tuple) -> int | None:
     return None
 
 
+def peer_pid(peer: tuple, local: tuple) -> int | None:
+    """The process on the other end of a loopback TCP connection (from the system's table, not its word)."""
+    import psutil
+    try:
+        for conn in psutil.net_connections(kind="tcp4"):
+            if conn.pid and conn.laddr and conn.raddr and (conn.laddr.ip, conn.laddr.port) == tuple(peer[:2]) \
+                    and (conn.raddr.ip, conn.raddr.port) == tuple(local[:2]):
+                return conn.pid
+    except (psutil.Error, OSError):
+        return None
+    return None
+
+
 def ensure_window(exe: str | None, session: int) -> bool:
     """The tray window in ``session`` (an update closed it): start it as that user if it is not there."""
     import psutil

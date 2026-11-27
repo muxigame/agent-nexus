@@ -31,6 +31,8 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import __version__
+
 log = logging.getLogger("agent_nexus.session")
 
 WINDOWS = sys.platform == "win32"
@@ -39,6 +41,8 @@ PORT_FILE = "session.port"
 SOCKET_NAME = "session.sock"
 MAGIC = b"ANX-SESSION/1 "
 ATTACH_TIMEOUT = 15.0
+#: a login's helper is replaced (another release than the core) at most this often
+REPLACE_INTERVAL_S = 60.0
 
 
 def socket_path() -> Path:
@@ -170,6 +174,27 @@ def launch_helper(root: Path, active: dict) -> bool:
     return True
 
 
+def _peer_pid(writer: asyncio.StreamWriter) -> int | None:
+    """The helper's process, as the system reports it (never the pid a hello claims)."""
+    if WINDOWS:
+        from . import winsession
+        return winsession.peer_pid(writer.get_extra_info("peername"), writer.get_extra_info("sockname"))
+    sock = writer.get_extra_info("socket")
+    try:
+        raw = sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
+        return struct.unpack("3i", raw)[0] or None
+    except (OSError, AttributeError):
+        return None
+
+
+def _end_process(pid: int) -> None:
+    import signal
+    try:
+        os.kill(pid, signal.SIGTERM)  # Windows: TerminateProcess
+    except (OSError, ProcessLookupError):
+        pass
+
+
 def _peer_uid(writer: asyncio.StreamWriter) -> int | None:
     if WINDOWS:  # the session of the connecting process stands in for the uid
         from . import winsession
@@ -215,19 +240,26 @@ class _Helper:
     hello: dict
     writer: asyncio.StreamWriter
     pending: dict = field(default_factory=dict)  # id -> Future[(reader, writer)]
+    #: from another release than the core: replaced by a helper of this one (see SessionRegistry._replace)
+    stale: bool = False
 
 
 class SessionRegistry:
     """The core's end of the socket, and the remote hub's ``desktop`` service when it runs as root."""
 
     def __init__(self, path: Path | None = None, *, root: Path | None = None, active=active_session,
-                 launch=launch_helper):
+                 launch=launch_helper, peer_pid=_peer_pid, end_process=_end_process):
         self.path = path or socket_path()
         self.root = root
         self._launch = launch
         self.helpers: list[_Helper] = []
         self._server: asyncio.base_events.Server | None = None
         self._active = active
+        self._peer_pid = peer_pid
+        self._end_process = end_process
+        self._stopping = False
+        #: uid -> when its helper was last replaced (a launch that still starts another release must not loop)
+        self._replaced: dict[int, float] = {}
 
     async def start(self) -> None:
         if WINDOWS:
@@ -248,6 +280,7 @@ class SessionRegistry:
         log.info("session helpers: listening on %s", self.path)
 
     async def stop(self) -> None:
+        self._stopping = True
         if self._server is not None:
             self._server.close()
             self._server = None
@@ -264,7 +297,7 @@ class SessionRegistry:
                 "helpers": [{"uid": h.uid, "session": h.hello.get("session")} for h in self.helpers]}
 
     def _helper_for(self, active: dict) -> _Helper | None:
-        own = [helper for helper in self.helpers if helper.uid == active["uid"]]
+        own = [helper for helper in self.helpers if helper.uid == active["uid"] and not helper.stale]
         for helper in own:
             if str(helper.hello.get("session") or "") == active["id"]:
                 return helper
@@ -290,7 +323,19 @@ class SessionRegistry:
             return
         helper = _Helper(uid=uid, hello=dict(hello.get("hello") or {}), writer=writer)
         self.helpers.append(helper)
-        log.info("session helper connected (uid %s, session %s)", uid, helper.hello.get("session"))
+        log.info("session helper connected (uid %s, session %s, version %s)", uid, helper.hello.get("session"),
+                 helper.hello.get("version") or "older than 0.8.27")
+        if str(helper.hello.get("version") or "") != __version__:
+            # A helper outlives the core's updates (it runs in the login, started once): without this
+            # the remote desktop kept the release of the day of the login -- weeks old.
+            import time
+            if time.monotonic() - self._replaced.get(uid, -1e9) > REPLACE_INTERVAL_S:
+                self._replaced[uid] = time.monotonic()
+                helper.stale = True
+                self._replace(helper, self._peer_pid(writer))
+            else:
+                log.warning("the new session helper of %s still runs %s; keeping it", uid,
+                            helper.hello.get("version") or "an older release")
         try:
             while await reader.readline():  # the helper says nothing more; EOF = gone
                 pass
@@ -298,10 +343,34 @@ class SessionRegistry:
             pass
         finally:
             self.helpers.remove(helper)
+            if helper.stale and not self._stopping:
+                task = asyncio.ensure_future(self._relaunch(helper.uid))
+                task.add_done_callback(lambda done: done.cancelled() or done.exception())
             for future in helper.pending.values():
                 if not future.done():
                     future.cancel()
             log.info("session helper gone (uid %s)", uid)
+
+    def _replace(self, helper: _Helper, pid: int | None) -> None:
+        """Ask a helper of another release to go (one that does not know how is ended); its connection
+        closing starts one of this release (_relaunch)."""
+        log.info("session helper of %s runs %s; replacing it with %s", helper.uid,
+                 helper.hello.get("version") or "an older release", __version__)
+        if helper.hello.get("version"):
+            try:
+                helper.writer.write(json.dumps({"exit": True}).encode() + b"\n")
+            except (ConnectionError, OSError, RuntimeError):
+                pass
+        elif pid:
+            self._end_process(pid)
+
+    async def _relaunch(self, uid: int) -> None:
+        await asyncio.sleep(1.0)  # the old process lets go of its single-instance lock
+        if self._stopping or self.root is None or any(h.uid == uid and not h.stale for h in self.helpers):
+            return
+        active = await asyncio.to_thread(self._active)
+        if active and active["uid"] == uid:
+            await asyncio.to_thread(self._launch, self.root, active)
 
     async def serve(self, request: dict, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         """The remote hub's desktop service: hand the stream to the active session's helper."""
@@ -373,7 +442,7 @@ async def run_helper() -> None:
         from . import winsession
         session = str(winsession.process_session(os.getpid()))
     hello = {"session": session, "display": os.environ.get("DISPLAY", ""),
-             "wayland": os.environ.get("WAYLAND_DISPLAY", ""), "pid": os.getpid()}
+             "wayland": os.environ.get("WAYLAND_DISPLAY", ""), "pid": os.getpid(), "version": __version__}
     tasks: set[asyncio.Task] = set()
     while True:
         try:
@@ -387,6 +456,9 @@ async def run_helper() -> None:
         try:
             while line := await reader.readline():
                 message = json.loads(line)
+                if message.get("exit"):  # the core runs another release: it starts a helper of its own
+                    log.info("the core asked this helper to exit (it runs another release)")
+                    return
                 if "open" in message:
                     task = asyncio.create_task(_serve_one(str(message["open"]), dict(message.get("request") or {}), name))
                     tasks.add(task)

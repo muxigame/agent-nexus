@@ -338,3 +338,68 @@ def test_active_session_is_the_local_graphical_one(monkeypatch):
     # older systemd without User=: the uid comes from list-sessions
     shown["102"] = shown["102"].replace("User=1000\n", "")
     assert session_helper.active_session()["uid"] == 1000
+
+
+@supported_platform
+def test_a_helper_of_another_release_is_replaced(tmp_path, monkeypatch):
+    """The helper lives as long as the login; the core is updated under it. Without replacing it the
+    remote desktop kept the release of the day of the login (seen: a 0.7.5 helper under 0.8.27)."""
+    sock = tmp_path / "s" / "session.sock"
+    monkeypatch.setattr(session_helper, "socket_path", lambda: sock)
+    monkeypatch.setenv("ANX_ROOT", str(tmp_path))
+    monkeypatch.setenv("XDG_SESSION_ID", "7")
+    me = {"id": "7", "uid": _my_identity(), "user": "me", "type": "x11"}
+
+    async def old_helper(version):
+        """A helper that speaks the protocol of ``version`` (None: before versions were sent)."""
+        reader, writer = await session_helper._connect()
+        hello = {"session": "7", "pid": 1}
+        if version:
+            hello["version"] = version
+        writer.write(session_helper.MAGIC + json.dumps({"hello": hello}).encode() + b"\n")
+        await writer.drain()
+        lines = []
+        while line := await reader.readline():
+            lines.append(json.loads(line))
+            if not version:
+                continue  # an old helper ignores what it does not know
+            if lines[-1].get("exit"):
+                break
+        writer.close()
+        return lines
+
+    async def scenario():
+        launched, ended = [], []
+        registry = session_helper.SessionRegistry(sock, root=tmp_path, active=lambda: me,
+                                                  launch=lambda root, active: launched.append(active) or True,
+                                                  peer_pid=lambda writer: 4242, end_process=ended.append)
+        monkeypatch.setattr(session_helper, "REPLACE_INTERVAL_S", 0.0)
+        await registry.start()
+        # a helper of this protocol but another release: asked to exit, then a new one is launched
+        told = await asyncio.wait_for(old_helper("0.0.1"), 5)
+        assert told == [{"exit": True}]
+        for _ in range(150):
+            if launched:
+                break
+            await asyncio.sleep(0.02)
+        assert launched == [me]
+        assert not registry.status()["helper"], "a stale helper never serves a desktop"
+        # one from before versions: its process is ended (found by the connection, not its hello)
+        old = asyncio.create_task(old_helper(None))
+        for _ in range(100):
+            if ended:
+                break
+            await asyncio.sleep(0.02)
+        assert ended == [4242]
+        old.cancel()
+        # the current release stays
+        current = asyncio.create_task(old_helper(session_helper.__version__))
+        for _ in range(100):
+            if any(not h.stale for h in registry.helpers):
+                break
+            await asyncio.sleep(0.02)
+        assert registry.status()["helper"]
+        current.cancel()
+        await registry.stop()
+
+    asyncio.run(scenario())
