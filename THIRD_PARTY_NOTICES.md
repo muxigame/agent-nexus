@@ -93,6 +93,13 @@ The remote terminal uses `pywinpty` (MIT) for Windows ConPTY sessions.
 
 - Project: https://github.com/andfoy/pywinpty
 
+## zstandard (dependency)
+
+The agent chat reads DeepSeek Harness session transcripts (`.jsonl.zstd`) with `zstandard` (BSD-3-Clause),
+which bundles the zstd library (BSD-3-Clause).
+
+- Project: https://github.com/indygreg/python-zstandard
+
 ## IP location data (gateway, downloaded or derived)
 
 The gateway places devices on the 设备 / 拓扑 globe offline (`agent_nexus/geoip.py`):

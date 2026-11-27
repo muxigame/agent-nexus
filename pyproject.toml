@@ -28,6 +28,8 @@ dependencies = [
     "python-xlib>=0.33; sys_platform == 'linux'",
     # the gateway's globe: DB-IP City Lite (mmdb) for addresses abroad (agent_nexus/geoip.py)
     "maxminddb>=2.5",
+    # agent chat: DeepSeek Harness keeps its transcripts as .jsonl.zstd (agent_nexus/agents/sessions.py)
+    "zstandard>=0.22",
 ]
 
 [project.scripts]
