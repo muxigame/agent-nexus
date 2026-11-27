@@ -26,7 +26,7 @@ class OldPeer(FakePeer):
 
     def __init__(self, hub, agent_id, root):
         super().__init__(hub, agent_id, root, features=("files/1",))
-        account = types.SimpleNamespace(home=str(self.home), session=None, uid=os.getuid(), gid=os.getgid())
+        account = types.SimpleNamespace(home=str(self.home), session=None, uid=getattr(os, "getuid", lambda: 0)(), gid=getattr(os, "getgid", lambda: 0)())
         self.share = legacy_module().FileShare(account=lambda: account)
         self.handlers = self.share.handlers()
 

@@ -43,7 +43,7 @@ class FakePeer:
         home = root / agent_id
         home.mkdir(parents=True, exist_ok=True)
         self.home = home
-        account = types.SimpleNamespace(home=str(home), session=None, uid=os.getuid(), gid=os.getgid())
+        account = types.SimpleNamespace(home=str(home), session=None, uid=getattr(os, "getuid", lambda: 0)(), gid=getattr(os, "getgid", lambda: 0)())
         self.share = FileShare(account=lambda: account)
         handlers = self.share.handlers()
         self.handlers = handlers if "files/2" in self.features else {k: v for k, v in handlers.items() if k in V1}

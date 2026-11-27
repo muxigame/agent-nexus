@@ -47,7 +47,7 @@ def device(tmp_path, name, port, token_env, *, jobs: bool):
     cloud = {"enabled": True, "agent_id": name, "url": f"ws://127.0.0.1:{port}", "token_env": token_env,
              "workspaces": {}}
     (root / "agent-nexus.json").write_text(json.dumps({"cloud": cloud}), encoding="utf-8")
-    account = types.SimpleNamespace(home=str(home), session=None, uid=os.getuid(), gid=os.getgid())
+    account = types.SimpleNamespace(home=str(home), session=None, uid=getattr(os, "getuid", lambda: 0)(), gid=getattr(os, "getgid", lambda: 0)())
     share = FileShare(account=lambda: account)
     hub = HubLink()
     hub.handlers.update(share.handlers())

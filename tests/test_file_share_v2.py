@@ -52,7 +52,9 @@ def test_mtime_is_kept_and_checksum_mismatch_deletes_the_part(tmp_path):
     files = share(tmp_path)
     when = 1_600_000_000_123_456_789
     done = put(files, {"base": str(tmp_path), "rel": ["m.txt"], "size": 2, "mtime_ns": when}, b"hi")
-    assert (tmp_path / "m.txt").stat().st_mtime_ns == when and done["size"] == 2
+    # kept to the file system's resolution (NTFS: 100 ns), the tolerance same_mtime applies when comparing
+    stored = (tmp_path / "m.txt").stat().st_mtime_ns
+    assert abs(stored - when) < 100 and file_share.same_mtime(when, stored) and done["size"] == 2
     started = files.begin({"base": str(tmp_path), "rel": ["bad.txt"], "size": 2})
     files.write_bytes({"id": started["id"]}, b"hi")
     with pytest.raises(FileShareError) as bad:
