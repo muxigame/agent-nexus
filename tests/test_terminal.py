@@ -319,3 +319,102 @@ def test_warm_scans_ahead():
 
 async def _done(_value=None):
     return []
+
+
+# --------------------------------------------------------------------------- latency (term/2)
+
+class RecordingPty:
+    def __init__(self):
+        self.written: list[bytes] = []
+
+    def write(self, data):
+        self.written.append(data)
+
+
+def _terminals_with_session():
+    terms = terminal.Terminals()
+    session = terminal._Session(sid="s1", shell=terminal.Shell("sh", "sh", ["/bin/sh"]), pty=RecordingPty())
+    terms.sessions["s1"] = session
+    return terms, session
+
+
+def test_numbered_writes_go_in_in_order_and_once():
+    async def scenario():
+        terms, session = _terminals_with_session()
+        # sent without waiting for each other: they may run in any order on the device
+        calls = [terms.write({"sid": "s1", "data": B64(ch.encode()), "seq": n}) for n, ch in enumerate("abcdef")]
+        results = await asyncio.gather(*reversed(calls))
+        assert all(result["ok"] for result in results)
+        assert b"".join(session.pty.written) == b"abcdef"
+        again = await terms.write({"sid": "s1", "data": B64(b"c"), "seq": 2})  # a duplicate
+        assert again.get("duplicate") and b"".join(session.pty.written) == b"abcdef"
+        await terms.write({"sid": "s1", "data": B64(b"!")})  # unnumbered (term/1 gateways) still works
+        assert b"".join(session.pty.written) == b"abcdef!"
+
+    asyncio.run(scenario())
+
+
+def test_a_second_waiting_read_does_not_answer_empty():
+    async def scenario():
+        terms, session = _terminals_with_session()
+        first = asyncio.create_task(terms.read({"sid": "s1", "wait": 2}))
+        second = asyncio.create_task(terms.read({"sid": "s1", "wait": 2}))
+        await asyncio.sleep(0.05)
+        session.buffer += b"one"
+        session.event.set()
+        assert base64.b64decode((await first)["data"]) == b"one"
+        await asyncio.sleep(0.05)
+        assert not second.done(), "the other read keeps waiting for output"
+        session.buffer += b"two"
+        session.event.set()
+        assert base64.b64decode((await second)["data"]) == b"two"
+
+    asyncio.run(scenario())
+
+
+class SlowDevice(FakeDevice):
+    """A device a long way off: every answer takes ROUND_TRIP."""
+    ROUND_TRIP = 0.3
+
+    def answer(self, message):
+        time.sleep(self.ROUND_TRIP / 2)  # the call's way there
+        if message["method"] == "term_read":
+            for _ in range(200):  # a long poll: answers as soon as there is output
+                if self.output or self.exited:
+                    break
+                time.sleep(0.005)
+            message = {**message, "params": {**message.get("params", {})}}
+        super().answer(message)
+
+
+def test_keystrokes_echo_in_about_one_round_trip_through_the_gateway(tmp_path, monkeypatch):
+    """Before: each key waited for the previous write's answer, and its echo for the next poll."""
+    with TestClient(build_cloud_app(bearer_config(tmp_path, monkeypatch), tmp_path), base_url=ORIGIN) as client:
+        auth = {"Authorization": f"Bearer {SERVER_TOKEN}"}
+        ws = connect_device(client, ["term/1", "term/2"])
+        device = SlowDevice(ws)
+        device.output.clear()
+        device.thread.start()
+        try:
+            with client.websocket_connect("/api/devices/pc-main/terminal/ws?shell=bash&cols=90&rows=20", headers=auth) as term:
+                assert json.loads(term.receive_text())["type"] == "ready"
+                time.sleep(0.5)  # both polls wait on the device
+                started = time.monotonic()
+                for ch in "abcde":
+                    term.send_bytes(ch.encode())
+                    time.sleep(0.02)
+                echoed = b""
+                while echoed.count(b"echo:") < 5 and b"e" not in echoed.split(b"echo:")[-1]:
+                    echoed += term.receive_bytes()
+                elapsed = time.monotonic() - started
+                assert elapsed < 3 * SlowDevice.ROUND_TRIP, f"five keys took {elapsed:.2f}s"
+                term.send_bytes(b"exit\r")
+                while True:
+                    message = term.receive()
+                    if message.get("text") and json.loads(message["text"]).get("type") == "exit":
+                        break
+            writes = [params for method, params in device.calls if method == "term_write"]
+            assert [w.get("seq") for w in writes] == list(range(len(writes)))
+            assert b"".join(base64.b64decode(w["data"]) for w in writes).startswith(b"abcde")
+        finally:
+            ws.__exit__(None, None, None)

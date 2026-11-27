@@ -27,6 +27,11 @@ from typing import Any
 from uuid import uuid4
 
 FEATURE = "term/1"
+#: ``term/2``: ``term_write`` takes ``seq`` and applies the writes in that order, so the gateway may
+#: send keystrokes without waiting for each answer (one round trip abroad and back per key before).
+FEATURE_PIPELINED = "term/2"
+#: how long a numbered write waits for the ones before it
+WRITE_ORDER_TIMEOUT_S = 10.0
 MAX_SESSIONS = 8
 #: a session nobody has read from for this long is closed (the browser went away)
 IDLE_TTL_S = 15 * 60
@@ -373,6 +378,9 @@ class _Session:
     exit_code: int | None = None
     touched: float = field(default_factory=time.monotonic)
     event: asyncio.Event = field(default_factory=asyncio.Event)
+    #: numbered writes (term/2): the next number to apply, and the turn they wait for
+    next_write: int = 0
+    turn: asyncio.Condition = field(default_factory=asyncio.Condition)
 
 
 def available() -> bool:
@@ -528,6 +536,24 @@ class Terminals:
             raise TermError("data must be base64") from exc
         if len(data) > 64 * 1024:
             raise TermError("input chunk too large")
+        seq = params.get("seq")
+        if isinstance(seq, int) and not isinstance(seq, bool):
+            # term/2: writes sent without waiting for each other arrive as concurrent calls; they go
+            # into the terminal in the order they were numbered
+            async with session.turn:
+                try:
+                    await asyncio.wait_for(session.turn.wait_for(lambda: session.next_write >= seq), WRITE_ORDER_TIMEOUT_S)
+                except asyncio.TimeoutError:
+                    raise TermError("terminal input arrived out of order") from None
+                if seq < session.next_write:
+                    return {"ok": True, "duplicate": True}
+                try:
+                    if data and not session.exited:
+                        await asyncio.to_thread(session.pty.write, data)
+                finally:
+                    session.next_write = seq + 1
+                    session.turn.notify_all()
+            return {"ok": True}
         if data:
             await asyncio.to_thread(session.pty.write, data)
         return {"ok": True}
@@ -535,12 +561,18 @@ class Terminals:
     async def read(self, params: dict) -> dict:
         session = self._session(params)
         wait = max(0.0, min(float(params.get("wait") or 0), MAX_WAIT_S))
-        if not session.buffer and not session.exited and wait > 0:
+        deadline = time.monotonic() + wait
+        # Several reads may wait at once (the gateway keeps one waiting while it forwards the last
+        # answer): the one that finds the output empty after a wake waits on instead of answering empty.
+        while not session.buffer and not session.exited:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
             session.event.clear()
             try:
-                await asyncio.wait_for(session.event.wait(), wait)
+                await asyncio.wait_for(session.event.wait(), remaining)
             except asyncio.TimeoutError:
-                pass
+                break
         chunk = bytes(session.buffer[:MAX_READ_BYTES])
         del session.buffer[:len(chunk)]
         dropped, session.dropped = session.dropped, 0

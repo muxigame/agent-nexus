@@ -9,8 +9,14 @@ the browser sends ``{"type": "resize", "cols", "rows"}`` (input may also come as
 
 Who may open one: the owner (console cookie, same origin only, or an owner bearer token), or
 any joined device of the gateway's private network with its own credential (``Authorization:
-Bearer <device token>`` plus ``X-ANX-Device: <its id>``) while it is online and not locked. Output is pulled with a long poll (``term_read``), and
-input is written by one task in order, coalescing keystrokes that arrive together.
+Bearer <device token>`` plus ``X-ANX-Device: <its id>``) while it is online and not locked.
+
+Every call to the device is a round trip (abroad and back for a gateway in another country), so:
+output is pulled with long polls (``term_read``), two at a time -- one always waits on the device
+while the answer of the other is forwarded, so output never waits for a new poll; input is written
+by one task in order, coalescing keystrokes that arrive together, and to a ``term/2`` device without
+waiting for each answer (numbered writes, applied in order there). Before, a keystroke waited for the
+previous write's answer and its echo for the next poll: about three round trips per key.
 """
 from __future__ import annotations
 
@@ -20,6 +26,7 @@ import contextlib
 import hmac
 import json
 import logging
+from collections import deque
 from typing import Any
 
 from starlette.requests import Request
@@ -32,7 +39,12 @@ from .inbox_web import COOKIE, NO_STORE
 
 log = logging.getLogger(__name__)
 FEATURE = "term/1"
+#: numbered writes: the device applies them in order (keystrokes are sent without waiting)
+PIPELINED = "term/2"
 READ_WAIT_S = 20
+#: long polls waiting on the device at once, and writes in flight to a term/2 device
+READS_IN_FLIGHT = 2
+WRITES_IN_FLIGHT = 16
 MAX_INPUT_FRAME = 64 * 1024
 MAX_WRITE_CHUNK = 32 * 1024
 CLOSE_UNAUTHORIZED = 4401
@@ -147,8 +159,9 @@ class TerminalBridge:
         sid = opened["sid"]
         await socket.send_text(json.dumps({"type": "ready", "shell": opened.get("shell"), "cwd": opened.get("cwd")}))
         inputs: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=256)
+        pipelined = PIPELINED in getattr(peer, "features", frozenset())
         tasks = [asyncio.create_task(self._pump_output(socket, peer, sid)),
-                 asyncio.create_task(self._pump_input(peer, sid, inputs)),
+                 asyncio.create_task(self._pump_input(peer, sid, inputs, pipelined)),
                  asyncio.create_task(self._receive(socket, peer, sid, inputs))]
         try:
             await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
@@ -192,40 +205,85 @@ class TerminalBridge:
             await socket.close(code=CLOSE_UNAVAILABLE)
 
     async def _pump_output(self, socket: WebSocket, peer, sid: str) -> None:
-        while True:
-            try:
-                result = await peer.call("term_read", {"sid": sid, "wait": READ_WAIT_S})
-            except RoutingError as exc:
-                await self._fail(socket, f"设备连接中断：{exc}")
-                return
-            if not isinstance(result, dict) or "error" in result:
-                await socket.send_text(json.dumps({"type": "exit", "code": None,
-                                                   "reason": (result or {}).get("error")}, ensure_ascii=False))
-                return
-            data = base64.b64decode(result.get("data") or "")
-            if data:
-                await socket.send_bytes(data)
-            if result.get("exited"):
-                await socket.send_text(json.dumps({"type": "exit", "code": result.get("code")}))
-                return
+        reads: deque = deque()
+
+        def poll() -> None:
+            reads.append(asyncio.ensure_future(peer.call("term_read", {"sid": sid, "wait": READ_WAIT_S})))
+
+        try:
+            for _ in range(READS_IN_FLIGHT):
+                poll()
+            while True:
+                try:
+                    result = await reads.popleft()
+                except RoutingError as exc:
+                    await self._fail(socket, f"设备连接中断：{exc}")
+                    return
+                if not isinstance(result, dict) or "error" in result:
+                    await socket.send_text(json.dumps({"type": "exit", "code": None,
+                                                       "reason": (result or {}).get("error")}, ensure_ascii=False))
+                    return
+                if not result.get("exited"):
+                    poll()  # before forwarding: the device has a poll waiting again at once
+                data = base64.b64decode(result.get("data") or "")
+                if data:
+                    await socket.send_bytes(data)
+                if result.get("exited"):
+                    await socket.send_text(json.dumps({"type": "exit", "code": result.get("code")}))
+                    return
+        finally:
+            # polls still out end when the session closes; never cancel a device call (see socket())
+            for read in reads:
+                _CLOSERS.add(read)
+                read.add_done_callback(_CLOSERS.discard)
+                read.add_done_callback(lambda done: done.cancelled() or done.exception())
 
     @staticmethod
-    async def _pump_input(peer, sid: str, inputs: asyncio.Queue) -> None:
-        while True:
-            chunk = await inputs.get()
-            if chunk is None:
-                return
-            # Keystrokes that queued up while the last write was in flight go in one call.
-            stop = False
-            while len(chunk) < MAX_WRITE_CHUNK and not inputs.empty():
-                more = inputs.get_nowait()
-                if more is None:
-                    stop = True
-                    break
-                chunk += more
-            result = await peer.call("term_write", {"sid": sid, "data": base64.b64encode(chunk).decode("ascii")})
-            if stop or (isinstance(result, dict) and (result.get("exited") or "error" in result)):
-                return
+    async def _pump_input(peer, sid: str, inputs: asyncio.Queue, pipelined: bool = False) -> None:
+        seq = 0
+        writes: set = set()
+        stop = False
+
+        def answered(result) -> bool:
+            """False when the session is gone (exited, or the device refused)."""
+            return not (isinstance(result, dict) and (result.get("exited") or "error" in result))
+
+        try:
+            while not stop:
+                chunk = await inputs.get()
+                if chunk is None:
+                    return
+                # Keystrokes that queued up while the last write was in flight go in one call.
+                while len(chunk) < MAX_WRITE_CHUNK and not inputs.empty():
+                    more = inputs.get_nowait()
+                    if more is None:
+                        stop = True
+                        break
+                    chunk += more
+                params = {"sid": sid, "data": base64.b64encode(chunk).decode("ascii")}
+                if not pipelined:
+                    if not answered(await peer.call("term_write", params)):
+                        return
+                    continue
+                while len(writes) >= WRITES_IN_FLIGHT:
+                    done, _ = await asyncio.wait(writes, return_when=asyncio.FIRST_COMPLETED)
+                    writes.difference_update(done)
+                    if any(not task.cancelled() and (task.exception() is not None or not answered(task.result()))
+                           for task in done):
+                        return
+                write = asyncio.ensure_future(peer.call("term_write", {**params, "seq": seq}))
+                seq += 1
+                writes.add(write)
+                finished = [task for task in writes if task.done()]
+                writes.difference_update(finished)
+                if any(not task.cancelled() and (task.exception() is not None or not answered(task.result()))
+                       for task in finished):
+                    return
+        finally:
+            for write in writes:  # let them land; never cancel a device call
+                _CLOSERS.add(write)
+                write.add_done_callback(_CLOSERS.discard)
+                write.add_done_callback(lambda done: done.cancelled() or done.exception())
 
     @staticmethod
     async def _receive(socket: WebSocket, peer, sid: str, inputs: asyncio.Queue) -> None:
@@ -255,8 +313,11 @@ class TerminalBridge:
             elif payload.get("type") == "resize":
                 cols, rows = TerminalBridge._int(payload.get("cols"), 0), TerminalBridge._int(payload.get("rows"), 0)
                 if cols > 0 and rows > 0:
-                    with contextlib.suppress(RoutingError):
-                        await peer.call("term_resize", {"sid": sid, "cols": cols, "rows": rows})
+                    # not awaited here: typing must not wait a round trip behind a resize
+                    resize = asyncio.ensure_future(peer.call("term_resize", {"sid": sid, "cols": cols, "rows": rows}))
+                    _CLOSERS.add(resize)
+                    resize.add_done_callback(_CLOSERS.discard)
+                    resize.add_done_callback(lambda done: done.cancelled() or done.exception())
 
     async def network_devices(self, request: Request) -> Response:
         """``GET /api/network/devices``: the device list for a device of the network (``anx term``)."""

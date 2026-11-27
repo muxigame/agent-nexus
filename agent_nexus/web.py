@@ -1237,7 +1237,7 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
         terminals = anx_terminal.Terminals(account=lambda: anx_accounts.effective(sup.cfg.root, "terminal"))
         hub.handlers.update(terminals.handlers())
         hub.on_attach.append(terminals.warm)  # the first 终端 must not wait for the shell / CLI scan
-        hub.extra_features = (*hub.extra_features, anx_terminal.FEATURE)
+        hub.extra_features = (*hub.extra_features, anx_terminal.FEATURE, anx_terminal.FEATURE_PIPELINED)
 
     # -- file transfer (files/1): this device's files for the others, relay and P2P --
     from . import file_share as anx_file_share

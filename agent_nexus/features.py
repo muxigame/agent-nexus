@@ -48,6 +48,8 @@ PLUGIN_REPO = "plugin_repo/1"
 #: ``term/1``: the device answers ``term_info/open/write/read/resize/close`` (remote terminal);
 #: announced by the manager when a pseudo-terminal is available and ``terminal.enabled`` is not false.
 TERM = "term/1"
+#: ``term/2``: numbered ``term_write`` calls applied in order (the gateway pipelines keystrokes).
+TERM_PIPELINED = "term/2"
 #: Device features announced only when the process can serve them.
 #: ``desktop/1``: the remote hub also serves the built-in VNC (a device with a desktop).
 #: ``files/1``: file transfer: ``fx_*`` reverse RPC (the relay) and the remote hub's ``files`` service.
@@ -60,7 +62,7 @@ LINKS = "links/1"
 #: ``agents/1`` (device): answers the ``agent_*`` reverse RPCs (docs/agent-chat.md §13); announced by the
 #: manager unless ``agents.enabled`` is false.
 AGENTS = "agents/1"
-AGENT_OPTIONAL_FEATURES: tuple[str, ...] = (PLUGIN_REPO, TERM, "remote-hub/1", "desktop/1", FILES, RELAY, AGENTS)
+AGENT_OPTIONAL_FEATURES: tuple[str, ...] = (PLUGIN_REPO, TERM, TERM_PIPELINED, "remote-hub/1", "desktop/1", FILES, RELAY, AGENTS)
 ASK = "ask/1"
 INBOX = "inbox/1"
 WAKE = "wake/1"
