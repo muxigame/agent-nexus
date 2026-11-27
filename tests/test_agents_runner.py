@@ -743,3 +743,16 @@ def test_codex_error_then_turn_failed_with_the_same_message_shows_once():
     assert events[0] == {"type": "error", "level": "warn", "text": "config notice"}
     assert adapter.feed(json.dumps({"type": "error", "message": "last words"})) == []
     assert adapter.exited(0, "") == [{"type": "error", "level": "warn", "text": "last words"}]
+
+
+def test_codex_gateway_mode_auto_approves_only_the_agent_nexus_connectors():
+    # seen on a real device: codex exec refused anx.mail_send ("needs approval but the policy is never")
+    d = registry.builtin_definitions()["codex"]
+    adapter = adapters.make(d, adapters.AdapterOptions(binary="codex", workdir="/w", permission="ask",
+                                                       extra={"mcp_approve": ["agent-nexus", "my hub"]}))
+    argv = adapter.argv("hi")
+    assert argv[:2] == ["codex", "exec"]
+    assert argv[2:6] == ["-c", 'mcp_servers.agent-nexus.default_tools_approval_mode="approve"',
+                         "-c", 'mcp_servers."my hub".default_tools_approval_mode="approve"']
+    plain = adapters.make(d, adapters.AdapterOptions(binary="codex", workdir="/w")).argv("hi")
+    assert not any("default_tools_approval_mode" in a for a in plain)

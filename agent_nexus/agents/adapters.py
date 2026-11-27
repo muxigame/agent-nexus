@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import difflib
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -553,7 +554,7 @@ class CodexExec(Adapter):
         template = "resume_command" if self.session_id and self.d.resume_command else "command"
         argv = registry.command_argv(self.d, self.opts.binary, permission=self.opts.permission,
                                      values=self._values(text), template=template)
-        return _codex_approval_flag(argv)
+        return _codex_mcp_approve(_codex_approval_flag(argv), self.opts.extra.get("mcp_approve") or [])
 
     def turn_stdin(self) -> bytes | None:
         return self._stdin
@@ -719,6 +720,20 @@ def _codex_status(status: Any, exit_code: Any, done: bool) -> str:
     if done or status == "completed":
         return "ok"
     return "running"
+
+
+def _codex_mcp_approve(argv: list[str], names: list[str]) -> list[str]:
+    """Gateway mode: ``codex exec`` never asks, so calls to an MCP server whose tools need approval are refused
+    (seen on a real device: "the tool needs approval but the approval policy is never"). For the Agent Nexus
+    connectors only, ``-c mcp_servers.<name>.default_tools_approval_mode="approve"`` right after ``exec``."""
+    if not names or "exec" not in argv:
+        return argv
+    flags: list[str] = []
+    for name in names:
+        key = name if re.fullmatch(r"[A-Za-z0-9_-]+", name) else json.dumps(name, ensure_ascii=False)
+        flags += ["-c", f'mcp_servers.{key}.default_tools_approval_mode="approve"']
+    at = argv.index("exec") + 1
+    return argv[:at] + flags + argv[at:]
 
 
 def _codex_approval_flag(argv: list[str]) -> list[str]:

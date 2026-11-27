@@ -782,19 +782,26 @@ def _mcp_entries(kind: str, home: Path, env: dict) -> list[tuple[str, Any]] | No
     return None  # dsh and custom CLIs: where they keep MCP servers is not known
 
 
-def gateway_mcp(kind: str, home: Path, env: dict, gateway: str = "") -> bool | None:
-    """Whether ``kind`` has an Agent Nexus MCP connector (gateway mode needs one): a server named or pointing at
-    agent-nexus, or at this device's gateway host. None when the CLI's MCP config is not known."""
+def gateway_mcp_names(kind: str, home: Path, env: dict, gateway: str = "") -> list[str] | None:
+    """The names of ``kind``'s Agent Nexus MCP connectors (named or pointing at agent-nexus, or at this device's
+    gateway host); None when the CLI's MCP config is not known."""
     entries = _mcp_entries(kind, Path(home), env)
     if entries is None:
         return None
     from urllib.parse import urlsplit
     host = (urlsplit(gateway).hostname or "").lower() if gateway else ""
+    names: list[str] = []
     for name, config in entries:
         text = (name + " " + json.dumps(config, ensure_ascii=False, default=str)).lower()
-        if any(marker in text for marker in _NEXUS_MARKERS) or (host and host in text):
-            return True
-    return False
+        if (any(marker in text for marker in _NEXUS_MARKERS) or (host and host in text)) and name not in names:
+            names.append(name)
+    return names
+
+
+def gateway_mcp(kind: str, home: Path, env: dict, gateway: str = "") -> bool | None:
+    """Whether ``kind`` has an Agent Nexus MCP connector (gateway mode needs one); None when unknown."""
+    names = gateway_mcp_names(kind, home, env, gateway)
+    return None if names is None else bool(names)
 
 
 def info(d: AgentDef, probed: dict, install: dict | None = None) -> dict:

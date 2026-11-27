@@ -776,7 +776,8 @@ class Runs:
 
     async def open(self, params: dict, *, binary: str | None = None, env: dict | None = None,
                    run_as: dict | None | bool = False, system_prompt: str | None = None, tmpdir: str | None = None,
-                   address: str = "", rid: str | None = None, events: list[dict] | None = None) -> dict:
+                   address: str = "", rid: str | None = None, events: list[dict] | None = None,
+                   extra: dict | None = None) -> dict:
         """Start a run. ``params`` (from the console): ``kind, workdir, prompt, resume_id?, permission?,
         title?``. The keyword arguments come from the hub, never from the console: an explicit ``binary``,
         extra ``env``, ``run_as`` (``Account.popen_args()``; False = the account's), the rendered
@@ -822,7 +823,7 @@ class Runs:
         if system_prompt is None:
             system_prompt = params.get("system_prompt") if isinstance(params.get("system_prompt"), str) else ""
         opts = AdapterOptions(binary=binary, workdir=workdir, permission=permission, system_prompt=system_prompt or "",
-                              resume_id=resume_id, batch=batch)
+                              resume_id=resume_id, batch=batch, extra=dict(extra or {}))
         rid = rid or uuid.uuid4().hex[:12]
         own = not tmpdir
         if own:

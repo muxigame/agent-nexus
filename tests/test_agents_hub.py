@@ -298,6 +298,37 @@ async def test_gateway_mode_binds_the_context_device_and_renders_its_fragment(hu
         os.environ.pop("FAKE_ARGV_LOG", None)
 
 
+async def test_gateway_mode_connector_warning_and_codex_auto_approve(hub, box):
+    handlers = hub.handlers()
+    log = box["tmp"] / "argv-gw2.jsonl"
+    os.environ["FAKE_ARGV_LOG"] = str(log)
+    context = {"mode": "gateway", "device": "pc-2", "workdir": "/srv/app"}
+    try:
+        # no Agent Nexus connector in codex's config: a clear warning, no approval overrides
+        opened = await handlers["agent_run_open"]({"kind": "codex", "workdir": str(box["home"] / "proj"), "prompt": "hi",
+                                                   "context": context})
+        events = await read_until(handlers, opened["rid"], turns_ended(1))
+        assert any(e["type"] == "error" and "MCP 连接器" in e.get("text", "") for e in events)
+        await handlers["agent_run_close"]({"rid": opened["rid"]})
+        # with one: codex exec gets it auto-approved (it can never ask)
+        (box["home"] / ".codex").mkdir(exist_ok=True)
+        (box["home"] / ".codex" / "config.toml").write_text('[mcp_servers.agent-nexus]\nurl = "https://gw/mcp"\n')
+        opened = await handlers["agent_run_open"]({"kind": "codex", "workdir": str(box["home"] / "proj"), "prompt": "hi",
+                                                   "context": context})
+        await read_until(handlers, opened["rid"], turns_ended(1))
+        argv = json.loads(log.read_text().splitlines()[-1])["argv"]
+        assert 'mcp_servers.agent-nexus.default_tools_approval_mode="approve"' in argv
+        await handlers["agent_run_close"]({"rid": opened["rid"]})
+        # read-only runs never get it
+        opened = await handlers["agent_run_open"]({"kind": "codex", "workdir": str(box["home"] / "proj"), "prompt": "hi",
+                                                   "permission": "readonly", "context": context})
+        await read_until(handlers, opened["rid"], turns_ended(1))
+        argv = json.loads(log.read_text().splitlines()[-1])["argv"]
+        assert not any("default_tools_approval_mode" in a for a in argv)
+        await handlers["agent_run_close"]({"rid": opened["rid"]})
+    finally:
+        os.environ.pop("FAKE_ARGV_LOG", None)
+
 async def test_open_refuses_bad_input_without_leaving_temp_folders(hub, box):
     handlers = hub.handlers()
     assert (await handlers["agent_run_open"]({"kind": "nope"}))["code"] == "unknown_kind"

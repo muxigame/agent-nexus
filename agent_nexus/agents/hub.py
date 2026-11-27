@@ -492,9 +492,23 @@ class AgentHub:
         console = {key: params[key] for key in ("kind", "workdir", "prompt", "resume_id", "permission", "title")
                    if key in params}
         console["workdir"] = workdir
+        extra: dict = {}
+        if mode == "gateway":
+            try:
+                names = await asyncio.to_thread(registry.gateway_mcp_names, kind, self._home(account, run_env),
+                                                run_env, str(device.get("gateway") or ""))
+            except Exception:  # noqa: BLE001 - a broken CLI config must not block the chat
+                names = None
+            if names == []:
+                events.append({"type": "error", "level": "warn",
+                               "text": f"{d.label} 没有配置 Agent Nexus MCP 连接器，经网关模式下它调用不了 use_device / "
+                                       "文件工具；先在 CLI 里加上网关的 MCP 地址"})
+            elif names and kind == "codex" and str(params.get("permission") or "ask") != "readonly":
+                # codex exec never asks: without this it refuses every call to the gateway's tools
+                extra["mcp_approve"] = names
         try:
             result = await self.runs.open(console, binary=binary, system_prompt=system_prompt, tmpdir=str(tmpdir),
-                                          address=address, rid=rid, events=events)
+                                          address=address, rid=rid, events=events, extra=extra)
         except RunError as exc:
             await asyncio.to_thread(self.tmp.clean, rid)
             if handle:

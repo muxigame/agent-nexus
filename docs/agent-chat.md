@@ -336,5 +336,11 @@ FEATURE = "agents/1"
 之后会话出现在列表里（标题是第一句、managed），历史可读，改名 / 置顶 / 隐藏生效；`agent_dirs`、提示词预览正常。
 注意：网关主人的写请求需要 `X-ANX: 1` 头（浏览器控制台会带）；设备客户端被强杀时 muxi-p2p-agent 子进程会留下。
 
-**尚未在真机上验证**：Claude Code 的真实回复（几台机器上的 Claude Code 都未登录）；经网关模式让一台设备上的 CLI 操作另一台设备的目录
-（需要 CLI 配好 Agent Nexus MCP 连接器，本地真实网关 + 两台设备进程上已跑通）。
+**经网关模式（真机）**：同一台 Windows 电脑上起临时网关 + 设备 A、B。A 上的 Codex（只为这次测试用 `-c mcp_servers.anx.url=… bearer_token_env_var=…`
+给它网关 MCP，用户的 config.toml 不动）以经网关模式操作 B 上的目录：拿到网关签发的 handle 和地址 `codex-target-b@anx-e2e-b`，
+用系统提示里的 workspace_id 调网关的 `mail_send`，邮件进了这个地址的会话（`/api/inbox/conversation`，聊天里合并显示）。
+发现：`codex exec` 从不询问，需要审批的 MCP 工具一律被拒（"该工具需要审批，但当前审批策略为 never"）。Codex 的
+`mcp_servers.<name>.default_tools_approval_mode`（取值 auto / prompt / writes / approve，从 0.164 的二进制里查到）设为 `approve` 后正常 →
+经网关模式下非只读的 Codex 运行，对检测到的 Agent Nexus 连接器自动加这条覆盖；没有连接器时对话里给出提示，`agent_info.gateway_mcp` 报告检测结果。
+
+**尚未在真机上验证**：Claude Code 的真实回复（几台机器上的 Claude Code 都未登录）。
