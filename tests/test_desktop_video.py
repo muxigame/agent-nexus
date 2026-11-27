@@ -39,11 +39,16 @@ class FakeEncoder:
 
     def __init__(self, width, height, bitrate):
         self.width, self.height = width, height
+        self.bitrate = bitrate
         self.frames = []
 
-    def encode(self, image, keyframe=False):
+    def encode(self, raw, size, keyframe=False):
         self.frames.append(keyframe)
         return b"\x00\x00\x00\x01" + (b"\x65" if keyframe else b"\x41") + b"data"
+
+    def set_bitrate(self, bitrate):
+        self.bitrate = bitrate
+        return True
 
     def close(self):
         pass
@@ -110,8 +115,8 @@ class BufferingEncoder(FakeEncoder):
         super().__init__(*args)
         self.held = None
 
-    def encode(self, image, keyframe=False):
-        out, self.held = self.held, image.getpixel((0, 0))
+    def encode(self, raw, size, keyframe=False):
+        out, self.held = self.held, raw[:3]
         return b"" if out is None else b"\x00\x00\x00\x01\x41" + bytes(out)
 
 

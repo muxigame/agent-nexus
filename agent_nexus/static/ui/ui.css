@@ -630,10 +630,68 @@ kbd { display: inline-block; padding: 0 5px; border: 1px solid var(--border-stro
 .btn.is-locked { color: var(--warn, #b7791f); }
 .term-route { max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
 .term-route.is-p2p { color: var(--ok, #2f9e44); border-color: currentColor; }
-.desktop-shell { background: #111; }
-.desktop-screen { height: calc(100vh - 230px); min-height: 360px; background: #111; overflow: hidden; display: flex; align-items: center; justify-content: center; }
-.desktop-shell:fullscreen .desktop-screen { height: auto; flex: 1; }
-.desktop-message { color: #ddd; padding: 24px; text-align: center; max-width: 560px; }
+/* 远程桌面 (local/desktop.js): the page is the remote screen -- a slim bar over a black stage that fills
+   the content area (viewport − top bar, − the tab bar on phones). In full screen the bar slides away and
+   comes back when the pointer reaches the top edge. */
+.page.page-desktop { max-width: none; padding: 0; gap: 0; }
+.desktop-shell { --desk-bar: #15171b; --desk-line: #2a2d33; --desk-text: #e7e9ee; --desk-dim: #9aa0aa;
+  position: relative; display: flex; flex-direction: column; height: calc(100dvh - var(--topbar-h)); min-height: 360px;
+  background: #000; color: var(--desk-text); overflow: hidden; }
+.desktop-bar { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 44px;
+  padding: 5px 10px; background: var(--desk-bar); border-bottom: 1px solid var(--desk-line); z-index: 2; flex-wrap: wrap; }
+.desktop-bar-left, .desktop-bar-right { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.desktop-bar-left { flex: 1 1 320px; }
+.desktop-mark { display: inline-flex; width: 26px; height: 26px; flex: none; align-items: center; justify-content: center;
+  border-radius: 7px; background: #23262c; color: var(--desk-text); }
+.desktop-mark svg { width: 16px; height: 16px; }
+.desktop-titles { display: flex; flex-direction: column; min-width: 0; line-height: 1.2; }
+.desktop-name { font-weight: 600; font-size: 13px; max-width: 260px; }
+.desktop-id { font-size: 10.5px; color: var(--desk-dim); max-width: 260px; }
+.desktop-status .pill { background: transparent; }
+.desktop-chip { display: inline-flex; align-items: center; height: 22px; padding: 0 8px; border-radius: 11px; font-size: 11.5px;
+  white-space: nowrap; color: var(--desk-dim); background: #20232a; border: 1px solid var(--desk-line); }
+.desktop-chip.is-p2p { color: #7ee2a8; border-color: #1f4d35; background: #12271c; }
+.desktop-select, .desktop-btn { height: 30px; border-radius: 7px; border: 1px solid var(--desk-line); background: #1d2026;
+  color: var(--desk-text); font: inherit; font-size: 12.5px; }
+.desktop-select { padding: 0 8px; cursor: pointer; }
+.desktop-btn { display: inline-flex; align-items: center; gap: 6px; padding: 0 10px; cursor: pointer; white-space: nowrap; }
+.desktop-btn:hover, .desktop-select:hover { background: #262a31; border-color: #3a3e46; }
+.desktop-btn:focus-visible, .desktop-select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.desktop-btn.danger { color: #ffb4ab; }
+.desktop-btn.danger:hover { background: #3a1d1b; border-color: #5c2a26; }
+.desktop-keys { position: relative; }
+.desktop-menu { position: absolute; right: 0; top: calc(100% + 6px); min-width: 200px; padding: 4px; border-radius: 9px;
+  background: #1d2026; border: 1px solid var(--desk-line); box-shadow: 0 10px 30px rgb(0 0 0 / .45); display: flex; flex-direction: column; z-index: 5; }
+.desktop-menu[hidden] { display: none; }
+.desktop-menu-item { text-align: left; padding: 7px 10px; border: 0; border-radius: 6px; background: transparent; color: var(--desk-text);
+  font: inherit; font-size: 12.5px; cursor: pointer; }
+.desktop-menu-item:hover { background: #2a2e36; }
+.desktop-stage { position: relative; flex: 1; min-height: 0; }
+.desktop-screen { position: absolute; inset: 0; overflow: hidden; background: #000; display: flex; align-items: center; justify-content: center; }
+.desktop-screen.native { overflow: auto; display: block; }
+.desktop-overlay { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 10px; padding: 24px; text-align: center; background: rgb(0 0 0 / .72); z-index: 1; }
+.desktop-overlay[hidden] { display: none; }
+.desktop-overlay-text { font-size: 15px; font-weight: 600; }
+.desktop-overlay-hint { font-size: 12.5px; color: var(--desk-dim); max-width: 520px; text-wrap: pretty; }
+.desktop-overlay-hint:empty, .desktop-overlay-action:empty { display: none; }
+.desktop-spinner { display: inline-flex; color: var(--desk-dim); animation: desk-spin 1s linear infinite; }
+.desktop-spinner[hidden] { display: none; }
+@keyframes desk-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .desktop-spinner { animation: none; } }
+.desktop-reveal { display: none; }
+.desktop-shell:fullscreen { height: 100vh; }
+.desktop-shell:fullscreen .desktop-bar { position: absolute; left: 50%; top: 0; transform: translate(-50%, -100%);
+  border: 1px solid var(--desk-line); border-top: 0; border-radius: 0 0 10px 10px; transition: transform .18s ease; max-width: calc(100% - 24px); }
+.desktop-shell:fullscreen .desktop-reveal { display: block; position: absolute; left: 0; right: 0; top: 0; height: 6px; z-index: 3; }
+.desktop-shell:fullscreen .desktop-reveal:hover ~ .desktop-bar, .desktop-shell:fullscreen .desktop-bar:hover,
+.desktop-shell:fullscreen .desktop-bar:focus-within { transform: translate(-50%, 0); }
+@media (max-width: 768px) {
+  .desktop-shell { height: calc(100dvh - 52px - var(--tabbar-h, 0px) - env(safe-area-inset-bottom, 0px)); }
+  .desktop-bar .label, .desktop-id, .desktop-status { display: none; }
+  .desktop-name { max-width: 150px; }
+  .desktop-bar-left { flex-basis: auto; }
+}
 
 /* a row the topology view pointed at */
 .list-item.flash { box-shadow: 0 0 0 2px var(--accent); transition: box-shadow var(--dur) var(--ease); }

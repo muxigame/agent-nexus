@@ -8,8 +8,10 @@ pseudo-encoding) when it changes on this machine (arrow, I-beam, hand...).
 
 Video: H.264 (RFB encoding 50, noVNC decodes it with WebCodecs -- in hardware) from the first
 encoder that works here: NVENC, Quick Sync, AMF, Media Foundation (Windows), VAAPI (Linux),
-then libx264 -- all low latency (no B-frames, zero-latency tuning), a frame only when the
-screen or the pointer changed. A viewer without H.264 gets Tight/JPEG of the changed area, or
+then libx264 -- all low latency (no B-frames, zero-latency tuning, no periodic key frames), a
+frame only when the screen or the pointer changed. Fences pace the frames to what the link carries
+and the bit rate follows it (:class:`Flow`); below the best quality a large screen is scaled to
+about 1920x1200. A viewer without H.264 gets Tight/JPEG of the changed area, or
 Raw. Input goes in with ``SendInput`` on Windows and XTEST on X11 (``python-xlib``); without
 an input backend the session is view-only.
 """
@@ -23,6 +25,7 @@ import os
 import struct
 import sys
 import time
+from collections import deque
 
 log = logging.getLogger(__name__)
 RAW, TIGHT, H264 = 0, 7, 50
@@ -36,12 +39,30 @@ JPEG_QUALITY = {0: 30, 1: 40, 2: 50, 3: 60, 4: 65, 5: 70, 6: 75, 7: 80, 8: 85, 9
 QUALITY_BASE = -32
 FRAME_INTERVAL = 1 / 60
 IDLE_POLL = 0.016
+#: a screen that has not changed for a while is looked at less often
+IDLE_POLL_STILL = 0.05
 #: After a change, this many more frames of the same picture: encoders that keep a frame or two
 #: (Media Foundation, Quick Sync, AMF) only release the last change when more frames come in --
 #: without these the picture stayed on an old frame until the screen changed again.
 SETTLE_FRAMES = 4
-#: a key frame at least this often while frames flow, so a viewer's decoder never waits long
-KEYFRAME_INTERVAL = 4.0
+#: RFB Fence (flow control, :class:`Flow`): pseudo-encoding, and the "request" flag
+FENCE = -312
+FENCE_REQUEST = 1 << 31
+#: updates in flight at most, and the bytes allowed before the first measure / at the least
+MAX_INFLIGHT = 4
+INITIAL_WINDOW = 512 * 1024
+MIN_WINDOW = 96 * 1024
+#: seconds of fence answers behind the round-trip minimum and the delivery rate
+RTT_WINDOW = 10.0
+RATE_WINDOW = 2.0
+#: no answer to a fence for this long: the viewer (or the tunnel) is gone
+STALL_TIMEOUT = 20.0
+#: the bit rate a session starts at and never goes below (bits/s); it climbs to the quality's ceiling
+START_BITRATE = 3_000_000
+MIN_BITRATE = 400_000
+DEFAULT_QUALITY = 6
+#: below the best quality the picture is sent at no more than about 1920x1200
+MAX_SCALED_PIXELS = 1920 * 1200
 #: H.264 bitrate (bits/s) per noVNC quality level 0..9
 H264_BITRATE = {0: 1_500_000, 1: 2_000_000, 2: 3_000_000, 3: 4_000_000, 4: 5_000_000, 5: 6_000_000,
                 6: 8_000_000, 7: 10_000_000, 8: 14_000_000, 9: 20_000_000}
@@ -87,6 +108,10 @@ class Screen:
         """(BGRA bytes, (w, h)) -- comparing bytes is far cheaper than comparing images."""
         shot = self.mss.grab(self.monitor)
         return shot.bgra, shot.size
+
+    def close(self):
+        with contextlib.suppress(Exception):
+            self.mss.close()
 
     def cursor(self, known=None):
         """(key, (hot_x, hot_y), RGBA image) of the pointer's current shape, or None.
@@ -207,7 +232,11 @@ def _x11_cursor(screen):
 
 
 class H264Encoder:
-    """PyAV (FFmpeg) H.264, the first encoder that opens here; Annex B access units out."""
+    """PyAV (FFmpeg) H.264, the first encoder that opens here; Annex B access units out.
+
+    ``width``/``height`` are the encoded size: the screen is scaled to it in the same pass that
+    converts BGRA to the encoder's pixel format. The encoder that worked is remembered for the
+    process, so the next session opens it once, without trying the others first."""
 
     CANDIDATES = {
         "win32": ("h264_nvenc", "h264_qsv", "h264_amf", "h264_mf", "libx264"),
@@ -221,6 +250,10 @@ class H264Encoder:
         "h264_vaapi": {"rc_mode": "CBR"},
         "libx264": {"preset": "ultrafast", "tune": "zerolatency"},
     }
+    #: these follow a new ``bit_rate`` on the next frame (FFmpeg reconfigures them); the others reopen
+    DYNAMIC_BITRATE = frozenset({"h264_nvenc", "libx264"})
+    #: the encoder that worked in this process (tried first, and without a probe)
+    working: str | None = None
 
     def __init__(self, width: int, height: int, bitrate: int):
         import av
@@ -229,25 +262,36 @@ class H264Encoder:
         self.bitrate = bitrate
         self.context = None
         self.name = None
+        self._source = None  # the reused BGRA frame
         platform = "win32" if sys.platform == "win32" else "linux"
         errors = []
         # ANX_DESKTOP_ENCODER=h264_mf (etc.) pins one encoder: troubleshooting, or a driver to avoid.
         pinned = os.environ.get("ANX_DESKTOP_ENCODER", "").strip()
-        for name in ([pinned] if pinned else self.CANDIDATES[platform]):
+        names = [pinned] if pinned else list(self.CANDIDATES[platform])
+        known = type(self).working
+        if known in names:
+            names.remove(known)
+            names.insert(0, known)
+        for name in names:
             try:
-                self.context = self._open(name)
-                self._probe()
-                # The probe used up the stream's first IDR frame: start the real stream fresh,
-                # so the viewer's decoder gets a key frame first.
+                if name != known:
+                    self.context = self._open(name)
+                    self._probe()
+                    # The probe used up the stream's first IDR frame: start the real stream fresh,
+                    # so the viewer's decoder gets a key frame first.
                 self.context = self._open(name)
                 self.name = name
+                type(self).working = name
                 break
             except Exception as exc:  # no such GPU / driver: try the next one
                 errors.append(f"{name}: {type(exc).__name__}")
                 self.context = None
+                if name == known:
+                    type(self).working = None
         if self.context is None:
             raise RuntimeError("no H.264 encoder: " + ", ".join(errors))
-        self.pts = 0
+        self.started = time.monotonic()
+        self.pts = -1
 
     def _open(self, name: str):
         context = self.av.CodecContext.create(name, "w")
@@ -256,33 +300,59 @@ class H264Encoder:
         context.time_base = __import__("fractions").Fraction(1, 1000)
         context.framerate = 60
         context.bit_rate = self.bitrate
-        context.gop_size = 240
+        # no periodic key frames: the stream is reliable, a viewer that needs one asks (a full request)
+        context.gop_size = 100000
         context.max_b_frames = 0
         context.options = dict(self.OPTIONS.get(name, {}))
         context.open()
         return context
 
     def _probe(self) -> None:
-        from PIL import Image
-        frame = self.av.VideoFrame.from_image(Image.new("RGB", (self.width, self.height)))
-        frame = frame.reformat(format=self.context.pix_fmt)
+        frame = self.av.VideoFrame(self.width, self.height, self.context.pix_fmt)
+        for plane in frame.planes:
+            plane.update(bytes(plane.buffer_size))
         frame.pts = 0
         list(self.context.encode(frame))
 
-    def encode(self, image, keyframe: bool = False) -> bytes:
-        if image.size != (self.width, self.height):
-            image = image.crop((0, 0, self.width, self.height))
-        frame = self.av.VideoFrame.from_image(image).reformat(format=self.context.pix_fmt)
-        self.pts += 16
+    def _frame(self, raw: bytes, size: tuple[int, int]):
+        """The screen's BGRA bytes as a frame of the encoder's format and size (scaled if need be)."""
+        width, height = size
+        source = self._source
+        if source is None or (source.width, source.height) != (width, height):
+            source = self._source = self.av.VideoFrame(width, height, "bgra")
+        plane = source.planes[0]
+        if plane.line_size == width * 4 and plane.buffer_size == len(raw):
+            plane.update(raw)
+        else:  # padded rows: through PIL
+            from PIL import Image
+            image = Image.frombytes("RGB", size, raw, "raw", "BGRX")
+            source = self.av.VideoFrame.from_image(image)
+        return source.reformat(width=self.width, height=self.height, format=self.context.pix_fmt,
+                               interpolation="BILINEAR" if (width, height) != (self.width, self.height) else None)
+
+    def encode(self, raw: bytes, size: tuple[int, int], keyframe: bool = False) -> bytes:
+        frame = self._frame(raw, size)
+        # real time stamps: the rate control spends the bits over real time, whatever the frame rate
+        self.pts = max(self.pts + 1, int((time.monotonic() - self.started) * 1000))
         frame.pts = self.pts
         if keyframe:
             frame.pict_type = self.av.video.frame.PictureType.I
-        data = b"".join(bytes(packet) for packet in self.context.encode(frame))
-        return data
+        return b"".join(bytes(packet) for packet in self.context.encode(frame))
+
+    def set_bitrate(self, bitrate: int) -> bool:
+        """Change the bit rate in place; False when this encoder must be reopened for it."""
+        if self.name not in self.DYNAMIC_BITRATE:
+            return False
+        self.bitrate = bitrate
+        self.context.bit_rate = bitrate
+        return True
 
     def close(self) -> None:
-        with contextlib.suppress(Exception):
-            self.context.close()
+        context, self.context = self.context, None
+        close = getattr(context, "close", None)  # PyAV >= 14 frees the encoder with the object
+        if close is not None:
+            with contextlib.suppress(Exception):
+                close()
 
 
 def h264_available() -> tuple[bool, str]:
@@ -292,9 +362,14 @@ def h264_available() -> tuple[bool, str]:
         return False, "PyAV not installed"
     return True, ""
 
-    def close(self):
-        with contextlib.suppress(Exception):
-            self.mss.close()
+
+def encoded_size(width: int, height: int, quality: int) -> tuple[int, int]:
+    """The size the picture is sent at: the screen's, down to about 1920x1200 below the best quality
+    (a 4K screen is four times the bits, and the viewer scales it down to its window anyway)."""
+    if quality < 9 and width * height > MAX_SCALED_PIXELS:
+        factor = (MAX_SCALED_PIXELS / (width * height)) ** 0.5
+        width, height = round(width * factor), round(height * factor)
+    return max(2, width - width % 2), max(2, height - height % 2)
 
 
 # --------------------------------------------------------------------------- input
@@ -478,6 +553,98 @@ class _NoH264(Exception):
     pass
 
 
+class Flow:
+    """Updates on their way to the viewer, acknowledged with RFB Fences.
+
+    The tunnel agent takes what is written at loopback speed and queues it; with a link slower than
+    the encoder (a relay, a weak uplink) seconds of frames piled up there, and the picture fell
+    further and further behind -- it looked frozen. After every update the server sends a fence,
+    which the viewer answers once it has processed everything before it. Only a few updates and
+    about two bandwidth-delay products of bytes are in flight; the delivery rate measured from the
+    answers drives the encoder's bit rate (:meth:`Session._control`)."""
+
+    def __init__(self):
+        self.enabled = False
+        self.seq = 0
+        self.inflight: deque = deque()  # (seq, size, sent at)
+        self.bytes = 0
+        self.event = asyncio.Event()
+        self.rtts: deque = deque()  # (time, rtt)
+        self.acked: deque = deque()  # (time, size)
+        self.blocked = 0.0  # seconds spent waiting for answers since the last control step
+        self.last_ack = time.monotonic()
+
+    def fence(self, size: int) -> bytes:
+        self.seq = (self.seq + 1) % 0xFFFFFFFF
+        now = time.monotonic()
+        if not self.inflight:
+            self.last_ack = now  # nothing was outstanding: no answer was late
+        self.inflight.append((self.seq, size, now))
+        self.bytes += size
+        payload = b"%08x" % self.seq  # ASCII: noVNC echoes the payload as a string
+        return struct.pack(">BxxxIB", 248, FENCE_REQUEST, len(payload)) + payload
+
+    def ack(self, payload: bytes) -> None:
+        try:
+            seq = int(payload.decode("ascii"), 16)
+        except ValueError:
+            return
+        if not any(entry[0] == seq for entry in self.inflight):
+            return
+        now = time.monotonic()
+        while self.inflight:
+            done, size, sent = self.inflight.popleft()
+            self.bytes -= size
+            self.acked.append((now, size))
+            if done == seq:
+                self.rtts.append((now, now - sent))
+                break
+        self.last_ack = now
+        while self.rtts and now - self.rtts[0][0] > RTT_WINDOW:
+            self.rtts.popleft()
+        while self.acked and now - self.acked[0][0] > RATE_WINDOW:
+            self.acked.popleft()
+        self.event.set()
+
+    def rtt_min(self) -> float:
+        return min((rtt for _, rtt in self.rtts), default=0.1)
+
+    def rtt_recent(self) -> float:
+        recent = [rtt for _, rtt in list(self.rtts)[-4:]]
+        return sum(recent) / len(recent) if recent else 0.1
+
+    def rate(self) -> float | None:
+        """Bytes per second the viewer took in over the last RATE_WINDOW (None: too few answers)."""
+        if len(self.acked) < 4:
+            return None
+        span = self.acked[-1][0] - self.acked[0][0]
+        if span < 0.3:
+            return None
+        return sum(size for _, size in list(self.acked)[1:]) / span
+
+    def budget(self) -> int:
+        rate = self.rate()
+        if rate is None:
+            return INITIAL_WINDOW
+        return int(max(MIN_WINDOW, rate * max(self.rtt_min(), 0.03) * 2.5))
+
+    async def wait(self) -> None:
+        """Until another update may go out; raises when the viewer stopped answering."""
+        if not self.enabled:
+            return
+        started = None
+        while self.inflight and (len(self.inflight) >= MAX_INFLIGHT or self.bytes >= self.budget()):
+            now = time.monotonic()
+            if now - self.last_ack > STALL_TIMEOUT:
+                raise ConnectionError("the viewer stopped answering")
+            started = started or now
+            self.event.clear()
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(self.event.wait(), 1.0)
+        if started is not None:
+            self.blocked += time.monotonic() - started
+
+
 class Session:
     def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, name: str):
         self.reader, self.writer, self.name = reader, writer, name
@@ -488,25 +655,39 @@ class Session:
         self.input = None
         self.format = PixelFormat()
         self.encodings: list[int] = [RAW]
-        self.quality = 6
+        self.quality = DEFAULT_QUALITY
         self.pending: asyncio.Event = asyncio.Event()
         self.full = True
         self.previous = None
         self.encoder: H264Encoder | None = None
         self.encoder_failed = False
-        self.encoder_quality = None
+        self.warm: asyncio.Future | None = None
         self.last_raw = None
         self.cursor_key = None
         self.announced = set()
         self.continuous = False
         self.settle = 0
-        self.last_key = 0.0
         self.encode_failures = 0
+        self.flow = Flow()
+        #: the framebuffer the viewer sees (the encoded size; the screen is scaled to it)
+        self.fb = (0, 0)
+        self.relayout = False
+        self.target = START_BITRATE
+        self.control_at = time.monotonic()
+        self.raised_at = 0.0
+        self.reopened_at = 0.0
+        self.last_sent = 0.0
+        self.changed_at = 0.0
 
     async def run(self) -> None:
         loop = asyncio.get_running_loop()
         self.screen = await loop.run_in_executor(self.capture, Screen)
         self.input = make_input(self.screen)
+        self.fb = encoded_size(self.screen.width, self.screen.height, self.quality)
+        if h264_available()[0]:
+            # Opening a hardware encoder takes a few hundred ms: meanwhile the handshake runs.
+            self.warm = loop.run_in_executor(None, H264Encoder, *self.fb, self._bitrate())
+            self.warm.add_done_callback(lambda f: f.cancelled() or f.exception())
         try:
             await self._handshake()
             sender = asyncio.create_task(self._updates())
@@ -525,6 +706,8 @@ class Session:
                     with contextlib.suppress(BaseException):
                         await task
         finally:
+            if self.warm is not None:
+                self.warm.add_done_callback(lambda f: f.cancelled() or f.exception() or f.result().close())
             if self.encoder is not None:
                 self.encoder.close()
             with contextlib.suppress(Exception):
@@ -557,8 +740,22 @@ class Session:
         await w.drain()
         await r.readexactly(1)  # ClientInit (shared flag)
         name = self.name.encode("utf-8")[:255]
-        w.write(struct.pack(">HH", self.screen.width, self.screen.height) + self.format.pack() + struct.pack(">I", len(name)) + name)
+        w.write(struct.pack(">HH", *self.fb) + self.format.pack() + struct.pack(">I", len(name)) + name)
         await w.drain()
+
+    def _bitrate(self) -> int:
+        """The bit rate to encode at: the quality's ceiling, held down to what the link carries
+        when the viewer answers fences (without them there is nothing to measure)."""
+        cap = H264_BITRATE.get(self.quality, 8_000_000)
+        return int(min(self.target, cap)) if self.flow.enabled else cap
+
+    def _screen_point(self, x: int, y: int) -> tuple[int, int]:
+        """Viewer (framebuffer) coordinates -> screen pixels."""
+        fw, fh = self.fb
+        if (fw, fh) == (self.screen.width, self.screen.height) or not fw or not fh:
+            return x, y
+        return (min(self.screen.width - 1, round(x * self.screen.width / fw)),
+                min(self.screen.height - 1, round(y * self.screen.height / fh)))
 
     async def _messages(self) -> None:
         r = self.reader
@@ -573,8 +770,12 @@ class Session:
                 values = struct.unpack(f">{count}i", await r.readexactly(4 * count))
                 self.encodings = list(values)
                 levels = [v for v in values if QUALITY_BASE <= v <= QUALITY_BASE + 9]
-                if levels:
+                if levels and levels[0] - QUALITY_BASE != self.quality:
                     self.quality = levels[0] - QUALITY_BASE
+                    self.target = min(max(self.target, START_BITRATE), H264_BITRATE.get(self.quality, 8_000_000))
+                    self.relayout = True
+                    self.pending.set()
+                self.flow.enabled = FENCE in values
                 if CONTINUOUS_UPDATES in values and "continuous" not in self.announced:
                     self.announced.add("continuous")
                     self.writer.write(b"\x96")  # EndOfContinuousUpdates: "this server can push"
@@ -582,7 +783,7 @@ class Session:
             elif kind == 3:  # FramebufferUpdateRequest
                 incremental, *_ = struct.unpack(">BHHHH", await r.readexactly(9))
                 if not incremental:
-                    self.full = True
+                    self.full = True  # also how a viewer whose decoder failed asks for a key frame
                 self.pending.set()
             elif kind == 4:  # KeyEvent
                 down, _, keysym = struct.unpack(">BHI", await r.readexactly(7))
@@ -591,12 +792,16 @@ class Session:
             elif kind == 5:  # PointerEvent
                 mask, x, y = struct.unpack(">BHH", await r.readexactly(5))
                 if self.input is not None:
-                    await asyncio.to_thread(self.input.pointer, mask, x, y)
+                    await asyncio.to_thread(self.input.pointer, mask, *self._screen_point(x, y))
             elif kind == 150:  # EnableContinuousUpdates
                 enable, *_ = struct.unpack(">BHHHH", await r.readexactly(9))
                 self.continuous = bool(enable)
                 self.full = self.full or self.continuous
                 self.pending.set()
+            elif kind == 248:  # ClientFence: the answer to one of ours
+                head = await r.readexactly(8)
+                length = head[7]
+                self.flow.ack(await r.readexactly(length))
             elif kind == 6:  # ClientCutText
                 head = await r.readexactly(7)
                 length = struct.unpack(">I", head[3:7])[0]
@@ -609,126 +814,222 @@ class Session:
     def _want_h264(self) -> bool:
         return H264 in self.encodings and not self.encoder_failed and h264_available()[0]
 
-    async def _updates(self) -> None:
-        from PIL import ImageChops
+    def _interval(self) -> float:
+        """Fewer, better frames on a thin link."""
+        if not self._want_h264():
+            return FRAME_INTERVAL
+        bitrate = self.encoder.bitrate if self.encoder is not None else self._bitrate()
+        return FRAME_INTERVAL if bitrate >= 3_000_000 else 1 / 30 if bitrate >= 1_200_000 else 1 / 15
 
-        last_sent = 0.0
+    async def _send(self, rects: list[bytes]) -> None:
+        """One FramebufferUpdate (and the fence that tracks it)."""
+        body = struct.pack(">BxH", 0, len(rects)) + b"".join(rects)
+        if self.flow.enabled:
+            body += self.flow.fence(len(body))
+        self.writer.write(body)
+        await self.writer.drain()
+        self.last_sent = time.monotonic()
+
+    async def _pace(self) -> None:
+        """Before a capture: a request is due, the viewer has room, and the frame interval passed."""
+        await self.pending.wait()
+        await self.flow.wait()
+        self._control()
+        wait = self._interval() - (time.monotonic() - self.last_sent)
+        if wait > 0:
+            await asyncio.sleep(wait)
+        if self.relayout or (self.screen.width, self.screen.height) != self._screen_size:
+            await self._layout()
+
+    @property
+    def _screen_size(self) -> tuple[int, int]:
+        return getattr(self, "_known_screen", (self.screen.width, self.screen.height))
+
+    async def _layout(self) -> None:
+        """The quality (above or below "best") or the screen changed: maybe a new framebuffer size."""
+        self.relayout = False
+        self._known_screen = (self.screen.width, self.screen.height)
+        size = encoded_size(self.screen.width, self.screen.height, self.quality)
+        if size == self.fb or DESKTOP_SIZE not in self.encodings:
+            return  # the same size, or a viewer that cannot resize: scaled into the old one
+        self.fb = size
+        self.cursor_key = None  # the pointer's shape is scaled with the picture
+        self.full = True
+        self.previous = None
+        if self.encoder is not None:
+            self.encoder.close()
+            self.encoder = None
+        await self._send([struct.pack(">HHHHi", 0, 0, *size, DESKTOP_SIZE)])
+
+    def _control(self) -> None:
+        """Once a second: follow the link. Congested (waiting for answers, round trips growing):
+        down to what the viewer took in; clear: up again, step by step, to the quality's ceiling."""
+        now = time.monotonic()
+        span = now - self.control_at
+        if span < 1.0 or not self.flow.enabled:
+            return
+        blocked, self.flow.blocked = self.flow.blocked / span, 0.0
+        self.control_at = now
+        cap = H264_BITRATE.get(self.quality, 8_000_000)
+        rate = self.flow.rate()
+        queued = self.flow.rtt_recent() - self.flow.rtt_min()
+        target = self.target
+        if blocked > 0.3 and rate is not None:
+            target = min(target, rate * 8 * 0.85)
+        elif blocked < 0.05 and queued < max(0.04, self.flow.rtt_min() * 0.5) and now - self.raised_at > 2.0:
+            target *= 1.5
+            self.raised_at = now
+        self.target = max(MIN_BITRATE, min(cap, target))
+        encoder = self.encoder
+        if encoder is None or abs(self._bitrate() - encoder.bitrate) < encoder.bitrate * 0.15:
+            return
+        if encoder.set_bitrate(self._bitrate()):
+            return
+        change = max(self._bitrate(), encoder.bitrate) / max(1, min(self._bitrate(), encoder.bitrate))
+        if change >= 1.5 and now - self.reopened_at > 5.0:
+            encoder.close()
+            self.encoder = None  # reopened at the new rate (with a key frame) on the next frame
+            self.reopened_at = now
+
+    async def _updates(self) -> None:
         while True:
             # Decide only once the viewer asked: its SetEncodings comes before its first request.
             await self.pending.wait()
             if self._want_h264():
                 try:
-                    last_sent = await self._h264_update(last_sent)
+                    await self._h264_update()
                     continue
                 except _NoH264:
                     pass
-            await self.pending.wait()
-            wait = FRAME_INTERVAL - (time.monotonic() - last_sent)
-            if wait > 0:
-                await asyncio.sleep(wait)
-            while True:
-                try:
-                    image = await asyncio.get_running_loop().run_in_executor(self.capture, self.screen.grab)
-                except Exception as exc:
-                    await self._recapture(exc)
-                    continue
-                if self.full or self.previous is None or self.previous.size != image.size:
-                    box = (0, 0, image.width, image.height)
-                else:
-                    box = await asyncio.to_thread(lambda: ImageChops.difference(image, self.previous).getbbox())
-                if box:
-                    break
-                await asyncio.sleep(IDLE_POLL)
-            self.pending.clear()
-            self.full = False
-            self.previous = image
-            payload = await asyncio.to_thread(self._rect, image, box)
-            cursor = await self._cursor_rect()
-            if "jpeg" not in self.announced:
-                self.announced.add("jpeg")
-                log.info("remote desktop: %s (the viewer offered no H.264)", "Tight/JPEG" if TIGHT in self.encodings else "Raw")
-            self.writer.write(struct.pack(">BxH", 0, 2 if cursor else 1) + payload + (cursor or b""))
-            if self.continuous:
-                self.pending.set()
-            await self.writer.drain()
-            last_sent = time.monotonic()
+            await self._jpeg_update()
 
-    async def _h264_update(self, last_sent: float) -> float:
-        """One H.264 access unit for the whole screen, once something changed."""
-        from PIL import Image
+    async def _grab(self, raw: bool):
+        """The screen (BGRA bytes and size, or an image at the framebuffer size), retried until it works."""
         loop = asyncio.get_running_loop()
-        await self.pending.wait()
-        wait = FRAME_INTERVAL - (time.monotonic() - last_sent)
-        if wait > 0:
-            await asyncio.sleep(wait)
-        if self.encoder is None or self.encoder_quality != self.quality:
-            if self.encoder is not None:
-                self.encoder.close()
-            try:
-                self.encoder = await loop.run_in_executor(
-                    None, H264Encoder, self.screen.width, self.screen.height, H264_BITRATE.get(self.quality, 8_000_000))
-                self.encoder_quality = self.quality
-                self.full = True
-                log.info("remote desktop: H.264 with %s", self.encoder.name)
-            except Exception as exc:
-                log.warning("remote desktop: H.264 unavailable (%s); using JPEG", exc)
-                self.encoder_failed = True
-                self.encoder = None
-                raise _NoH264() from None
         while True:
             try:
-                raw, size = await loop.run_in_executor(self.capture, self.screen.grab_raw)
+                if raw:
+                    return await loop.run_in_executor(self.capture, self.screen.grab_raw)
+                image = await loop.run_in_executor(self.capture, self.screen.grab)
+                if image.size != self.fb:
+                    from PIL import Image
+                    image = await asyncio.to_thread(image.resize, self.fb, Image.BILINEAR)
+                return image
             except Exception as exc:  # lock screen / UAC (secure desktop), display change
                 await self._recapture(exc)
-                continue
+
+    def _idle_poll(self) -> float:
+        """Look again soon after a change; less often on a still screen (a capture costs ~20 ms of CPU)."""
+        return IDLE_POLL if time.monotonic() - self.changed_at < 2.0 else IDLE_POLL_STILL
+
+    async def _jpeg_update(self) -> None:
+        from PIL import ImageChops
+
+        await self._pace()
+        while True:
+            image = await self._grab(raw=False)
+            if self.full or self.previous is None or self.previous.size != image.size:
+                box = (0, 0, image.width, image.height)
+            else:
+                box = await asyncio.to_thread(lambda: ImageChops.difference(image, self.previous).getbbox())
+            if box:
+                break
+            await asyncio.sleep(self._idle_poll())
+        self.changed_at = time.monotonic()
+        self.pending.clear()
+        self.full = False
+        self.previous = image
+        payload = await asyncio.to_thread(self._rect, image, box)
+        cursor = await self._cursor_rect()
+        if "jpeg" not in self.announced:
+            self.announced.add("jpeg")
+            log.info("remote desktop: %s (the viewer offered no H.264)", "Tight/JPEG" if TIGHT in self.encodings else "Raw")
+        if self.continuous:
+            self.pending.set()
+        await self._send([payload] + ([cursor] if cursor else []))
+
+    async def _encoder(self) -> H264Encoder:
+        """The encoder for the current framebuffer: the one opened during the handshake, or a new one."""
+        if self.encoder is not None:
+            return self.encoder
+        loop = asyncio.get_running_loop()
+        encoder = None
+        if self.warm is not None:
+            warm, self.warm = self.warm, None
+            with contextlib.suppress(Exception):
+                encoder = await warm
+            if encoder is not None and ((encoder.width, encoder.height) != self.fb):
+                encoder.close()
+                encoder = None
+        try:
+            if encoder is None:
+                encoder = await loop.run_in_executor(None, H264Encoder, *self.fb, self._bitrate())
+            elif encoder.bitrate != self._bitrate():
+                encoder.set_bitrate(self._bitrate())
+        except Exception as exc:
+            log.warning("remote desktop: H.264 unavailable (%s); using JPEG", exc)
+            self.encoder_failed = True
+            raise _NoH264() from None
+        if "h264" not in self.announced:
+            self.announced.add("h264")
+            log.info("remote desktop: H.264 with %s, %dx%d of %dx%d", encoder.name, *self.fb,
+                     self.screen.width, self.screen.height)
+        self.encoder = encoder
+        self.full = True
+        return encoder
+
+    async def _h264_update(self) -> None:
+        """One H.264 access unit for the whole screen, once something changed."""
+        loop = asyncio.get_running_loop()
+        await self._pace()
+        encoder = await self._encoder()
+        while True:
+            raw, size = await self._grab(raw=True)
+            if size != (self.screen.width, self.screen.height):
+                self.screen.width, self.screen.height = size
+                return  # the next _pace() lays the new size out
             cursor = await self._cursor_rect()
             if self.full or raw != self.last_raw or self.settle > 0:
                 break
             if cursor:  # only the pointer's shape changed
                 if not self.continuous:
                     self.pending.clear()
-                self.writer.write(struct.pack(">BxH", 0, 1) + cursor)
-                await self.writer.drain()
-                return time.monotonic()
-            await asyncio.sleep(IDLE_POLL)
+                await self._send([cursor])
+                return
+            await asyncio.sleep(self._idle_poll())
         changed = raw != self.last_raw
-        keyframe = self.full or time.monotonic() - self.last_key > KEYFRAME_INTERVAL
+        keyframe = self.full
+        if changed or self.full:
+            self.changed_at = time.monotonic()
         self.settle = SETTLE_FRAMES if changed or self.full else self.settle - 1
         self.pending.clear()
         self.full = False
         self.last_raw = raw
-        if keyframe:
-            self.last_key = time.monotonic()
-
-        def encode():
-            return self.encoder.encode(Image.frombytes("RGB", size, raw, "raw", "BGRX"), keyframe=keyframe)
 
         try:
-            data = await loop.run_in_executor(None, encode)
+            data = await loop.run_in_executor(None, encoder.encode, raw, size, keyframe)
             self.encode_failures = 0
         except Exception as exc:
             self.encode_failures += 1
-            log.warning("remote desktop: %s failed (%s)", self.encoder.name, exc)
-            self.encoder.close()
+            log.warning("remote desktop: %s failed (%s)", encoder.name, exc)
+            encoder.close()
             self.encoder = None  # a fresh encoder (and key frame) next time
             if self.encode_failures >= 3:
                 self.encoder_failed = True
                 raise _NoH264() from None
             self.pending.set()
-            return time.monotonic()
+            return
         if not data:  # the encoder kept this frame: the settle frames bring it out
             self.pending.set()
-            return time.monotonic()
+            return
         flags = 1 if keyframe else 0  # bit 0: reset the decoder context
-        header = struct.pack(">HHHHi", 0, 0, self.encoder.width, self.encoder.height, H264)
+        header = struct.pack(">HHHHi", 0, 0, encoder.width, encoder.height, H264)
         rects = [header + struct.pack(">II", len(data), flags) + data]
         if cursor:
             rects.append(cursor)
-        self.writer.write(struct.pack(">BxH", 0, len(rects)) + b"".join(rects))
-        await self.writer.drain()
         if self.continuous:
             self.pending.set()
-        return time.monotonic()
+        await self._send(rects)
 
     async def _recapture(self, exc: Exception) -> None:
         """Capture failed: wait, then start a new capture (the desktop may have switched)."""
@@ -751,6 +1052,12 @@ class Session:
         if shape is None or shape[0] == self.cursor_key:
             return None
         self.cursor_key, (hot_x, hot_y), image = shape
+        scale = self.fb[0] / self.screen.width if self.screen.width else 1.0
+        if scale < 0.95:  # the picture is scaled down: so is the pointer
+            from PIL import Image
+            size = (max(1, round(image.width * scale)), max(1, round(image.height * scale)))
+            image = image.resize(size, Image.LANCZOS)
+            hot_x, hot_y = min(size[0] - 1, round(hot_x * scale)), min(size[1] - 1, round(hot_y * scale))
         width, height = image.size
         pixels = self.format.raw(image.convert("RGB"))
         alpha = image.getchannel("A").point(lambda a: 255 if a >= 128 else 0).convert("1")
