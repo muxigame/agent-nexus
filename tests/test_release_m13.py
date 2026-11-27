@@ -161,8 +161,9 @@ def test_a_keystore_without_its_password_stops_the_android_job_early(tmp_path):
     """Half-configured signing fails at once with an ::error:: (not after the long build, in Gradle)."""
     yaml = pytest.importorskip("yaml")
     import shutil
-    if not shutil.which("bash"):
-        pytest.skip("bash")
+    if sys.platform == "win32" or not shutil.which("bash"):
+        # the step runs on the ubuntu runner; Windows' bash (WSL) cannot read the Windows paths given here
+        pytest.skip("needs a POSIX bash")
     steps = yaml.safe_load((WORKFLOWS / "release.yml").read_text(encoding="utf-8"))["jobs"]["android"]["steps"]
     gate = next(step for step in steps if step.get("id") == "keystore")
     assert "ANDROID_KEYSTORE_PASSWORD" in gate["env"]
