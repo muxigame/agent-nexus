@@ -178,7 +178,9 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
         tasks = []
         # desktop.update.mode = auto (the default without a desktop): check and install by itself
         from . import auto_update
-        tasks.append(asyncio.create_task(auto_update.loop(sup.cfg.root)))
+        # a copy job running here postpones an update (installing restarts the manager)
+        tasks.append(asyncio.create_task(auto_update.loop(
+            sup.cfg.root, busy=lambda: copy_jobs is not None and copy_jobs.running())))
         if lifecycle is not None:
             tasks.append(asyncio.create_task(lifecycle.beat_loop()))
         if agents_state.get("hub") is not None:
@@ -202,6 +204,9 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
             for task in tasks:
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
+            if copy_jobs is not None:
+                with contextlib.suppress(Exception):
+                    await copy_jobs.close()  # running copies end as "interrupted" (re-running resumes them)
             if agents_state.get("hub") is not None:
                 with contextlib.suppress(Exception):
                     agents_state["hub"].close()  # no agent CLI outlives the manager
@@ -1246,7 +1251,29 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
         from . import accounts as anx_accounts_files
         file_share = anx_file_share.FileShare(account=lambda: anx_accounts_files.effective(sup.cfg.root, "terminal"))
         hub.handlers.update(file_share.handlers())
-        hub.extra_features = (*hub.extra_features, anx_file_share.FEATURE)
+        hub.extra_features = (*hub.extra_features, anx_file_share.FEATURE, anx_file_share.FEATURE_V2)
+
+    # -- copy jobs (fxjob/1, docs/design.md §18): file_copy runs here, the bytes go straight to the other device --
+    copy_jobs = None
+    if file_share is not None and getattr(sup.cfg, "files_jobs", True):
+        from .file_copy_device import CopyJobs, FEATURE as FXJOB_FEATURE, Links
+
+        def copy_hold(device_id: str):
+            connector = p2p_state["connector"]
+            return connector.hold(device_id) if connector is not None else contextlib.nullcontext()
+
+        async def copy_link(device_id: str):
+            """The 文件 page's route choice: a direct tunnel or a relay device, else None (the gateway relays)."""
+            if p2p_state["connector"] is None:
+                return None, "网关中转（这台设备没有直连组件）"
+            if not await hub.wait_available(HUB_RECONNECT_WAIT_S):
+                return None, "网关中转（与网关的连接正在重连）"
+            return await files_link(device_id)
+
+        copy_jobs = CopyJobs(sup.cfg.root, file_share, links=Links(copy_link, files_drop, copy_hold),
+                             me=lambda: joining.cloud_config(sup.cfg.root).get("agent_id") or "", lock=lock)
+        hub.handlers.update(copy_jobs.handlers())
+        hub.extra_features = (*hub.extra_features, FXJOB_FEATURE)
 
     # -- the agent chat (agents/1, docs/agent-chat.md): CLIs, sessions and runs of this device --
     from .agents import hub as agents_hub_mod

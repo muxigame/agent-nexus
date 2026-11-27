@@ -20,6 +20,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from typing import Callable
 
 from . import desktop, linux_update, paths
 
@@ -93,10 +94,28 @@ async def run_once(root: Path) -> dict:
     return {"result": "unsupported"}
 
 
-async def loop(root: Path) -> None:
+#: a running copy job postpones installing an update (which restarts the manager) at most this long
+BUSY_POSTPONE_MAX_S = 6 * 3600
+
+
+async def loop(root: Path, busy: Callable[[], bool] | None = None) -> None:
     await asyncio.sleep(FIRST_CHECK_S)
+    busy_since: float | None = None
     while True:
-        if mode(root) == "auto":
+        postpone = False
+        if busy is not None and mode(root) == "auto":
+            try:
+                running = bool(busy())
+            except Exception:
+                running = False
+            if not running:
+                busy_since = None
+            else:
+                busy_since = busy_since if busy_since is not None else time.monotonic()
+                postpone = time.monotonic() - busy_since < BUSY_POSTPONE_MAX_S
+                if postpone:
+                    log.info("auto update: copy job running, update postponed")
+        if mode(root) == "auto" and not postpone:
             try:
                 outcome = await run_once(root)
                 if outcome["result"] == "prompted":

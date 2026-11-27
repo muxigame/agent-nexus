@@ -1570,3 +1570,106 @@ wecom、unity 等插件只在 windows 上跑；ones、jubian-go、payment 在两
 | 10 | 是否做 7×24 连接器节点（cloud-main） | **不需要**：连接器注册表放在网关，远程 HTTP/SSE 连接器默认在网关里运行，OAuth 在网关域名上完成；stdio、受 IP 限制的可以固定到设备 | D10、§7 |
 | 11 | 发给 `me` 的邮件提醒到哪里 | agent-nexus 内部处理：收件箱页、在线设备的 Windows toast（可点击跳转、简单问题直接按钮作答）、新工具 `ask_user`、手机网页收件箱（PWA，复用 OAuth 登录）；`request_user_input` 并入；不做企业微信或邮件桥接 | D11、§8.12 |
 | 12 | GPT Companion（chatx） | 保持独立应用，wake 适配器对接它，chatx 不改；打包成插件是以后的选项 | D12、§8.7 |
+
+## 18. 设备间文件复制（file_copy；files/2、fxjob/1）
+
+### 18.1 目标
+
+AI agent 通过网关 MCP 在任意两台在线设备之间（或同一台设备内）复制**文件或整个文件夹**（递归），二进制、几 GB 的数据都可以。此前只有人能在本机控制台“文件”页传单个文件，agent 没有任何办法在设备之间搬文件（实际案例：把几年的 1 分钟 K 线从 Windows 台式机同步到 Mac 和 GPU 主机）。
+
+网关工具（`file_copy_tools.py`，列在 `RESERVED_TOOLS`，未改动任何旧工具的 schema）：
+
+| 工具 | 作用 |
+|---|---|
+| `file_copy(src_device, src_path, dst_device, dst_path, overwrite=false, route="auto"\|"p2p", concurrency?)` | 启动后台任务，立即返回 `job_id`、`mode`（push / pull / local / gateway）、运行设备 |
+| `file_copy_status(job_id, wait_ms≤50000)` | 进度：`files{total,done,skipped,failed,in_progress}`、`bytes{total,done}`、`rate_bps`、`eta_s`、`current`、`routes`、`verified`（sha256 / size）、`errors`（前 50 条）+ `errors_total`、`warnings`、`message`；`wait_ms` 等到任务**结束**或时间到才返回（不是每完成一个文件就返回）；`state` 为 `unknown` 表示运行任务的设备暂时联系不上 |
+| `file_copy_cancel(job_id)` | 取消；已完成的文件保留，正在写的临时文件删除 |
+| `file_copy_list()` | 网关上的中转任务 + 各在线 `fxjob/1` 设备最近 24 小时的任务 |
+
+结束状态：`completed` / `completed_with_errors` / `failed` / `cancelled` / `interrupted`。`interrupted`、`failed`（例如对方离线）或 `unknown` 之后，用相同参数再调用一次 `file_copy` 即可：已完成的文件跳过，未完成的续传。重复调用也是单向同步的方式（新增和改动的文件；目标端从不删除任何东西）。工具描述里写明了这些，agent 不会在 `interrupted` 上一直轮询。
+
+路径语义：各设备自己的绝对路径写法（`~` = 该设备终端账户的主目录，和“文件”页相同）。`dst_path` 是源**变成**的路径（`cp src dst`，目标文件夹已存在就合并）；以 `/` 或 `\` 结尾表示复制**到**这个文件夹里（保留源的名字）。相对路径一律以“名字列表”传递，由各设备按自己的规则拼接，Windows 和 macOS/Linux 之间不会混用分隔符。
+
+### 18.2 数据路径：谁来搬字节
+
+任务在**一台设备上运行**（runner），网关只发起（反向 RPC `fxjob_start`）并转问状态：
+
+| 顺序 | runner | 条件 | 数据路径 |
+|---|---|---|---|
+| 1 | 源设备（push） | 有 `fxjob/1` 且未锁定 | 本机读盘、计算 sha256；写对方：直连隧道 → 中转设备（端到端加密）→ 网关 HTTP 中转（用本机设备凭据） |
+| 2 | 目标设备（pull） | 同上 | 读对方（同样的线路顺序），本机写盘 |
+| 3 | 同一台设备（local） | 有 `fxjob/1` | 本机复制，同样走临时文件 + 改名 |
+| 4 | 网关自己（gateway） | 两边都不能运行任务 | 网关把源的 `fx_read` 泵进目标的 `fx_put_*`：任何 `files/1` 设备都行，但很慢（约 100 KB/s 量级），返回里有提示；最多 2 个并发，每个任务 2 个文件并行，每个文件预读 3 块（内存 ≤ 3 MiB × 2） |
+
+1 和 2 之间：如果“不运行任务的一方”没有 `remote-hub/1`（无法被打洞连入）而另一方有，就让另一方运行，这样仍能直连。`route="p2p"` 时不允许网关中转：两边都不能运行任务直接报错；runner 打不通直连也不退回网关中转（多 GB 的数据推荐用它）。
+
+选这个方案的原因：复用“文件”页已有的线路选择（`files_link` / `p2p_link` / `files_drop` / `connector.hold` / 票据预取）；有直连时字节根本不经过网关；遍历和源端哈希在源设备本地完成；网关只保存任务指针，权限检查留在原处（见 18.6）；push、pull、本机、网关泵送共用同一个引擎（`file_copy.py`，只是端点实现不同）。
+
+任务编号是 `<runner 的 agent_id>:<随机串>`（网关泵送的是 `gateway:<随机串>`），网关重启后仍能向 runner 查询状态。设备上每 5 秒把快照写到 `.anx/fxjobs/<id>.json`，管理器重启后这些任务列为 `interrupted`（“设备重启中断；重新调用 file_copy 会跳过已完成的文件并续传未完成的文件”）。自动更新会重启管理器：有任务在运行时推迟安装（日志 “copy job running, update postponed”），最多推迟 6 小时。
+
+### 18.3 协议增补
+
+功能串：设备 `files/2`（共享端理解下面的扩展）、`fxjob/1`（能运行任务：`fxjob_start/status/cancel/list`）；网关 `files/2`（文件中转透传新字段、新增路由、有 file_copy 工具）。`device_list` 里每台设备多了 `file_copy`（`fxjob/1`）和 `files_v2`（`files/2`）。设备 `agent-nexus.json` 的 `files.enabled=false` 关掉文件传输（既不能做源也不能做目标），`files.jobs=false` 只是不在本机运行任务（网关会改用另一方或自己泵送）。
+
+`FileShare`（`file_share.py`，旧调用的默认行为不变）：
+
+- `begin` 新参数：`on_exists`（`rename` 默认 = files/1 行为 \| `overwrite` \| `error` \| `skip_same`）、`resume_key`（`[A-Za-z0-9_-]{8,64}`，临时文件名固定为 `.<name>.<key>.anxpart`，带 `resume` 时追加并返回 `have`）、`mtime_ns`、以 `base` + `rel`（名字列表）指定目标；返回加 `have`、`exists`。
+- `finish` 新参数：`sha256`（与写入的字节比对，不一致删除临时文件，`code:"checksum"`）、`mtime_ns`、`wait_s`（续传的文件要整体重新哈希，在线程里做；`wait_s` 内没做完就答 `{"state":"hashing"}`，调用方再问）。覆盖时 Windows 上 `PermissionError` 重试 3 次（杀毒软件或打开的句柄），仍失败报“目标文件被占用”。
+- 带 `resume_key` 的上传在空闲回收或无 `discard` 的 `abort` 时只关闭句柄、保留临时文件；取消和校验失败带 `discard` 删除。续传过的文件 `finish` 时必须带 `sha256`，否则拒绝（`code:"unverified"`，删除临时文件，引擎从 0 重传）：之前写下的字节没有别的办法证明属于这个文件。`finish` 返回 `checked`（是否真的比对了 sha256），`verified:"sha256"` 只据此计算。
+- 临时文件名可预测（`resume_key` 来自公开信息），所以按不可信对待：新建一律先删掉同名项（删的是链接本身）再 `O_CREAT|O_EXCL|O_NOFOLLOW`、权限 0600；续传只接受本进程所有、`st_nlink==1` 的普通文件（`lstat` 与打开后的 `fstat` 的 dev/ino 一致），否则从 0 开始；`stat_many` 的 `have` 同样只认这种文件；重新哈希用 `O_NOFOLLOW` 打开并核对 dev/ino，改名前再 `lstat` 核对一次，被换掉就放弃（`code:"checksum"`）。`_give` 用 `lchown`。
+- 权限位：`begin` 可带 `mode`（源文件的权限位，来自 `walk`）。改名前（句柄还开着时 `fchmod`）：覆盖已有文件 → 沿用被替换文件的权限和属主（`fchown`），不再交给终端账户；新文件 → 源的权限位（不含 setuid 等）再减去进程 umask；没有 `mode`（旧源）→ `0666 & ~umask`，与以前相同。所以 0600 的密钥复制过去仍是 0600，覆盖 root 的 0640 文件后仍是 root 的 0640。文件夹的权限位不复制（新建文件夹用默认权限）。
+- 以 `base` + `rel` 访问（复制任务）时，`rel` 下的每一层都用 `lstat` 检查，符号链接或 junction 一律拒绝（`code:"link"`）：读之前（`stat_file`、`hash`，最后一层再用 `O_NOFOLLOW` 打开）、写之前（`begin` 在建文件夹前后各查一次）、`mkdirs`、`stat_many`（目标本身是链接时报 `link`，引擎记错误“目标位置是符号链接，不覆盖也不跟随”）。遍历只在开始时做一次，复制可能持续几小时，这样中途把文件或文件夹换成链接也不会读到或写到树外。顶层路径本身（`src_path` / `dst_path`）是链接时照常跟进。`begin` 新建的文件夹逐个交给该用户（root 运行的核心不再留下属于 root 的文件夹）。
+- 新操作：`walk`（按名字排序的先序遍历，每页 ≤2000，游标是上一页最后一条的 `rel`；每页按游标二分定位，只对本页返回的条目做 `lstat`，超过 512 项的文件夹的有序名字表在页与页之间缓存 120 秒（第一页总是重新列出），所以一个 40 万文件的平铺文件夹总代价是线性的；一页超过 20 秒就提前返回 `next`；条目带 `mode`；符号链接和 Windows junction 标 `link`、不跟进；读不了的文件夹作为带 `error` 的条目，遍历继续；顶层是符号链接则跟进）、`stat_many`（≤1000 项，用 `lstat`：是否存在、大小、mtime、是否链接、续传临时文件已有字节 `have`，以及目标位置所在磁盘的 `free`、`platform` 和展开 `~` 后的 `base`；顺带删除所在文件夹里 7 天没动过的 `.*.anxpart`，每个文件夹每小时最多扫一次——源文件改了或再没重跑的复制留下的临时文件不会永远占着空间）、`mkdirs`、`hash`（可带 offset/length）。中转名 `fx_walk` / `fx_stat_many` / `fx_mkdirs` / `fx_hash`。
+- 名字检查（纯函数 `invalid_name`）：拒绝空名、`.`、`..`、含 `/` 的名字；Windows 上另拒绝 `<>:"|?*`、控制字符、结尾的点或空格、保留名（CON、PRN、AUX、NUL、COM1–9、LPT1–9），报“文件名在 Windows 上无效：…”，不会悄悄改名；Windows 上超过 240 字符的绝对路径加 `\\?\` 前缀。
+
+远程中心（`remote_hub.py`）的 `files` 服务：新帧类型 5 begin、6 result（只有看到对方 `files/2` 的调用方才会发，旧设备永远见不到）；新操作 `walk` / `stat` / `mkdirs` / `hash`（参数放在一个 begin 帧里，因为可能超过 hello 行的 4 KB 上限）、`putx`、`getx`：
+
+- `putx`：一条流、一张票据传很多文件（begin 可带 `mode`）（省掉每个文件一次 0.35–0.7 秒的票据往返——网关在国外时，上万个小 K 线文件主要耗在这里）。每个文件：begin `{seq, base, rel, size, mtime_ns, on_exists, resume_key, offset}`、data 帧、exit `{seq, sha256}`；对方对每个文件恰好回一个 result（可能提前回：拒绝时调用方停止发送该文件的数据，仍发 exit）。临时文件已有字节与 `offset` 不符时回 `{code:"offset", have}`，调用方从 `have` 重发。续传文件重新哈希期间每 5 秒发 ready `{seq, hashing}` 保活，调用方据此延长等待（防止 120 秒超时杀掉一个 20 GB 的续传）。exit `{end:true}` 结束；流中断时临时文件保留供续传；exit `{seq, abort, discard}` 放弃当前文件。调用方在两个文件之间可以发 ready `{keepalive:true}`（只重置对方 300 秒的空闲计时）：push 续传时要先在本机哈希已发送的前缀（在发 begin 之前做，几十 GB 可能要几分钟），期间每 30 秒发一次。
+- `getx`：一条流读很多文件。begin `{seq, base, rel | path, offset}` → ready `{seq, name, size, mtime_ns}`（offset>0 时先在本机哈希前缀，期间发保活 ready）→ data → exit `{seq, sha256(整个文件), size, mtime_ns}`；找不到文件回 result `{seq, error}`，流继续可用。
+
+网关文件中转（`files_bridge.py`）：`put/begin`、`put/end`、`put/abort`、`read` 透传上面的新字段（`read` 支持 `base` + JSON 编码的 `rel`，响应头加 `X-ANX-Mtime`）；新路由 `POST /api/devices/{id}/files/walk|stat|mkdirs|hash`，目标设备没有 `files/2` 时 409 `code:"needs_files2"`；设备拒绝时 422 的 body 增加 `reason`（设备的错误码）和 `detail`（如 `have`），`code` 仍是 `files_failed`。`put/end` 的 `wait_s` 最多 20 秒，避免超出网关的 180 秒调用预算。
+
+### 18.4 引擎：计划、校验、续传、并发
+
+1. **扫描**：流式遍历源，计划里只保留紧凑的 `(rel, size, mtime_ns)`（10 万个文件约 10 MB）。符号链接、特殊文件不复制（列在 `skipped`），读不了的条目记入 `errors`。
+2. **对照目标**（`stat_many`，每批 1000）：大小和 mtime 都相同 → 跳过（mtime 按目标文件系统的精度比较：目标值是 100 ns 的整数倍时容差 100 ns（NTFS），是整秒时容差 2 秒（SMB、HFS+、FAT/exFAT），`same_mtime`；`begin` 的 `skip_same` 用同一规则）（所以重复调用同一个 `file_copy` 就是幂等的续传）；存在但不同 → `overwrite=false` 记错误“目标已存在且内容不同”，`overwrite=true` 用 `on_exists=overwrite`；有续传临时文件 → 从 `have` 继续。`resume_key = sha256([src_device, src_path, rel, size, mtime_ns, dst_device, dst_path, dst_rel])[:32]`：跨任务、跨网关重启不变，源文件一变就换新键。
+3. **动手前检查**（任何字节移动之前失败）：同一设备且目标就是源或在源之内 → 拒绝（用设备自己展开 `~` 后的路径比较：`stat_many` 返回的 `base`，所以 `~/data/inner` 也能识别）；需要的字节数大于目标磁盘可用空间 → “目标磁盘空间不足：需要 X，可用 Y”；目标是 Windows / macOS 时，仅大小写不同的两个源名字其中一个记错误；目标是 Windows 时预先检查非法名字。
+4. **复制**：N 个 worker（默认 4，最多 8；网关泵送 2），大文件先排；每个 worker 在一侧保持一条长连接（`putx` / `getx`），多个小文件复用它。读盘在线程里，每次最多 1 MiB（P2P 帧 256 KiB），任何时候都不把整个文件放进内存。
+5. **校验**：读源的一方计算整个文件的 sha256（push：runner 读盘时算，续传时先在线程里哈希本地前缀；pull：源设备 `getx` 的 exit；网关泵送：边泵边算，续传时让源设备 `fx_hash` 整个文件，超时按文件大小放宽；`fx_hash` 仍失败时没有源 sha256，目标拒绝保留续传的文件，从 0 重传——绝不会把没校验过的前缀改名成正式文件），目标在改名前与自己写下的字节比对，`verified:"sha256"`。读完后再比一次源的大小和 mtime，变了就按新状态重试一次，仍在变则报“源文件在复制过程中被修改”。
+6. **重试**（每个文件最多 4 次，退避 2 / 5 / 15 秒）：线路错误 → 重新选线路（坏掉的隧道 `files_drop`；同一 worker 连续坏两次就改走网关中转），重试前用 `stat_many` 重新问目标的 `have`，从那里续传（问不到就沿用上次的位置，目标会纠正）；`checksum` / `unverified` 从 0 重来一次；连续 `max(4, 并发数+1)` 个文件因线路错误用完全部重试 → **整个任务失败**（“对方设备可能已离线、休眠或网络中断”），而不是把剩下的十万个文件每个都磨 20 多秒；`exists`、非法名字等不重试；`ENOSPC`（含 Windows winerror 112）→ **整个任务失败**（“目标磁盘已满”），正在写的临时文件丢弃以腾出空间；读源时没有权限 → 该文件记错误，继续。
+7. **结束**：最后用 `mkdirs` 建出空文件夹；状态 `completed` / `completed_with_errors` / `failed` / `cancelled` / `interrupted`。取消不回滚已完成的文件。
+
+### 18.5 版本降级
+
+runner 从网关给的 `peer_features` 得知对方版本：
+
+| 对方 | 行为 |
+|---|---|
+| `files/2` | 多文件流、覆盖、续传、目标端 sha256 校验、保留 mtime |
+| 只有 `files/1` | 每个文件一条旧的 `put` / `get` 流（或旧的中转调用）；`overwrite` 报“目标设备客户端版本过旧，不支持覆盖（需要 0.8.31 以上）”；按大小判断相同（mtime 拿不到），`verified:"size"` 并给出警告；旧客户端一个文件夹最多列 5000 项，目标文件夹被截断时列表里找不到的文件记错误（“无法确认文件是否已存在，请升级该设备”），不会因为看不见而写出 `name (1)` 的重复文件；做源时用 `list` 递归遍历，`truncated` 的文件夹记错误，中断后从头传；不能建空文件夹（警告） |
+| 没有 `files/1` | 报“这台设备的客户端版本不支持文件传输（升级到 0.8.8 以上），或设备上关闭了文件传输” |
+
+### 18.6 权限（没有打开任何新的通路）
+
+- MCP 调用方用的是 owner 的令牌，与收件箱、文件中转认可的是同一个 `server.auth`：owner 本来就能经网关读写任何 `files/1` 设备的文件。
+- 设备上的任务用 runner 自己的设备凭据：`remote_ticket` 和文件中转都拒绝已锁定的设备，runner 本地还检查 `lock.require_unlocked()`；网关选 runner 时跳过已锁定的设备。已锁定的设备仍可以作为另一方被操作，也可以被网关泵送——与终端的规则一致（锁定 = 不能操作别人，可以被操作）。
+- 关闭 `files.enabled` 的设备不宣告 `files/1`，既不能做源也不能做目标。
+
+### 18.7 陷阱清单
+
+- 事件循环：读、写、哈希、遍历、`os.replace` 都在线程里；RPC 处理函数里只做快速的 stat，`fxjob_start` 在 5 秒内返回，遍历在后台任务里。
+- 超时：MCP 客户端约 60 秒 → 后台任务 + 状态长轮询 ≤50 秒；设备 `rpc_timeout` / `Peer.timeout` 180 秒 → 网关对设备的每个调用都有自己的上限：`fxjob_start` 15 秒（超时算作拒绝，换下一个候选或网关泵送，并在后台取消那个可能迟到的任务）、`fxjob_status` 等待时间 + 5 秒（超时答 `unknown`）、`fxjob_cancel` 40 秒、`fxjob_list` 15 秒；半开的连接（休眠的笔记本、断掉的 VPN）不会让工具卡到 180 秒；`fxjob_status` 每次最多等 25 秒，设备端等到任务结束或时间到才答，网关两次询问之间至少隔 2 秒；P2P 帧 60 秒、保存结果按大小放宽（120 秒 + 每 50 MB/s 一秒）并由保活延长；票据 60 秒有效、只用一次 → 打开流之前才取。
+- `_reap` 不删可续传的临时文件；任务从不使用 `_free` 的“ (1)”改名（`on_exists` 总是显式的）。
+- 中转设备每台最多 32 条流 → 任务并发 ≤8；整个任务期间 `connector.hold()` 保住隧道。
+- 符号链接 / junction 不跟进（避免环，也避免复制途中被换成链接后读写到树外，见 18.3）；macOS 的 NFD 文件名原样保留，不做规范化。
+- Windows 服务账户（LocalSystem）看不到映射的网络驱动器：路径不存在时提示改用 UNC 路径 `\\server\share`；macOS 上 `~/Desktop`、`~/Documents`、`~/Downloads` 报 “Operation not permitted” 时提示到“系统设置→隐私与安全性→完全磁盘访问权限”允许 Agent Nexus。
+
+### 18.8 测试
+
+- `tests/test_file_share_v2.py`：`on_exists` 四种模式、确定性续传（abort 和空闲回收后临时文件仍在、返回 `have`）、sha256 不一致删除临时文件、mtime 保留、超过 2000 条的分页遍历（无状态、含符号链接和读不了的文件夹）、`stat_many` / `mkdirs` / `hash`、Windows 名字规则、新建文件夹的属主。
+- `tests/test_file_transfer.py`：真实 `RemoteHub` 上的 `putx`（一张票据 200 个小文件 + 一个大文件、单个文件出错不断流、offset 不符、续传重新哈希期间的保活）和 `getx`（多文件、续传、缺失文件后流仍可用），以及 P2P 的 `walk` / `stat`。
+- `tests/test_file_copy_engine.py`：两个本地端点之间的整树复制（含空文件夹）、目标路径的两种写法、重复运行全部跳过、只读剩余部分的续传、线路中断后重选线路、磁盘满、空间预检、取消、源在复制中被修改、复制进自身被拒绝、并发和块大小上限、长轮询、配置开关、重启后列为 interrupted。
+- `tests/test_file_copy_gateway.py`：MCP 工具的标题与注解、push / pull（源锁定）/ 网关泵送 / 同设备、P2P 流两个方向及隧道坏掉后的回退、`files/1` 目标（不能覆盖、按大小校验）、离线与缺功能的报错、取消、新的 Gateway 实例仍能查询设备上的任务、`device_list` 的新字段。
+- 评审修复的回归测试：重试从目标的 `have` 续传（断言第二次读的偏移 > 0）；网关泵送续传时 `fx_hash` 失败不会保留未校验的文件；对方一直离线时任务很快失败；目标把 mtime 截成 100 ns / 整秒后重跑仍全部跳过；长轮询等到结束而不是下一个文件（设备任务和网关泵送都测）；临时文件名处预埋的符号链接不被跟随；权限位随文件复制、覆盖保留原权限；源文件复制中被换成符号链接不会被读；目标文件夹被换成链接不会写穿；同设备 `~` 目标识别为复制进自身；旧目标的超大文件夹报错而不是重复；push 续传先哈希前缀、空闲流有保活；分页遍历每个条目只 stat 约一次；无源 sha256 的续传被拒；过期临时文件被清理；不是本进程独有的临时文件从 0 开始；设备不回应时工具在时限内返回。
+- `tests/test_file_copy_legacy.py`：对照 0.8.30 真正发布的 `file_share.py`（冻结在 `tests/compat/fixtures/legacy_file_share_0_8_30.py`，校验 sha256）：push 到旧设备、从旧设备 pull、两台旧设备之间网关泵送，各自重跑一次必须全部跳过。
+- `tests/test_file_copy_e2e.py`：真实网关端口 + 两条真实设备连接 + MCP 客户端：A 经网关 HTTP 中转（自己的凭据）把文件夹复制到 B 并逐字节比对；A 锁定后改为网关泵送；取消不留临时文件；`file_copy_list` 合并各处任务。

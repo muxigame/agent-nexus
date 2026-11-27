@@ -37,8 +37,10 @@ AGENT_FEATURES: tuple[str, ...] = ("device-contract/1", "mcp-alias/1", "hub_call
 #: (``/api/devices/{id}/terminal[/ws]`` with ``X-ANX-Device``) and report ``hub_call lock_report``.
 #: ``agents/1`` (gateway): ``/api/devices/{id}/agents/{op}`` forwards the agent chat to devices, and
 #: ``hub_call agent_handle`` gives a console run its workspace handle and mailbox address (docs/agent-chat.md §9).
+#: ``files/2`` (gateway): the files relay passes the copy-job fields on and offers walk / stat / mkdirs /
+#: hash (``files_bridge.py``); the MCP tools file_copy* exist (docs/design.md §18).
 GATEWAY_FEATURES: tuple[str, ...] = ("hub_call/1", "mcp-alias/1", "mail/1", "ask/1", "inbox/1", "wake/1", "invites/1",
-                                     "plugin_repo/1", "remote/1", "p2p/1", "links/1", "agents/1")
+                                     "plugin_repo/1", "remote/1", "p2p/1", "links/1", "agents/1", "files/2")
 REMOTE = "remote/1"
 #: ``p2p/1``: muxi-p2p signaling under /p2p, the reflector, hub_call p2p_config / remote_ticket.
 P2P = "p2p/1"
@@ -55,6 +57,11 @@ TERM_PIPELINED = "term/2"
 #: ``desktop/2``: that VNC paces frames with fences, adapts its bit rate and scales large screens.
 #: ``files/1``: file transfer: ``fx_*`` reverse RPC (the relay) and the remote hub's ``files`` service.
 FILES = "files/1"
+#: ``files/2`` (device): the share understands the copy-job extensions (resume, overwrite, sha256, walk,
+#: stat_many, mkdirs, hash; the P2P ``putx`` / ``getx`` streams).
+FILES2 = "files/2"
+#: ``fxjob/1`` (device): runs copy jobs the gateway starts (``fxjob_start/status/cancel/list``).
+FXJOB = "fxjob/1"
 #: ``relay/1`` (device): forwards other devices' remote-hub streams (docs/relay-mesh.md).
 RELAY = "relay/1"
 #: ``links/1``: devices report how they reach each other (``hub_call links_report``) and the
@@ -63,7 +70,8 @@ LINKS = "links/1"
 #: ``agents/1`` (device): answers the ``agent_*`` reverse RPCs (docs/agent-chat.md §13); announced by the
 #: manager unless ``agents.enabled`` is false.
 AGENTS = "agents/1"
-AGENT_OPTIONAL_FEATURES: tuple[str, ...] = (PLUGIN_REPO, TERM, TERM_PIPELINED, "remote-hub/1", "desktop/1", "desktop/2", FILES, RELAY, AGENTS)
+AGENT_OPTIONAL_FEATURES: tuple[str, ...] = (PLUGIN_REPO, TERM, TERM_PIPELINED, "remote-hub/1", "desktop/1", "desktop/2", FILES, RELAY, AGENTS,
+                                                FILES2, FXJOB)
 ASK = "ask/1"
 INBOX = "inbox/1"
 WAKE = "wake/1"

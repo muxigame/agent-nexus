@@ -195,6 +195,10 @@ class ManagerConfig:
     #: ``relay.mode``: forward other devices' streams (docs/relay-mesh.md): on / off / auto.
     #: ``auto`` is off for now; it will pick well-reachable, always-on machines.
     relay: str = "auto"
+    #: ``files.enabled``: other devices (and the owner) may list, fetch and send files here (default on).
+    files: bool = True
+    #: ``files.jobs``: run file_copy jobs here (``fxjob/1``): the bytes go straight between devices (default on).
+    files_jobs: bool = True
 
     @property
     def path(self) -> Path:
@@ -238,6 +242,9 @@ def load_manager_config(root: Path) -> ManagerConfig:
         relay = data.get("relay")
         if isinstance(relay, dict) and relay.get("mode") in ("on", "off", "auto"):
             cfg.relay = relay["mode"]
+        files = data.get("files") if isinstance(data.get("files"), dict) else {}
+        cfg.files = files.get("enabled") is not False
+        cfg.files_jobs = cfg.files and files.get("jobs") is not False
     return cfg
 
 

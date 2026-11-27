@@ -98,6 +98,10 @@ class Devices:
                 "capabilities": capabilities, "agent_runtimes": runtimes, "workdirs": workdirs,
                 # Wake adapters arrive with M7; until then nothing is wakeable.
                 "wakeable_kinds": [],
+                # fxjob/1: runs file_copy jobs itself (data straight between devices); files/2: resumable,
+                # sha256-checked copies to and from it (docs/design.md §18).
+                "file_copy": bool(peer is not None and "fxjob/1" in peer.features),
+                "files_v2": bool(peer is not None and "files/2" in peer.features),
                 "features": sorted(peer.features) if peer else list(row.get("features") or [])}
 
     def list(self, *, include_offline: bool = False, capability: str | None = None) -> list[dict]:

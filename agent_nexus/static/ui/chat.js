@@ -601,10 +601,8 @@ export function mountChat(container, api, opts = {}) {
     toast(`${source}${name}${why}，已改用${deviceName(used)}`, { type: "info", timeout: 4200 });
   }
 
-  async function init(want = {}) {
-    let devices = [];
-    try { devices = (await api.devices()) || []; } catch { devices = []; }
-    if (!alive()) return;
+  /** Store a fresh device list (sorted, with 本机) and its note. */
+  function applyDevices(devices) {
     devices = devices.slice().sort((a, b) => (b.self ? 1 : 0) - (a.self ? 1 : 0) || (b.online ? 1 : 0) - (a.online ? 1 : 0) || String(a.name).localeCompare(String(b.name), "zh-CN"));
     if (opts.localDevice !== false && !devices.some((d) => d.self)) devices.unshift({ id: null, name: "本机", online: true, self: true });
     S.devices = devices;
@@ -613,6 +611,38 @@ export function mountChat(container, api, opts = {}) {
     for (const id of [...targetDirs.keys()]) if (!targets().some((t) => t.id === id && t.online && t.agents)) targetDirs.delete(id);
     if (gatewayCtx() && targetOf(S.context.device)) S.context.name = targetOf(S.context.device).name;
     S.devicesNote = (typeof api.devicesNote === "function" && api.devicesNote()) || "";
+    devicesAt = Date.now();
+    pollDevices();
+    return devices;
+  }
+
+  // The gateway link is often still coming up when the page opens (app start, just joined): the list then
+  // holds only 本机. Read it again every few seconds while there is a note, and when the menu opens.
+  let devicesAt = 0, devicesTimer = null, devicesBusy = false;
+  function pollDevices() {
+    clearTimeout(devicesTimer);
+    devicesTimer = S.devicesNote ? setTimeout(() => { if (alive()) refreshDevices(); }, 5000) : null;
+  }
+  async function refreshDevices() {
+    if (devicesBusy || !alive()) return;
+    devicesBusy = true;
+    let devices = null;
+    try { devices = (await api.devices()) || []; } catch { devices = null; } finally { devicesBusy = false; }
+    if (!alive()) return;
+    if (!devices) { pollDevices(); return; }
+    const before = S.devices.map((d) => `${d.id}:${d.online}:${d.hint || ""}`).join() + S.devicesNote;
+    applyDevices(devices);
+    if (before !== S.devices.map((d) => `${d.id}:${d.online}:${d.hint || ""}`).join() + S.devicesNote) {
+      if (S.device === undefined && S.devices.some((d) => d.online !== false)) { init(); return; }
+      renderBar(); renderComposer(); renderWelcome();
+    }
+  }
+
+  async function init(want = {}) {
+    let devices = [];
+    try { devices = (await api.devices()) || []; } catch { devices = []; }
+    if (!alive()) return;
+    devices = applyDevices(devices);
     if (!devices.some((d) => d.online !== false)) {
       S.device = undefined;
       S.loading = false;
@@ -1040,6 +1070,7 @@ export function mountChat(container, api, opts = {}) {
   }
 
   function deviceMenu(anchor) {
+    if (Date.now() - devicesAt > 10000) refreshDevices();
     menu(anchor, [
       { heading: "CLI 在哪台设备上运行" },
       ...S.devices.map((d) => ({
@@ -1338,7 +1369,7 @@ export function mountChat(container, api, opts = {}) {
 
     const info = agentInfo();
     const mcpWarn = info?.gateway_mcp === false ? el("div", { class: "chat-dir-warn" }, icon("triangle-alert", { size: 13 }),
-      el("span", {}, `${kindShort(S.kind, info)} 在 ${deviceName()} 上没有配 Agent Nexus 连接器，经网关时调用不了 use_device。在 ${deviceName()} 上给它添加网关 MCP（网关控制台 → 设置 → AI 客户端接入）后再用。`)) : null;
+      el("span", {}, `只影响其他设备上的目录：${kindShort(S.kind, info)} 要通过网关的 Agent Nexus MCP 才能操作别的设备，${deviceName()} 上的它还没配这个 MCP（网关控制台 → 设置 → AI 客户端接入）。本机目录不受影响。`)) : null;
     const content = el("div", { class: "chat-dirs" },
       all.length || S.devicesNote ? el("div", { class: "chat-dir-dev-head runner" }, icon(remote ? "monitor" : "laptop", { size: 14 }),
         el("span", { class: "chat-dir-dev-name truncate", title: deviceName() }, deviceName()), el("span", { class: "chat-dir-tag" }, "运行设备"),

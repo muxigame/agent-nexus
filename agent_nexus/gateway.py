@@ -121,6 +121,7 @@ INSTRUCTIONS = (
     "Every tool result ends with a notice when you have unread mail. ask_user asks the owner a question. "
     "Third-party MCP connectors added by the owner run on the gateway as hub/<name> (mcplist, toolsearch, "
     "tooluse) and work even when no device is online. "
+    "file_copy copies files or folders between devices as a background job (poll file_copy_status). "
     "Tool execution is never retried automatically."
 )
 
@@ -224,6 +225,9 @@ class Gateway:
         self.enrollment = None
         #: P2PGateway (p2p/1), set by build_cloud_app.
         self.p2p = None
+        # file_copy (docs/design.md §18): who moves the bytes, and the jobs the gateway pumps itself.
+        from .file_copy_gateway import FileCopyService
+        self.file_copy = FileCopyService(hub, self.devices)
 
     async def selection(self, workspace_id: str | None = None) -> dict | None:
         if workspace_id:
@@ -986,6 +990,9 @@ class Gateway:
         async def tooluse(mcp_id: str, tool: str, arguments: dict[str, Any], workspace_id: str | None = None) -> ToolResult:
             """Execute an internal MCP tool with the arguments given by mcpdetail/toolsearch."""
             return await self.call(mcp_id, tool, arguments, workspace_id)
+
+        from . import file_copy_tools
+        file_copy_tools.register(server, self)
 
         if self.mailbox_config["enabled"]:
             from . import mail_tools

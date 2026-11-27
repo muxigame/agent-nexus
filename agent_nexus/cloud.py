@@ -475,6 +475,8 @@ def build_cloud_app(config: dict, root: Path):
                         await task
                 with contextlib.suppress(Exception):
                     await connectors.close()
+                with contextlib.suppress(Exception):
+                    await facade.file_copy.close()  # copies the gateway pumps itself end here
     app.router.lifespan_context = lifespan
     app.state.hub = hub
     app.state.mcp = server
