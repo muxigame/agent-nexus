@@ -1,0 +1,62 @@
+// Agent Nexus for Android. scripts/build_android.py fills src/main/assets (the Python runtime)
+// and src/main/jniLibs (CPython and its launcher) before Gradle runs, and passes the version.
+plugins {
+    id "com.android.application"
+}
+
+def anxVersion = (project.findProperty("anxVersion") ?: "0.0.0").toString()
+def anxVersionCode = (project.findProperty("anxVersionCode") ?: "1").toString().toInteger()
+
+android {
+    namespace "io.github.muxigame.agentnexus"
+    compileSdk 36
+
+    defaultConfig {
+        applicationId "io.github.muxigame.agentnexus"
+        minSdk 29  // Android 10: MsQuic (libmsquic.so) needs glob()
+        targetSdk 36
+        versionCode anxVersionCode
+        versionName anxVersion
+        ndk { abiFilters "arm64-v8a" }
+    }
+
+    signingConfigs {
+        release {
+            // ANX_ANDROID_KEYSTORE (path) and its passwords; without them the debug key signs.
+            def store = System.getenv("ANX_ANDROID_KEYSTORE")
+            if (store) {
+                storeFile file(store)
+                storePassword System.getenv("ANX_ANDROID_KEYSTORE_PASSWORD")
+                keyAlias System.getenv("ANX_ANDROID_KEY_ALIAS") ?: "agent-nexus"
+                keyPassword System.getenv("ANX_ANDROID_KEY_PASSWORD") ?: System.getenv("ANX_ANDROID_KEYSTORE_PASSWORD")
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig System.getenv("ANX_ANDROID_KEYSTORE") ? signingConfigs.release : signingConfigs.debug
+        }
+    }
+
+    packaging {
+        // The launcher (libpyexe.so) is executed, so native libraries must be extracted to disk.
+        jniLibs { useLegacyPackaging true }
+    }
+
+    androidResources {
+        // runtime.zip is already compressed.
+        noCompress "zip"
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    // FileProvider: hands a downloaded update to the system's package installer (Updates.java).
+    implementation "androidx.core:core:1.13.1"
+}

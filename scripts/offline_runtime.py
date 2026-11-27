@@ -1,4 +1,4 @@
-"""Bundle Python and every locked dependency so a client (Windows or Ubuntu) starts offline.
+"""Bundle Python and every locked dependency so a client (Windows, Ubuntu or macOS) starts offline.
 
 A fresh machine used to download a CPython build (from GitHub) and roughly
 two hundred packages (from PyPI) on first start, which takes very long on a
@@ -19,8 +19,10 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -59,7 +61,15 @@ def projects(stage: Path) -> list[tuple[str, Path, list[str]]]:
 
 
 #: The uv-managed CPython build of the platform the package is built on (and for).
-PLATFORM = "windows-x86_64-none" if os.name == "nt" else "linux-x86_64-gnu"
+def _platform() -> str:
+    if os.name == "nt":
+        return "windows-x86_64-none"
+    if sys.platform == "darwin":
+        return "macos-aarch64-none" if platform.machine() == "arm64" else "macos-x86_64-none"
+    return "linux-x86_64-gnu"
+
+
+PLATFORM = _platform()
 
 
 def managed_python(uv: str) -> Path:
@@ -122,7 +132,9 @@ def _relative_links(cache: Path) -> None:
             continue
         if inside not in absolute.parents:
             raise RuntimeError(f"{link} points outside the cache: {target}")
-        relative = os.path.relpath(absolute, link.parent)
+        # Against the resolved folder: on macOS the temporary folder /var/... is really
+        # /private/var/..., and a link relative to the unresolved path breaks once moved.
+        relative = os.path.relpath(absolute, link.parent.resolve())
         if str(target) != relative:
             link.unlink()
             link.symlink_to(relative)

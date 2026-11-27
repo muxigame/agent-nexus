@@ -8,7 +8,7 @@ Agent Nexus：MCP 插件管理器与云端网关（gateway）：本机服务管�
 
 下文的 `hub.example.test` 是占位符，换成你自己的网关域名。
 
-1. **下载安装包**：在网关的下载页 `https://hub.example.test/downloads`（不用登录）下载 Windows 安装包；或打开 GitHub 仓库的 [Releases](https://github.com/muxigame/agent-nexus/releases)，下载最新版本的 `agent-nexus_<version>_x64-setup.exe`（Windows 10/11 x64）。同一页的 `SHA256SUMS` 可以核对文件：PowerShell 里执行 `Get-FileHash .gent-nexus_<version>_x64-setup.exe`。安装包没有代码签名证书，SmartScreen 提示时选择“仍要运行”。Ubuntu 用户下载 `agent-nexus_<version>_amd64.deb`，执行 `sudo apt install ./agent-nexus_<version>_amd64.deb`。
+1. **下载安装包**：在网关的下载页 `https://hub.example.test/downloads`（不用登录）下载 Windows 安装包；或打开 GitHub 仓库的 [Releases](https://github.com/muxigame/agent-nexus/releases)，下载最新版本的 `agent-nexus_<version>_x64-setup.exe`（Windows 10/11 x64）。同一页的 `SHA256SUMS` 可以核对文件：PowerShell 里执行 `Get-FileHash .gent-nexus_<version>_x64-setup.exe`。安装包没有代码签名证书，SmartScreen 提示时选择“仍要运行”。Ubuntu 用户下载 `agent-nexus_<version>_amd64.deb`，执行 `sudo apt install ./agent-nexus_<version>_amd64.deb`。macOS 用户下载 `agent-nexus_<version>_aarch64.dmg`（Apple 芯片）或 `_x64.dmg`（Intel），把 Agent Nexus 拖进“应用程序”；没有 Apple 开发者签名时，首次打开要到“系统设置 → 隐私与安全性”点“仍要打开”。Android 10 及以上的手机在手机上下载 `agent-nexus_<version>_arm64.apk` 并允许安装。
    - **核心和界面分开（所有平台同一个架构）**：核心（网关连接、自动更新、P2P、远程桌面、所有插件）和界面分开，类似 Clash 的服务和窗口。Windows 安装时可选“为所有用户安装”（需要管理员一次）或“仅为我安装”：前者的核心是 Windows 服务 `AgentNexus`（LocalSystem），数据在 `%ProgramData%\AgentNexus`，开机即在线、注销后不断线，由核心自己静默更新；后者保持原来的用户级运行（数据在 `%LOCALAPPDATA%\AgentNexus`）。Ubuntu 的核心是 root 系统服务 `agent-nexus.service`（数据在 `/var/lib/agent-nexus`）。窗口和托盘、以及共享当前登录桌面的会话助手都是普通用户程序，会话助手不在时核心会自动在当前活跃的会话里启动它。从旧版（用户级）切到系统服务时，原来的数据目录会搬到系统目录（原目录保留），旧的用户级核心自动停用。插件和远程终端以“执行账户”运行（设置 → 执行账户）：Ubuntu 可选任一本机账户，默认是安装它的用户；Windows 可选“当前登录的用户”（默认，插件运行在他的桌面会话里，截图、键鼠、界面自动化照常可用，切换用户后自动跟随）或 SYSTEM，没有人登录时回到 SYSTEM。
   - **Ubuntu 细节**：核心和界面分开，类似 Clash 的服务和窗口。核心（网关连接、自动更新、P2P、远程桌面、所有插件）是 root 系统服务 `agent-nexus.service`，数据在 `/var/lib/agent-nexus`，开机即运行，不依赖任何人登录，自动更新不需要密码；窗口和托盘、以及共享当前登录桌面的会话助手（`agent-nexus session`，登录时自动启动）是普通用户程序。安装包装好后几秒内自动完成设置；从旧版（用户服务）升级时，原来的 `~/.local/share/agent-nexus` 会搬到系统目录（原目录保留），旧的用户服务自动停用。插件和远程终端以“执行账户”运行（设置 → 执行账户，默认是安装它的用户；root 安装的服务器默认 root）。
   - **没有桌面的 Ubuntu 服务器**：`sudo apt install --no-install-recommends ./agent-nexus_<version>_amd64.deb`（不装 GTK/WebKit），然后 `sudo agent-nexus join <邀请码>`（加入后自动重启核心服务）。`agent-nexus service status` 查看状态和云端连接，`agent-nexus service logs -f` 看日志，`sudo agent-nexus anx <参数>` 运行其他 `anx` 命令。本机控制台用 `ssh -L 8399:127.0.0.1:8399 <用户>@<服务器>` 转发后在浏览器打开 `http://127.0.0.1:8399`。没有 systemd 的环境（容器）用 `agent-nexus --serve` 在前台运行。
@@ -22,7 +22,7 @@ Agent Nexus：MCP 插件管理器与云端网关（gateway）：本机服务管�
    - ChatGPT：设置 → 连接器（Connectors）→ 创建，填入上面的地址，认证选 OAuth，按提示登录授权。
    - Claude（claude.ai 或桌面版）：设置 → 连接器 → 添加自定义连接器，填入同一地址，按提示完成 OAuth 登录。
    - 连接后先调用 `device_list`（旧名 `workspace_list`）查看在线设备，再用 `use_device`（旧名 `set_workspace`）选择设备，之后的工具调用都会在该设备上执行。
-5. **更新**：有新版本时托盘图标左上角出现橙色向上箭头，托盘菜单显示“更新到 vX.Y.Z”，点击后才会下载安装（更新包有 minisign 签名校验）。
+5. **更新**：默认自动更新（设置页可改为只提示或关闭）。Windows 和 macOS 用同一个带 minisign 签名的更新通道；Ubuntu 用 apt 安装新的 deb；Android 自动下载新的 APK 后用通知和弹窗请你确认安装（系统要求用户确认，首次还要允许 Agent Nexus “安装未知应用”）；使用流量计费网络（移动数据）时不自动下载，连上 Wi-Fi 后再下，设置页的“立即更新”照常下载。
 
 ### 运维：部署网关
 
@@ -39,7 +39,7 @@ curl -s http://127.0.0.1:8440/healthz   # {"status":"ok","service":"agent-nexus-
 
 ### 发布流程（维护者）
 
-推送与源码版本一致的 tag（`vX.Y.Z`，见 `scripts/version.py`）后，`.github/workflows/release.yml` 构建带更新签名的 NSIS 安装包、`latest.json`、网关 zip 和公开版 deb，检查不含私有载荷（`scripts/test_no_private_payload.py`），生成 `SHA256SUMS`，并创建 **draft** release；人工检查后点 Publish，桌面端的更新检查才会看到新版本。签名密钥通过仓库 secrets `TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` 提供。公开仓库只推送由 `scripts/publish/make_public_branch.py` 生成的 `public` 分支：第一次运行是一个孤儿提交，之后每次刷新都在 `public` 原有末端上追加一个提交（`main` 的历史永远不进入 `public`），所以推送不需要 force，早先打在 `public` 上的 `v*` tag 也仍在其历史里，pre-push 钩子照常放行。
+推送与源码版本一致的 tag（`vX.Y.Z`，见 `scripts/version.py`）后，`.github/workflows/release.yml` 构建带更新签名的 NSIS 安装包、两种芯片的 macOS 磁盘映像和更新包、Android APK（仅当配置了发布密钥库）、`latest.json`、网关 zip 和公开版 deb，检查不含私有载荷（`scripts/test_no_private_payload.py`），生成 `SHA256SUMS`，上传到 OSS（`publish-oss`：全部文件核对无误后才替换更新通道 `latest.json` 和下载页读的 `downloads.json`），建 draft release，最后由 `publish-release` 自动把它发布为 latest（预发布 tag 停在 draft）。签名密钥通过仓库 secrets `TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` 提供（必需，Windows 和 macOS 共用）；可选的 `APPLE_CERTIFICATE`、`APPLE_CERTIFICATE_PASSWORD`、`APPLE_SIGNING_IDENTITY`、`APPLE_ID`、`APPLE_PASSWORD`、`APPLE_TEAM_ID` 用于 macOS 的 Developer ID 签名和公证（缺省时 ad-hoc 签名）；可选的 `ANDROID_KEYSTORE_BASE64`、`ANDROID_KEYSTORE_PASSWORD`、`ANDROID_KEY_ALIAS`、`ANDROID_KEY_PASSWORD` 用于签名 APK（缺省时不发布 APK，发布照常完成；密钥库一旦启用就不能更换，否则已安装的手机无法更新）。详见 docs/design.md §11.6。公开仓库只推送由 `scripts/publish/make_public_branch.py` 生成的 `public` 分支：第一次运行是一个孤儿提交，之后每次刷新都在 `public` 原有末端上追加一个提交（`main` 的历史永远不进入 `public`），所以推送不需要 force，早先打在 `public` 上的 `v*` tag 也仍在其历史里，pre-push 钩子照常放行。
 
 首次正式发布前的检查项：
 - 钩子只写进本工作树的 git 目录；只有在存在 `origin` 远程时运行该脚本（或加 `--activate-hook`）才会设置 `core.hooksPath` 和 `remote.origin.push`，此前它不生效。

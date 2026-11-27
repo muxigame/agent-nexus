@@ -35,6 +35,20 @@ const COMPLETE_MARKER: &str = ".anx-runtime-complete";
 const ENV_READY_MARKER: &str = ".anx-env-ready";
 const PYTHON_VERSION: &str = "3.12";
 const PRIVATE_ENROLLMENT: &str = ".private/enrollment.json";
+/// The bundled uv inside a runtime (scripts/build_release.py names it per platform).
+#[cfg(target_os = "windows")]
+pub(crate) const UV_BIN: &str = "tools/uv.exe";
+#[cfg(not(target_os = "windows"))]
+pub(crate) const UV_BIN: &str = "tools/uv";
+/// The interpreter of a project's `.venv`.
+#[cfg(target_os = "windows")]
+const VENV_PYTHON: &str = ".venv/Scripts/python.exe";
+#[cfg(not(target_os = "windows"))]
+const VENV_PYTHON: &str = ".venv/bin/python";
+#[cfg(target_os = "windows")]
+const PATH_SEPARATOR: &str = ";";
+#[cfg(not(target_os = "windows"))]
+const PATH_SEPARATOR: &str = ":";
 /// `--root <path>` of this process.
 static ROOT_ARG: OnceLock<PathBuf> = OnceLock::new();
 
@@ -104,8 +118,31 @@ pub(crate) fn process_alive(pid: u32) -> bool {
         quiet(&mut check);
         check.output().map(|out| String::from_utf8_lossy(&out.stdout).contains(&format!("\"{pid}\""))).unwrap_or(false)
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
     { Path::new(&format!("/proc/{pid}")).exists() }
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+        // `kill -0` checks the pid without signalling it (macOS has no /proc).
+        Command::new("kill").args(["-0", &pid.to_string()]).stdout(Stdio::null()).stderr(Stdio::null())
+            .status().map(|status| status.success()).unwrap_or(false)
+    }
+}
+
+/// End a process and everything it started (the manager and its plugins).
+pub(crate) fn kill_tree(pid: u32) {
+    #[cfg(target_os = "windows")]
+    {
+        let mut stop = Command::new("taskkill");
+        stop.args(["/F", "/T", "/PID", &pid.to_string()]);
+        quiet(&mut stop);
+        let _ = stop.output();
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        // Children first (they would be re-parented to launchd once the parent is gone).
+        let _ = Command::new("pkill").args(["-KILL", "-P", &pid.to_string()]).stdout(Stdio::null()).stderr(Stdio::null()).status();
+        let _ = Command::new("kill").args(["-KILL", &pid.to_string()]).stdout(Stdio::null()).stderr(Stdio::null()).status();
+    }
 }
 
 fn restart_allowed(app: &AppHandle) -> bool {
@@ -193,12 +230,27 @@ pub(crate) fn configured_url(root: &Path) -> Result<Url, String> {
     format!("http://127.0.0.1:{port}").parse().map_err(|e| format!("控制台地址错误：{e}"))
 }
 
-/// `%LOCALAPPDATA%\AgentNexus`. The legacy `Roc\MCPManager\client` root is
-/// never used in place: it stays the rollback target (copying it is `anx migrate`).
+/// The per-user base folder for application data: `%LOCALAPPDATA%` on Windows,
+/// `~/Library/Application Support` on macOS, `$XDG_DATA_HOME` (`~/.local/share`) elsewhere.
+pub(crate) fn user_data_base() -> Option<PathBuf> {
+    #[cfg(target_os = "windows")]
+    { env::var_os("LOCALAPPDATA").map(PathBuf::from) }
+    #[cfg(target_os = "macos")]
+    { env::var_os("HOME").map(|home| PathBuf::from(home).join("Library/Application Support")) }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        env::var_os("XDG_DATA_HOME").map(PathBuf::from)
+            .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
+    }
+}
+
+/// `%LOCALAPPDATA%\AgentNexus` (macOS: `~/Library/Application Support/AgentNexus`). The legacy
+/// `Roc\MCPManager\client` root is never used in place: it stays the rollback target (copying it
+/// is `anx migrate`).
 fn default_root() -> Result<PathBuf, String> {
-    let local = env_compat("DATA_HOME").or_else(|| env::var_os("LOCALAPPDATA"))
+    let local = env_compat("DATA_HOME").map(PathBuf::from).or_else(user_data_base)
         .ok_or("找不到当前用户的数据目录")?;
-    Ok(PathBuf::from(local).join("AgentNexus"))
+    Ok(local.join("AgentNexus"))
 }
 
 /// The root this shell serves: `--root`, else the usual discovery, else the system service's
@@ -218,6 +270,7 @@ pub(crate) fn prepare_for_service(_root: &Path) -> Result<(), String> {
 }
 
 /// The service: start the core (no tray: nobody sees session 0) from the system root.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) fn start_core(root: &Path) -> Result<Child, String> {
     let project = match source_project(root) { Some(project) => project, None => install_runtime(root)? };
     note_startup_log(root, &format!("service: runtime {}", project.display()));
@@ -239,6 +292,7 @@ pub(crate) fn start_core(root: &Path) -> Result<Child, String> {
 }
 
 /// The service stops: ask the core to stop its plugins and exit, then end what is left.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) fn stop_core(root: &Path, child: &mut Child) {
     if let Ok(url) = configured_url(root) { let _ = http(&url, "POST", "/api/manager/shutdown"); }
     let deadline = Instant::now() + Duration::from_secs(25);
@@ -248,11 +302,13 @@ pub(crate) fn stop_core(root: &Path, child: &mut Child) {
     }
     #[cfg(target_os = "windows")]
     crate::service::kill_tree(child.id());
+    #[cfg(not(target_os = "windows"))]
+    kill_tree(child.id());
 }
 
 /// The shell's own data folder (Tauri's app local data dir), holding `active-root`.
 fn shell_data_dir() -> Option<PathBuf> {
-    env::var_os("LOCALAPPDATA").map(|local| PathBuf::from(local).join(IDENTIFIER))
+    user_data_base().map(|local| local.join(IDENTIFIER))
 }
 
 /// Remember which root this installation serves, for `--shutdown-manager` run by
@@ -303,8 +359,30 @@ fn extract_into(dir: &Path, keep_config: bool) -> Result<(), String> {
         if entry.is_dir() { fs::create_dir_all(&target).map_err(|e| e.to_string())?; continue; }
         if CONFIG_NAMES.contains(&entry.name()) && (keep_config || target.exists()) { continue; }
         if let Some(parent) = target.parent() { fs::create_dir_all(parent).map_err(|e| e.to_string())?; }
-        let mut output = fs::File::create(target).map_err(|e| e.to_string())?;
-        std::io::copy(&mut entry, &mut output).map_err(|e| e.to_string())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // A Unix runtime keeps file modes and symlinks (the bundled CPython and uv's cache
+            // need both); scripts/build_release.py records them in the zip's external attributes.
+            let mode = entry.unix_mode();
+            if mode.map(|m| m & 0o170000 == 0o120000).unwrap_or(false) {
+                let mut link = String::new();
+                entry.read_to_string(&mut link).map_err(|e| e.to_string())?;
+                let _ = fs::remove_file(&target);
+                std::os::unix::fs::symlink(&link, &target).map_err(|e| e.to_string())?;
+                continue;
+            }
+            let mut output = fs::File::create(&target).map_err(|e| e.to_string())?;
+            std::io::copy(&mut entry, &mut output).map_err(|e| e.to_string())?;
+            if let Some(mode) = mode.map(|m| m & 0o777).filter(|m| *m != 0) {
+                fs::set_permissions(&target, fs::Permissions::from_mode(mode)).map_err(|e| e.to_string())?;
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let mut output = fs::File::create(target).map_err(|e| e.to_string())?;
+            std::io::copy(&mut entry, &mut output).map_err(|e| e.to_string())?;
+        }
     }
     Ok(())
 }
@@ -315,7 +393,7 @@ fn extract_runtime(root: &Path) -> Result<(), String> {
     let mut archive = zip::ZipArchive::new(Cursor::new(PAYLOAD)).map_err(|e| e.to_string())?;
     let version = format!("{}-{}", PAYLOAD.len(), archive.by_name("SHA256.json").map_err(|e| e.to_string())?.crc32());
     if fs::read_to_string(root.join(".bundled-version")).ok().as_deref() == Some(&version)
-        && root.join("tools/uv.exe").is_file() && root.join("agent_nexus/cli.py").is_file() { return Ok(()); }
+        && root.join(UV_BIN).is_file() && root.join("agent_nexus/cli.py").is_file() { return Ok(()); }
     extract_into(root, has_config(root))?;
     fs::write(root.join(".bundled-version"), version).map_err(|e| e.to_string())
 }
@@ -372,12 +450,17 @@ fn prune_runtimes(root: &Path) {
 }
 
 fn ensure_uv(root: &Path) -> Result<PathBuf, String> {
-    let executable = root.join("tools/uv.exe");
+    let executable = root.join(UV_BIN);
     if !executable.is_file() {
         fs::create_dir_all(root.join("tools")).map_err(|e| e.to_string())?;
         let mut archive = zip::ZipArchive::new(Cursor::new(PAYLOAD)).map_err(|e| e.to_string())?;
-        let mut entry = archive.by_name("tools/uv.exe").map_err(|e| e.to_string())?;
+        let mut entry = archive.by_name(UV_BIN).map_err(|e| e.to_string())?;
         std::io::copy(&mut entry, &mut fs::File::create(&executable).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
+        }
     }
     Ok(executable)
 }
@@ -492,6 +575,8 @@ fn prepare_runtime() -> Result<(), String> {
 pub(crate) fn quiet(command: &mut Command) {
     #[cfg(target_os = "windows")]
     command.creation_flags(CREATE_NO_WINDOW);
+    #[cfg(not(target_os = "windows"))]
+    let _ = command;
 }
 
 fn project(root: &Path) -> Result<PathBuf, String> {
@@ -510,7 +595,7 @@ fn entry_point(project: &Path) -> (&'static str, &'static str) {
 fn spawn_manager(root: &Path, project: &Path, uv: &Path, log: &Path, service: bool) -> Result<Child, String> {
     let project = project.to_path_buf();
     let (module, script) = entry_point(&project);
-    let python = project.join(".venv/Scripts/python.exe");
+    let python = project.join(VENV_PYTHON);
     let mut check = Command::new(&python);
     check.args(["-c", &format!("import {module}, mcpkit, pystray, uvicorn")]).current_dir(&project)
         .env("ANX_ROOT", root).env("MCPM_ROOT", root);
@@ -526,7 +611,9 @@ fn spawn_manager(root: &Path, project: &Path, uv: &Path, log: &Path, service: bo
         value
     };
     command.arg("--root").arg(root).arg("serve");
-    if !service { command.arg("--tray"); }
+    // macOS: the shell's own tray stands in for the manager's (pystray updates its menu from a
+    // worker thread, which AppKit kills with a main-thread assertion), with the status dot.
+    if !service && !cfg!(target_os = "macos") { command.arg("--tray"); }
     let output = OpenOptions::new().create(true).append(true).open(log).map_err(|e| e.to_string())?;
     // An offline package ships its Python and package cache; uv must not go online for them.
     // They live in the runtime (versioned layout) or the root (portable layout).
@@ -535,7 +622,7 @@ fn spawn_manager(root: &Path, project: &Path, uv: &Path, log: &Path, service: bo
     // Both spellings: a legacy runtime only reads MCPM_*; agent-nexus prefers ANX_*.
     let exe = env::current_exe().map_err(|e| e.to_string())?;
     command.current_dir(root).env("ANX_ROOT", root).env("MCPM_ROOT", root).env("PYTHONUNBUFFERED", "1").env("PYTHONUTF8", "1")
-        .env("PATH", format!("{};{}", tools.display(), env::var("PATH").unwrap_or_default()));
+        .env("PATH", format!("{}{PATH_SEPARATOR}{}", tools.display(), env::var("PATH").unwrap_or_default()));
     if service {
         // The system service: no window of its own; the core updates the installation itself.
         command.env("ANX_SYSTEM_SERVICE", "1").env("ANX_GUI_EXE", &exe);
@@ -618,9 +705,7 @@ fn bootstrap(app: AppHandle, override_url: Option<Url>) {
             drop(process_slot);
             loop {
                 if app.state::<StartupState>().quit.load(Ordering::SeqCst) {
-                    let mut stop = Command::new("taskkill");
-                    stop.args(["/F", "/T", "/PID", &child.id().to_string()]);
-                    quiet(&mut stop); let _ = stop.output(); return Ok(());
+                    kill_tree(child.id()); return Ok(());
                 }
                 if let Some(info) = ping(&target) {
                     ready(&app, &target, info);
@@ -742,7 +827,8 @@ fn ready(app: &AppHandle, target: &Url, info: Value) {
     thread::spawn(move || {
         let mut misses = 0; let mut current = info;
         let (mut tick, mut shown) = (0u32, None);
-        let system = crate::system::system_mode();
+        // The dot is drawn here when the core has no tray of its own: the system service, and macOS.
+        let system = crate::system::system_mode() || cfg!(target_os = "macos");
         loop {
             if app.state::<StartupState>().quit.load(Ordering::SeqCst) { return; }
             if current.get("tray_visible").and_then(Value::as_bool) == Some(true) { hide_startup_tray(&app); }
@@ -854,11 +940,7 @@ fn quit(app: &AppHandle) {
     let text = app.state::<StartupState>().target.lock().unwrap().clone();
     if let Ok(url) = text.parse::<Url>() { let _ = http(&url, "POST", "/api/manager/shutdown"); }
     if !app.state::<StartupState>().connected.load(Ordering::SeqCst) {
-        if let Some(pid) = *app.state::<StartupState>().bootstrap_pid.lock().unwrap() {
-            let mut stop = Command::new("taskkill");
-            stop.args(["/F", "/T", "/PID", &pid.to_string()]);
-            quiet(&mut stop); let _ = stop.output();
-        }
+        if let Some(pid) = *app.state::<StartupState>().bootstrap_pid.lock().unwrap() { kill_tree(pid); }
     }
     app.exit(0);
 }
@@ -887,7 +969,7 @@ fn startup_tray(app: &AppHandle) -> tauri::Result<()> {
     let exit = MenuItem::with_id(app, "quit", label, true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&open, &exit])?;
     TrayIconBuilder::with_id("startup-tray").icon(app.default_window_icon().unwrap().clone())
-        .tooltip("Agent Nexus — 正在准备启动").menu(&menu).show_menu_on_left_click(false)
+        .tooltip("Agent Nexus — 正在准备启动").menu(&menu).show_menu_on_left_click(cfg!(target_os = "macos"))
         .on_menu_event(|app, event| match event.id().as_ref() {
             "open" => launch(app, &[], false), "quit" => quit(app), _ => () })
         .on_tray_icon_event(|tray, event| { if let TrayIconEvent::DoubleClick { .. } = event { launch(tray.app_handle(), &[], false); } })
@@ -1056,7 +1138,7 @@ mod tests {
         // A legacy-only root: the bundled agent-nexus.json must not shadow it.
         fs::write(root.join("mcp-manager.json"), b"{\"cloud\":{\"enabled\":true}}").unwrap();
         extract_runtime(&root).unwrap();
-        assert!(root.join("tools/uv.exe").is_file());
+        assert!(root.join(UV_BIN).is_file());
         assert!(root.join("builtins/device/src/server.py").is_file());
         assert!(root.join("agent_nexus/cli.py").is_file());
         assert!(root.join("mcpm/cli.py").is_file());
@@ -1078,7 +1160,7 @@ mod tests {
         let tag = runtime_tag().unwrap();
         assert_eq!(dir, root.join("runtime").join(&tag));
         assert!(tag.starts_with(env!("CARGO_PKG_VERSION")));
-        assert!(dir.join("agent_nexus/cli.py").is_file() && dir.join("tools/uv.exe").is_file());
+        assert!(dir.join("agent_nexus/cli.py").is_file() && dir.join(UV_BIN).is_file());
         assert!(!root.join("agent_nexus").exists(), "the root holds only configuration and data");
         assert_eq!(fs::read_to_string(root.join("runtime/current")).unwrap(), tag);
         assert_eq!(fs::read_to_string(root.join("runtime/previous")).unwrap(), "0.1.9-old");

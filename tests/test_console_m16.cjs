@@ -110,6 +110,22 @@ return deviceAvatar;`);
   }
 });
 
+test("the downloads page features the installer for the visitor's platform", async () => {
+  const { featured } = await load("console/install-commands.js");
+  const desktop = [
+    { platform: "windows", arch: "x64" }, { platform: "macos", arch: "x64" },
+    { platform: "macos", arch: "arm64" }, { platform: "android", arch: "arm64" }];
+  const android = "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 Chrome/131 Mobile Safari/537.36";
+  const mac = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Safari/605.1.15";
+  const windows = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/131 Safari/537.36";
+  assert.deepEqual(featured(desktop, android), { platform: "android", arch: "arm64" });
+  assert.deepEqual(featured(desktop, mac), { platform: "macos", arch: "arm64" });
+  assert.deepEqual(featured(desktop, windows), { platform: "windows", arch: "x64" });
+  assert.deepEqual(featured([{ platform: "windows", arch: "x64" }], android), { platform: "windows", arch: "x64" });
+  assert.deepEqual(featured(desktop.slice(0, 2), mac), { platform: "macos", arch: "x64" });
+  assert.equal(featured([], windows), undefined);
+});
+
 test("Ubuntu install commands download the newest package from this gateway", async () => {
   globalThis.location = { origin: "https://hub.example.test" };
   const { ubuntuInstallCommand, ubuntuServerJoinCommand } = await load("console/install-commands.js");

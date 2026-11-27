@@ -2,6 +2,7 @@
 
     uv run --no-project python scripts/build_p2p_tools.py --rid win-x64 --out build/p2p
     uv run --no-project python scripts/build_p2p_tools.py --rid linux-x64 --out build/p2p
+    uv run --no-project python scripts/build_p2p_tools.py --rid osx-arm64 --out build/p2p
 
 * ``muxi-p2p-agent[.exe]``: published from the submodule third_party/muxi-p2p/agent
   (self-contained, single file; needs the .NET 9 SDK).
@@ -15,6 +16,13 @@
   to TCP punching. The OpenSSL build carries its own TLS, so .NET does not check the version
   (MC shipped this build before the split; verified on Windows 10 20H2).
   Both downloads are pinned by version and SHA-256. MIT, see ``LICENSE-msquic.txt``.
+
+* macOS (``osx-arm64``, ``osx-x64``, built on a Mac of that architecture): Microsoft publishes no
+  MsQuic for macOS, and .NET's QUIC client also needs OpenSSL there (its OpenSSL shim checks the
+  peer certificate). Both are built here from pinned sources: ``libmsquic.dylib`` (MsQuic with its
+  bundled quictls, linked statically) and ``libssl.3.dylib`` / ``libcrypto.3.dylib`` (OpenSSL LTS),
+  with ``@loader_path`` install names and an ad-hoc signature. agent_nexus/p2p.py puts the folder
+  on ``DYLD_LIBRARY_PATH`` for the agent. Needs cmake and perl. Apache-2.0, ``LICENSE-openssl.txt``.
 
 The build scripts take the folder from ``ANX_P2P_TOOLS``.
 
@@ -96,6 +104,70 @@ def msquic(rid: str) -> tuple[str, bytes, bytes]:
         return "libmsquic.so.2", tar.extractfile(library).read(), b"MIT License\n\nCopyright (c) Microsoft Corporation.\n"
 
 
+#: macOS runtimes: MsQuic and OpenSSL are built from source (see the module docstring).
+MACOS = {"osx-arm64": "arm64", "osx-x64": "x86_64"}
+OPENSSL_VERSION = "3.5.9"
+OPENSSL_URL = f"https://github.com/openssl/openssl/releases/download/openssl-{OPENSSL_VERSION}/openssl-{OPENSSL_VERSION}.tar.gz"
+OPENSSL_SHA256 = "603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a"
+MACOS_MINIMUM = "11.0"
+
+
+def run(command: list, **kwargs) -> None:
+    print("+", " ".join(str(part) for part in command), flush=True)
+    subprocess.run([str(part) for part in command], check=True, **kwargs)
+
+
+def relocatable(library: Path, names: dict[str, str]) -> None:
+    """``@loader_path`` install name and dependencies, then an ad-hoc signature (install_name_tool
+    invalidates the old one, and arm64 refuses to load unsigned code)."""
+    run(["install_name_tool", "-id", f"@loader_path/{library.name}", library])
+    for old, new in names.items():
+        run(["install_name_tool", "-change", old, f"@loader_path/{new}", library])
+    run(["codesign", "--force", "--sign", "-", library])
+
+
+def macos_libraries(rid: str, out: Path, scratch: Path) -> None:
+    """``libmsquic.dylib``, ``libssl.3.dylib`` and ``libcrypto.3.dylib`` for ``rid`` into ``out``."""
+    arch = MACOS[rid]
+    env = dict(os.environ, MACOSX_DEPLOYMENT_TARGET=MACOS_MINIMUM)
+    jobs = str(os.cpu_count() or 4)
+    # OpenSSL (the .NET shim dlopen()s libssl.3.dylib / libcrypto.3.dylib by name).
+    source = scratch / "openssl"
+    prefix = scratch / "openssl-install"
+    with tarfile.open(fileobj=io.BytesIO(download(OPENSSL_URL, OPENSSL_SHA256))) as tar:
+        tar.extractall(scratch, filter="data")
+    (scratch / f"openssl-{OPENSSL_VERSION}").rename(source)
+    run(["perl", "./Configure", f"darwin64-{arch}-cc", "shared", "no-tests", f"--prefix={prefix}",
+         f"-mmacosx-version-min={MACOS_MINIMUM}"], cwd=source, env=env)
+    run(["make", f"-j{jobs}"], cwd=source, env=env, stdout=subprocess.DEVNULL)
+    run(["make", "install_sw"], cwd=source, env=env, stdout=subprocess.DEVNULL)
+    for name in ("libcrypto.3.dylib", "libssl.3.dylib"):
+        shutil.copy2(prefix / "lib" / name, out / name)
+    relocatable(out / "libcrypto.3.dylib", {})
+    relocatable(out / "libssl.3.dylib", {str(prefix / "lib" / "libcrypto.3.dylib"): "libcrypto.3.dylib"})
+    (out / "LICENSE-openssl.txt").write_bytes(f"OpenSSL {OPENSSL_VERSION} (https://www.openssl.org)\n\n".encode()
+                                              + (source / "LICENSE.txt").read_bytes())
+    # MsQuic with its bundled quictls (static): depends on system frameworks only.
+    quic = scratch / "msquic"
+    run(["git", "clone", "--quiet", "--depth", "1", "--branch", f"v{MSQUIC_VERSION}", MSQUIC_REPO, quic])
+    run(["git", "submodule", "update", "--init", "--depth", "1", "submodules/quictls"], cwd=quic)
+    build = scratch / "msquic-build"
+    run(["cmake", "-S", quic, "-B", build, "-DCMAKE_BUILD_TYPE=Release", "-DQUIC_TLS_LIB=quictls",
+         "-DQUIC_BUILD_SHARED=ON", "-DQUIC_BUILD_TEST=OFF", "-DQUIC_BUILD_TOOLS=OFF", "-DQUIC_BUILD_PERF=OFF",
+         f"-DCMAKE_OSX_ARCHITECTURES={arch}", f"-DCMAKE_OSX_DEPLOYMENT_TARGET={MACOS_MINIMUM}"], env=env)
+    run(["cmake", "--build", build, "-j", jobs], env=env, stdout=subprocess.DEVNULL)
+    shutil.copy2(build / "bin" / "Release" / f"libmsquic.{MSQUIC_VERSION}.dylib", out / "libmsquic.dylib")
+    relocatable(out / "libmsquic.dylib", {})
+    (out / "LICENSE-msquic.txt").write_bytes(b"MsQuic " + MSQUIC_VERSION.encode() + b" (https://github.com/microsoft/msquic)\n\n"
+                                             + (quic / "LICENSE").read_bytes())
+    for library in ("libmsquic.dylib", "libssl.3.dylib", "libcrypto.3.dylib"):
+        linked = subprocess.run(["otool", "-L", out / library], check=True, capture_output=True, text=True).stdout
+        stray = [line.split()[0] for line in linked.splitlines()[1:]
+                 if not line.strip().startswith(("/usr/lib/", "/System/", "@loader_path/"))]
+        if stray:
+            raise SystemExit(f"{library} still depends on {stray}")
+
+
 ANDROID_RID = "linux-bionic-arm64"
 NDK_VERSION = "27.3.13750724"
 ANDROID_API = 29
@@ -158,11 +230,13 @@ def build_android(dotnet: str, out: Path) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--rid", choices=sorted([*DOWNLOADS, ANDROID_RID]), required=True)
+    parser.add_argument("--rid", choices=sorted([*DOWNLOADS, *MACOS, ANDROID_RID]), required=True)
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
     if not PROJECT.is_file():
         raise SystemExit(f"{PROJECT} is missing: git submodule update --init --recursive")
+    if args.rid in MACOS and sys.platform != "darwin":
+        raise SystemExit(f"{args.rid}: MsQuic and OpenSSL for macOS are built on a Mac")
     dotnet = shutil.which("dotnet") or sys.exit("the .NET 9 SDK (dotnet) is required")
     out = args.out.resolve()
     shutil.rmtree(out, ignore_errors=True)
@@ -176,9 +250,13 @@ def main() -> int:
         out.mkdir(parents=True)
         exe = "muxi-p2p-agent.exe" if args.rid.startswith("win") else "muxi-p2p-agent"
         shutil.copy2(Path(scratch) / exe, out / exe)
-    name, library, license_text = msquic(args.rid)
-    (out / name).write_bytes(library)
-    (out / "LICENSE-msquic.txt").write_bytes(b"MsQuic " + MSQUIC_VERSION.encode() + b" (https://github.com/microsoft/msquic)\n\n" + license_text)
+    if args.rid in MACOS:
+        with tempfile.TemporaryDirectory(prefix="anx-p2p-native-") as scratch:
+            macos_libraries(args.rid, out, Path(scratch))
+    else:
+        name, library, license_text = msquic(args.rid)
+        (out / name).write_bytes(library)
+        (out / "LICENSE-msquic.txt").write_bytes(b"MsQuic " + MSQUIC_VERSION.encode() + b" (https://github.com/microsoft/msquic)\n\n" + license_text)
     for path in sorted(out.iterdir()):
         print(f"{path.name:24} {path.stat().st_size:>10}  {hashlib.sha256(path.read_bytes()).hexdigest()[:16]}")
     return 0

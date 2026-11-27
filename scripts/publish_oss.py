@@ -53,6 +53,10 @@ class PublishError(RuntimeError):
     pass
 
 
+#: Not in every mimetypes table: a phone's browser offers an .apk to the installer by its type.
+CONTENT_TYPES = {".apk": "application/vnd.android.package-archive", ".dmg": "application/x-apple-diskimage"}
+
+
 def prerelease(version: str) -> bool:
     return "-" in version
 
@@ -88,7 +92,9 @@ def manifest(dist: Path, version: str, public_base: str, published_at: str) -> d
     """The download list for ``<prefix>/downloads.json``: installers only (no feed, signatures or sums)."""
     files = []
     for path in sorted(dist.iterdir()):
-        if not path.is_file() or path.name in {FEED, MANIFEST, "SHA256SUMS"} or path.suffix == ".sig":
+        # The macOS updater's .app.tar.gz is for the updater (latest.json), not a download.
+        if not path.is_file() or path.name in {FEED, MANIFEST, "SHA256SUMS"} or path.suffix == ".sig" \
+                or path.name.endswith(".app.tar.gz"):
             continue
         digest = hashlib.sha256()
         with path.open("rb") as handle:
@@ -128,7 +134,8 @@ def _bucket(bucket_name: str, endpoint: str):
 
 
 def upload(oss2, bucket, path: Path, key: str, cache_control: str | None = None) -> None:
-    headers = {"Content-Type": mimetypes.guess_type(path.name)[0] or "application/octet-stream"}
+    headers = {"Content-Type": CONTENT_TYPES.get(path.suffix.lower()) or mimetypes.guess_type(path.name)[0]
+               or "application/octet-stream"}
     if path.suffix in {".json", ".sig"} or path.name == "SHA256SUMS":
         headers["Content-Type"] = "application/json" if path.suffix == ".json" else "text/plain; charset=utf-8"
     if cache_control:

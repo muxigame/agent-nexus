@@ -10,3 +10,12 @@ export function ubuntuInstallCommand({ server = false, origin = location.origin 
 export function ubuntuServerJoinCommand(code, origin = location.origin) {
   return `${ubuntuInstallCommand({ server: true, origin })} && agent-nexus join ${code} && agent-nexus service enable`;
 }
+
+/** The installer to feature for this browser: an Android phone gets the APK, a Mac the disk image
+ * (Apple silicon unless only Intel is published; browsers do not tell the chip), else Windows. */
+export function featured(desktop, userAgent = (typeof navigator !== "undefined" && navigator.userAgent) || "") {
+  const pick = (platform, arch) => desktop.find((item) => item.platform === platform && (!arch || item.arch === arch));
+  if (/Android/i.test(userAgent)) return pick("android") || pick("windows") || desktop[0];
+  if (/Macintosh|Mac OS X/i.test(userAgent) && !/iPhone|iPad/i.test(userAgent)) return pick("macos", "arm64") || pick("macos") || pick("windows") || desktop[0];
+  return pick("windows") || desktop[0];
+}

@@ -2084,7 +2084,9 @@ def delete_files(defs: Any, home: Path, kind: str, session_id: str, *,
 
 class SessionMeta:
     """The console's own metadata per session in ``<root>/.anx/agents/sessions.json``:
-    ``{"version": 1, "sessions": {"<kind>:<id>": {alias, pinned, archived, hidden, managed, rid, updated}}}``.
+    ``{"version": 1, "sessions": {"<kind>:<id>": {alias, pinned, archived, hidden, managed, rid, context, updated}}}``.
+    ``context`` = ``{device, workdir}``: the session's last console run worked on another device's folder through the
+    gateway (§1 mode ``gateway``); the chat restores it when the session is opened again.
     Only keys that were set are stored; writes are atomic (temporary file + ``os.replace``)."""
 
     FIELDS = ("alias", "pinned", "archived", "hidden", "managed")
@@ -2161,7 +2163,8 @@ class SessionMeta:
 
     def set(self, kind: str, session_id: str, **patch: Any) -> dict:
         """Apply ``alias`` (text; empty clears it), ``pinned`` / ``archived`` / ``hidden`` / ``managed`` (bools; false
-        clears), ``rid``, ``address``, ``first_prompt`` (kept once set). Unknown keys are ignored. Returns the stored entry. Raises ``ValueError`` for bad input."""
+        clears), ``rid``, ``address``, ``first_prompt`` (kept once set), ``context`` (``{device, workdir}`` of a gateway
+        run; None or an empty value clears it). Unknown keys are ignored. Returns the stored entry. Raises ``ValueError`` for bad input."""
         if not isinstance(kind, str) or not kind or not isinstance(session_id, str) or not session_id:
             raise ValueError("缺少 kind 或 id")
         with self.lock:
@@ -2198,6 +2201,13 @@ class SessionMeta:
                     # (dsh) gets the system prompt in front of that message and titles the session from the mix
                     if value.strip() and "first_prompt" not in entry:
                         entry["first_prompt"] = " ".join(value.split())[:TITLE_MAX * 2]
+                elif name == "context":
+                    device = value.get("device") if isinstance(value, dict) else None
+                    workdir = value.get("workdir") if isinstance(value, dict) else None
+                    if isinstance(device, str) and device.strip() and isinstance(workdir, str) and workdir.strip():
+                        entry["context"] = {"device": device.strip()[:200], "workdir": workdir.strip()[:1000]}
+                    else:
+                        entry.pop("context", None)
                 elif name in ("rid", "address") and (value is None or isinstance(value, str)):
                     # rid: the console run using it; address: its mailbox address (§10), shown again on reopen
                     if value:
@@ -2220,7 +2230,7 @@ class SessionMeta:
                 self._save(data)
 
     def apply(self, sessions: list[dict]) -> list[dict]:
-        """Fill ``alias / pinned / archived / hidden / managed`` of discovered sessions in place."""
+        """Fill ``alias / pinned / archived / hidden / managed / context`` of discovered sessions in place."""
         entries = self.all()
         for session in sessions:
             entry = entries.get(self.key(session["kind"], session["id"]))
@@ -2236,6 +2246,8 @@ class SessionMeta:
                 session["title"] = _title(entry["first_prompt"])
             if entry.get("address"):
                 session["address"] = entry["address"]
+            if isinstance(entry.get("context"), dict):
+                session["context"] = {"mode": "gateway", **entry["context"]}
         return sessions
 
 

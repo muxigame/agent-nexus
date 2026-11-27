@@ -1,10 +1,16 @@
 # Public release pipeline (docs/design.md §11.2). A tag v<version> builds the signed
-# Windows installer, the updater feed, the gateway zip and the public Ubuntu package,
+# Windows installer, the macOS disk images (Apple silicon and Intel, with their signed updater
+# bundles), the Android APK (only when the release keystore secrets exist), the updater feed,
+# the gateway zip and the public Ubuntu package,
 # checks that none of them carries a private payload, publishes them to Aliyun OSS
 # (publish-oss: the desktop updater's feed <OSS_PUBLIC_BASE>/latest.json moves only
 # after every file is verified), deploys the gateway zip to the hub host (deploy-gateway.yml,
 # rolled back automatically if /healthz fails) and then publishes the GitHub release as latest.
 # A prerelease tag (vX.Y.Z-rc.1) stops at the draft: nothing is deployed or published.
+# macOS is best effort while its pipeline is new: a failed (or, with the repository variable
+# ANX_RELEASE_MACOS=false, skipped) macOS build leaves the Mac out of this release, with a
+# warning, instead of holding back Windows, Linux, Android and the updater feed. Windows, Linux
+# and Android (when its keystore is configured) must succeed.
 # The private (enrollment-embedded) edition is never built here (§11.4, decision D3).
 name: release
 
@@ -76,25 +82,221 @@ jobs:
           uv run python scripts/build_desktop.py --out artifacts --runtime artifacts/agent-nexus-runtime.zip
       - name: Verify desktop artifacts
         run: uv run python scripts/verify_client_artifacts.py --out artifacts --desktop-only --require-signature
-      - name: Updater feed (latest.json)
-        run: |
-          set -eu
-          version="${GITHUB_REF_NAME#v}"
-          uv run --no-project python scripts/make_latest_json.py \
-            --setup "artifacts/agent-nexus_${version}_x64-setup.exe" \
-            --tag "${GITHUB_REF_NAME}" --base-url "${OSS_PUBLIC_BASE}/releases/${version}" \
-            --notes "Agent Nexus ${GITHUB_REF_NAME}" --out artifacts/latest.json
       - name: Collect
         run: |
           set -eu
           version="${GITHUB_REF_NAME#v}"
           mkdir -p dist
-          cp "artifacts/agent-nexus_${version}_x64-setup.exe" "artifacts/agent-nexus_${version}_x64-setup.exe.sig" \
-             artifacts/latest.json dist/
+          cp "artifacts/agent-nexus_${version}_x64-setup.exe" "artifacts/agent-nexus_${version}_x64-setup.exe.sig" dist/
           uv run --no-project python scripts/test_no_private_payload.py dist artifacts/agent-nexus.exe
       - uses: actions/upload-artifact@v4
         with:
           name: windows
+          path: dist/
+          if-no-files-found: error
+
+  # One build per architecture: the runtime carries native CPython, packages and muxi-p2p-agent.
+  # Developer ID signing and notarization run when the APPLE_* secrets exist (Tauri reads them);
+  # without them the app is ad-hoc signed and the first open needs System Settings >
+  # Privacy & Security > Open Anyway. Updates are verified by the updater's own signature either way.
+  # Best effort (see the top): the jobs after it accept a failed or skipped macOS build.
+  macos:
+    needs: version-gate
+    if: vars.ANX_RELEASE_MACOS != 'false'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            rid: osx-arm64
+            arch: aarch64
+          - runner: macos-15-intel
+            rid: osx-x64
+            arch: x64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+          cache-all-crates: true
+          key: ${{ matrix.arch }}
+      - name: Tauri CLI
+        run: cargo install tauri-cli --version "${TAURI_CLI_VERSION}" --locked
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "9.0.x"
+      - run: uv sync --frozen
+      - name: P2P tunnel tools (muxi-p2p-agent, MsQuic and OpenSSL built from pinned sources)
+        run: uv run --no-project python scripts/build_p2p_tools.py --rid "${{ matrix.rid }}" --out build/p2p
+      - name: Runtime archive (bundled Python and packages)
+        env:
+          ANX_P2P_TOOLS: build/p2p
+        run: uv run python scripts/build_release.py runtime --out artifacts
+      - name: App, disk image and signed updater bundle
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -eu
+          if [ -z "${TAURI_SIGNING_PRIVATE_KEY}" ]; then
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY is not set; a release needs a signed updater artifact"
+            exit 1
+          fi
+          # Tauri treats a set-but-empty APPLE_* variable as configured; drop the missing ones.
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            if [ -z "$(printenv "$name" || true)" ]; then unset "$name"; fi
+          done
+          if [ -z "${APPLE_SIGNING_IDENTITY:-}" ]; then echo "::warning::no Apple Developer ID: the app is not notarized"; fi
+          uv run python scripts/build_desktop.py --out artifacts --runtime artifacts/agent-nexus-runtime.zip
+      - name: Collect
+        run: |
+          set -eu
+          version="${GITHUB_REF_NAME#v}"
+          base="agent-nexus_${version}_${{ matrix.arch }}"
+          mkdir -p dist
+          cp "artifacts/${base}.dmg" "artifacts/${base}.app.tar.gz" "artifacts/${base}.app.tar.gz.sig" dist/
+          uv run --no-project python scripts/test_no_private_payload.py dist artifacts/agent-nexus-runtime.zip artifacts/agent-nexus
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}
+          path: dist/
+          if-no-files-found: error
+
+  # latest.json names every platform's signed update, so it is written once all of them exist
+  # (a macOS architecture whose build failed or was skipped is left out, with a warning).
+  feed:
+    needs: [windows, macos]
+    if: ${{ !cancelled() && needs.windows.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+          pattern: "{windows,macos-*}"
+      - name: Updater feed (latest.json)
+        run: |
+          set -eu
+          version="${GITHUB_REF_NAME#v}"
+          mkdir -p feed
+          macos=()
+          for arch in aarch64 x64; do
+            bundle="release/agent-nexus_${version}_${arch}.app.tar.gz"
+            if [ -f "$bundle" ]; then
+              macos+=(--macos-bundle "$bundle")
+            else
+              echo "::warning::no macOS ${arch} build (macos job: ${{ needs.macos.result }}); this release has no Mac ${arch} download or update"
+            fi
+          done
+          python3 scripts/make_latest_json.py \
+            --setup "release/agent-nexus_${version}_x64-setup.exe" \
+            "${macos[@]}" \
+            --tag "${GITHUB_REF_NAME}" --base-url "${OSS_PUBLIC_BASE}/releases/${version}" \
+            --notes "Agent Nexus ${GITHUB_REF_NAME}" --out feed/latest.json
+          cat feed/latest.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: feed
+          path: feed/
+          if-no-files-found: error
+
+  # The Android app (scripts/build_android.py): the core on CPython's official Android build, with
+  # its compiled dependencies cross-built here and the P2P tools for linux-bionic-arm64.
+  # Signed with the release keystore (secrets ANDROID_KEYSTORE_BASE64 and its passwords): Android
+  # only installs an update signed by the same key, so without it the job builds nothing.
+  android:
+    needs: version-gate
+    runs-on: ubuntu-latest
+    env:
+      NDK_VERSION: "27.3.13750724"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Release keystore
+        id: keystore
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        # No keystore: skip Android. A keystore without its password is a half-done setup, and
+        # signing would fail after the long build: stop here with a clear error instead (the key
+        # alias defaults to agent-nexus and the key password to the keystore password).
+        run: |
+          set -eu
+          if [ -z "${ANDROID_KEYSTORE_BASE64}" ]; then
+            echo "::warning::ANDROID_KEYSTORE_BASE64 is not set; no Android app in this release"
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ -z "${ANDROID_KEYSTORE_PASSWORD}" ]; then
+            echo "::error::ANDROID_KEYSTORE_BASE64 is set but ANDROID_KEYSTORE_PASSWORD is not; set it (or remove the keystore secret to release without Android)"
+            exit 1
+          fi
+          printf '%s' "${ANDROID_KEYSTORE_BASE64}" | base64 -d > "${RUNNER_TEMP}/release.keystore"
+          echo "present=true" >> "$GITHUB_OUTPUT"
+      - uses: astral-sh/setup-uv@v6
+        if: steps.keystore.outputs.present == 'true'
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+      - uses: actions/setup-java@v4
+        if: steps.keystore.outputs.present == 'true'
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+        if: steps.keystore.outputs.present == 'true'
+        with:
+          gradle-version: "8.14.3"
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.keystore.outputs.present == 'true'
+        with:
+          targets: aarch64-linux-android
+      - uses: actions/setup-dotnet@v4
+        if: steps.keystore.outputs.present == 'true'
+        with:
+          dotnet-version: "9.0.x"
+      - name: Android NDK
+        if: steps.keystore.outputs.present == 'true'
+        run: yes | "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" "ndk;${NDK_VERSION}" "platforms;android-36" "build-tools;36.0.0" > /dev/null
+      - name: P2P tunnel tools for Android (libmuxip2p.so, libmsquic.so)
+        if: steps.keystore.outputs.present == 'true'
+        run: uv run --no-project python scripts/build_p2p_tools.py --rid linux-bionic-arm64 --out build/p2p-android
+      - name: Native packages for Android (cibuildwheel)
+        if: steps.keystore.outputs.present == 'true'
+        run: uv run --no-project --python 3.12 python scripts/build_android.py wheels
+      - name: APK
+        if: steps.keystore.outputs.present == 'true'
+        env:
+          ANX_ANDROID_P2P_TOOLS: build/p2p-android
+          ANX_ANDROID_KEYSTORE: ${{ runner.temp }}/release.keystore
+          ANX_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANX_ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANX_ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          GRADLE: gradle
+        run: |
+          set -eu
+          uv run --no-project --python 3.12 python scripts/build_android.py apk --out dist
+          uv run --no-project python scripts/test_no_private_payload.py dist
+      - uses: actions/upload-artifact@v4
+        if: steps.keystore.outputs.present == 'true'
+        with:
+          name: android
           path: dist/
           if-no-files-found: error
 
@@ -142,7 +344,8 @@ jobs:
   # variables: ALIYUN_ROLE_ARN, ALIYUN_OIDC_PROVIDER_ARN (and optionally
   # OSS_BUCKET, OSS_ENDPOINT, OSS_PREFIX, OSS_PUBLIC_BASE).
   publish-oss:
-    needs: [windows, linux]
+    needs: [windows, macos, android, linux, feed]
+    if: ${{ !cancelled() && needs.windows.result == 'success' && needs.linux.result == 'success' && needs.android.result == 'success' && needs.feed.result == 'success' }}
     runs-on: ubuntu-latest
     environment: release
     permissions:
@@ -185,7 +388,8 @@ jobs:
         run: uv run --no-project --with oss2 python scripts/publish_oss.py --dist release --version "${GITHUB_REF_NAME#v}"
 
   draft-release:
-    needs: [windows, linux]
+    needs: [windows, macos, android, linux, feed]
+    if: ${{ !cancelled() && needs.windows.result == 'success' && needs.linux.result == 'success' && needs.android.result == 'success' && needs.feed.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -222,6 +426,8 @@ jobs:
   # reads <OSS_PUBLIC_BASE>/downloads.json), then the GitHub release leaves draft.
   publish-release:
     needs: [publish-oss, draft-release]
+    # Explicit: the default would skip this when the best-effort macOS build failed upstream.
+    if: ${{ !cancelled() && needs.publish-oss.result == 'success' && needs.draft-release.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write

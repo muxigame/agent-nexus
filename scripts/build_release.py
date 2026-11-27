@@ -22,9 +22,37 @@ offline_runtime = importlib.util.module_from_spec(_offline_spec)
 _offline_spec.loader.exec_module(offline_runtime)
 
 
+#: The platform packages are built for (always this machine; tests pin it).
+TARGET = sys.platform
+
+
 def offline_default(kind):
-    """Windows clients bundle Python and their packages unless --online is given."""
-    return kind in ("client", "runtime") and sys.platform == "win32"
+    """Windows and macOS clients bundle Python and their packages unless --online is given."""
+    return kind in ("client", "runtime") and TARGET in ("win32", "darwin")
+
+
+def bundled_uv_name():
+    """``tools/<name>`` of the uv a runtime carries (bootstrap.rs ``UV_BIN``)."""
+    return "uv.exe" if TARGET == "win32" else "uv"
+
+
+def zip_info(path, name):
+    """A zip member for ``path`` that keeps its Unix mode (and symlinks), or None on Windows.
+
+    The desktop shell (bootstrap.rs ``extract_into``) restores both on macOS: the bundled
+    CPython and uv's cache need their executable bits and links.
+    """
+    if TARGET == "win32":
+        return None
+    info = zipfile.ZipInfo(name, date_time=(2020, 1, 1, 0, 0, 0))
+    info.create_system = 3  # Unix, so external_attr carries st_mode
+    if path.is_symlink():
+        info.external_attr = (0o120777 << 16)
+        return info, os.readlink(path).encode()
+    mode = 0o755 if path.stat().st_mode & 0o111 else 0o644
+    info.external_attr = ((0o100000 | mode) << 16)
+    info.compress_type = zipfile.ZIP_DEFLATED
+    return info, None
 
 
 PRIVATE_ENROLLMENT = ".private/enrollment.json"
@@ -184,10 +212,10 @@ def release_files(kind, desktop=None, uv=None, include_windows_uv=True, rg=None)
             executable = shutil.which(str(uv or "uv"))
             if not executable:
                 raise FileNotFoundError("uv is required to build the portable client package")
-            yield Path(executable), "tools/uv.exe"
+            yield Path(executable), "tools/" + bundled_uv_name()
             ripgrep = find_ripgrep(rg)
             if ripgrep is not None:
-                yield ripgrep, "tools/rg.exe"
+                yield ripgrep, "tools/rg.exe" if TARGET == "win32" else "tools/rg"
             else:
                 print("warning: ripgrep (rg.exe) not found; file_grep will use its built-in search", file=sys.stderr)
     else:
@@ -216,11 +244,16 @@ def build(kind, destination, enrollment_file=None, desktop=None, uv=None, offlin
         sources += offline_runtime.bundle(sources, shutil.which(str(uv or "uv")) or "uv", Path(scratch.name))
     with scratch or contextlib.nullcontext(), zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
         for path, name in sources:
+            unix = zip_info(path, name) if kind in ("client", "runtime") else None
+            if unix is not None and unix[1] is not None:  # a symlink: its target is the member's data
+                archive.writestr(unix[0], unix[1])
+                manifest[name] = hashlib.sha256(b"symlink:" + unix[1]).hexdigest()
+                continue
             data = path.read_bytes()
             if kind in ("server", "gateway") and name == "pyproject.toml":
                 # Source server package doesn't carry the client wheel hook.
                 data = data.decode().replace("\r\n", "\n").replace('[tool.hatch.build.targets.wheel.hooks.custom]\npath = "build_hooks.py"\n', "").encode()
-            archive.writestr(name, data)
+            archive.writestr(unix[0] if unix is not None else name, data)
             manifest[name] = hashlib.sha256(data).hexdigest()
         config = "client.example.json" if kind in ("client", "runtime") else "server.example.json"
         name = CLIENT_CONFIG if kind in ("client", "runtime") else GATEWAY_CONFIG

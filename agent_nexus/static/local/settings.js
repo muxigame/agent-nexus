@@ -86,6 +86,8 @@ export async function settingsPage(ctx) {
                 el("p", { class: "muted small" }, result.cancelled ? "安装需要管理员授权。也可以在终端里运行：" : "这台电脑没有图形授权窗口，请在终端里运行："),
                 tokenField(result.manual)),
               actions: [{ label: "知道了", variant: "primary" }] });
+          } else if (result.prompted) {
+            toast("新版本已下载，请在系统的安装提示里确认（Android 要求由你确认安装）");
           } else {
             toast(data.updater === "deb" ? "更新已安装，正在重启 Agent Nexus" : "正在安装更新，完成后会自动重启");
           }

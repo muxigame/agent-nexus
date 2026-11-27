@@ -26,9 +26,11 @@ pub const PROGRAM_DIRS: [&str; 5] = [".venv", "runtime", "plugins", "builtins", 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Residue { pub pid: u32, pub name: String }
 
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn ps_quote(text: &str) -> String { format!("'{}'", text.replace('\'', "''")) }
 
 /// PowerShell that prints `pid<TAB>name` for every process belonging to `root`.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub fn residue_script(root: &Path, exe: &Path, me: u32) -> String {
     let base = root.display().to_string();
     let base = base.trim_end_matches(['\\', '/']);
@@ -46,6 +48,7 @@ pub fn residue_script(root: &Path, exe: &Path, me: u32) -> String {
         dirs = dirs.join(","), exe = ps_quote(&exe.display().to_string()), me = me)
 }
 
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub fn parse_residue(text: &str) -> Vec<Residue> {
     text.lines().filter_map(|line| {
         let (pid, name) = line.trim().split_once('\t')?;

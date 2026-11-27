@@ -22,6 +22,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
+from ..android import device_name
 from . import prompts as prompts_mod
 from . import registry, sessions, workdirs
 from .api import config as api_config
@@ -97,6 +98,10 @@ def configured_workspaces(root: Path) -> list[dict]:
 def _error(message: str, code: str, **extra: Any) -> dict:
     return {"error": message, "code": code, **extra}
 
+def _host_name() -> str:
+    """This machine's name; on Android the device's own name (``gethostname`` is ``localhost`` there)."""
+    return device_name() or socket.gethostname()
+
 
 class AgentHub:
     """``root``: the anx root (``.anx/agents/*`` lives there). ``account``: () -> the run-as account or None.
@@ -111,7 +116,7 @@ class AgentHub:
         self.root = Path(root)
         self.account = account or (lambda: None)
         self.gateway = gateway
-        self.device = device or (lambda: {"id": "", "name": socket.gethostname(), "gateway": ""})
+        self.device = device or (lambda: {"id": "", "name": _host_name(), "gateway": ""})
         self.workspaces = workspaces or (lambda: configured_workspaces(self.root))
         self._config = config or (lambda: registry.load_config(self.root))
         self.meta = sessions.SessionMeta(self.root)
@@ -182,7 +187,7 @@ class AgentHub:
             info = dict(self.device() or {})
         except Exception:  # noqa: BLE001
             info = {}
-        info.setdefault("name", socket.gethostname())
+        info.setdefault("name", _host_name())
         info.setdefault("id", "")
         info.setdefault("gateway", "")
         return info
@@ -211,6 +216,7 @@ class AgentHub:
         try:
             fresh = not getattr(run.opts, "resume_id", None)  # a resumed session keeps the CLI's own title
             self.meta.set(run.kind, session_id, managed=True, rid=run.rid, address=run.address or None,
+                          context=self._meta_context(run.context),
                           **({"first_prompt": run.last_prompt} if fresh and run.last_prompt else {}))
         except (OSError, ValueError):
             log.warning("agents: could not record session %s", session_id)
@@ -218,6 +224,14 @@ class AgentHub:
             self.tmp.update(run.rid, session=session_id)
         except (OSError, ValueError):
             pass
+
+    @staticmethod
+    def _meta_context(context: dict | None) -> dict | None:
+        """What the session metadata keeps of a run's context: the gateway target, or None (direct: cleared)."""
+        context = context or {}
+        if context.get("mode") != "gateway":
+            return None
+        return {"device": context.get("context_device_id") or "", "workdir": context.get("context_workdir_raw") or ""}
 
     def _on_close(self, run) -> None:
         try:
@@ -572,14 +586,27 @@ class AgentHub:
         if run is not None:
             run.context = {"mode": mode, "handle": handle, "preset": preset or "default",
                            "context_device": variables.get("context_device"),
-                           "context_workdir": variables.get("context_workdir")}
+                           "context_workdir": variables.get("context_workdir"),
+                           # as the console sent them (a device id, the folder typed / picked): stored with the
+                           # session and listed with the run, so reopening it restores the same context
+                           "context_device_id": str(context.get("device") or "") if mode == "gateway" else "",
+                           "context_workdir_raw": str(context.get("workdir") or "") if mode == "gateway" else ""}
         try:
-            await asyncio.to_thread(self.recent.add, workdir, kind=kind)
+            if mode == "direct":  # gateway mode: the folder is the other device's; the runner's cwd is only a base
+                await asyncio.to_thread(self.recent.add, workdir, kind=kind)
         except (OSError, ValueError):
             pass
         if resume_id and address:
             try:
                 self.meta.set(kind, resume_id, managed=True, rid=rid, address=address)
+            except (OSError, ValueError):
+                pass
+        # the context the session now runs in (a gateway target, or cleared for direct): a resumed one at once, a new
+        # one whose id arrived before run.context was set here too (else _on_session records it)
+        session_id = resume_id or (getattr(run, "session_id", None) if run is not None else None)
+        if session_id and run is not None:
+            try:
+                self.meta.set(kind, session_id, context=self._meta_context(run.context))
             except (OSError, ValueError):
                 pass
         result.update(mode=mode, handle=handle or None, gateway=bool(handle),
@@ -627,6 +654,9 @@ class AgentHub:
                     view["mode"] = run.context.get("mode")
                     view["context_device"] = run.context.get("context_device")
                     view["context_workdir"] = run.context.get("context_workdir")
+                    if run.context.get("mode") == "gateway":
+                        view["context"] = {"mode": "gateway", "device": run.context.get("context_device_id") or "",
+                                           "workdir": run.context.get("context_workdir_raw") or ""}
             return result
 
         return {**base, "agent_run_read": read, "agent_run_list": listing}

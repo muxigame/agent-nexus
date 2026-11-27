@@ -3,7 +3,8 @@
 * ``auto`` (the default everywhere): check 2 minutes after start and every 5 minutes, and
   install what is found -- the Windows app through its updater (``agent-nexus.exe
   --check-update`` / ``--apply-update``, a silent installer: no window), the Ubuntu package
-  with apt (as root, or with passwordless sudo; never a password prompt).
+  with apt (as root, or with passwordless sudo; never a password prompt), the Android app by
+  downloading the APK and offering it to the system installer (Android always asks the user).
 * ``notify``: the settings page shows the update, installing is a click.
 * ``off``: no checks.
 
@@ -84,6 +85,10 @@ async def run_once(root: Path) -> dict:
         if not found.get("available"):
             return {"result": "current" if not found.get("error") else "error", "error": found.get("error")}
         result = await asyncio.to_thread(linux_update.apply, root, unattended=True)
+        if result.get("prompted"):  # Android: downloaded; the app asks the user to install it
+            return {"result": "prompted", **result}
+        if result.get("deferred"):  # Android on a metered network: download later, on Wi-Fi
+            return {"result": "deferred", **result}
         return {"result": "installed" if result.get("installed") else "needs-root", **result}
     return {"result": "unsupported"}
 
@@ -94,7 +99,11 @@ async def loop(root: Path) -> None:
         if mode(root) == "auto":
             try:
                 outcome = await run_once(root)
-                if outcome["result"] in ("installing", "installed"):
+                if outcome["result"] == "prompted":
+                    log.info("auto update: %s downloaded, waiting for the user to install it", outcome.get("version"))
+                elif outcome["result"] == "deferred":
+                    log.info("auto update: %s available, waiting for an unmetered network", outcome.get("version"))
+                elif outcome["result"] in ("installing", "installed"):
                     log.warning("auto update: installing %s", outcome.get("version"))
                 elif outcome["result"] in ("error", "needs-root"):
                     log.warning("auto update: %s", outcome.get("error") or outcome.get("manual"))

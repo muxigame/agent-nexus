@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Updates.installIntent: only the folder the core downloads updates into (agent_nexus/linux_update.py). -->
+<paths>
+    <files-path name="updates" path="AgentNexus/.anx/updates/" />
+</paths>

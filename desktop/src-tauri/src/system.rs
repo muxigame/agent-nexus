@@ -297,6 +297,7 @@ mod tests {
         let _ = fs::remove_dir_all(base);
     }
 
+    #[cfg(target_os = "windows")]  // Windows paths: system mode is Windows only
     #[test]
     fn migrate_skips_logs_and_the_default_account_is_active() {
         let base = env::temp_dir().join(format!("anx-migrate-{}", std::process::id()));

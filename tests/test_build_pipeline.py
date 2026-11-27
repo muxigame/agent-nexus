@@ -37,6 +37,9 @@ class BuildPipelineTests(unittest.TestCase):
     def setUp(self):
         self.stack = contextlib.ExitStack()
         self.addCleanup(self.stack.close)
+        # These fixtures model the Windows build (uv.exe, MZ executables, NSIS) on any host.
+        self.stack.enter_context(patch.object(release, "TARGET", "win32"))
+        self.stack.enter_context(patch.object(desktop, "MACOS", False))
         temporary = self.stack.enter_context(tempfile.TemporaryDirectory(prefix="anx build tests "))
         self.root = Path(temporary).resolve()
         self.out = self.root / "new output"
@@ -400,6 +403,11 @@ class BuildPipelineTests(unittest.TestCase):
 
 
 class RipgrepBundleTests(unittest.TestCase):
+    def setUp(self):
+        target = patch.object(release, "TARGET", "win32")
+        target.start()
+        self.addCleanup(target.stop)
+
     def test_a_chocolatey_shim_resolves_to_the_real_binary(self):
         with tempfile.TemporaryDirectory() as scratch:
             base = Path(scratch) / "chocolatey"
@@ -429,3 +437,51 @@ class RipgrepBundleTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MacosBuildTests(unittest.TestCase):
+    """The macOS runtime keeps modes and symlinks; the app build publishes per-architecture names."""
+
+    def test_unix_runtime_members_keep_modes_and_symlinks(self):
+        with tempfile.TemporaryDirectory() as scratch, patch.object(release, "TARGET", "darwin"):
+            base = Path(scratch)
+            tool = base / "uv"
+            tool.write_bytes(b"uv")
+            tool.chmod(0o755)
+            plain = base / "data.txt"
+            plain.write_text("x")
+            plain.chmod(0o644)
+            if os.name == "nt":
+                self.skipTest("symlinks need a Unix host")
+            link = base / "python3"
+            link.symlink_to("python3.12")
+            info, data = release.zip_info(tool, "tools/uv")
+            self.assertIsNone(data)
+            self.assertEqual(info.external_attr >> 16, 0o100755)
+            self.assertEqual(release.zip_info(plain, "a.txt")[0].external_attr >> 16, 0o100644)
+            info, data = release.zip_info(link, "tools/python/bin/python3")
+            self.assertEqual((info.external_attr >> 16) & 0o170000, 0o120000)
+            self.assertEqual(data, b"python3.12")
+            self.assertEqual(release.bundled_uv_name(), "uv")
+        with patch.object(release, "TARGET", "win32"):
+            self.assertIsNone(release.zip_info(Path(scratch), "x"))
+            self.assertEqual(release.bundled_uv_name(), "uv.exe")
+
+    def test_macos_collects_the_disk_image_and_signed_updater_bundle(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            base = Path(scratch)
+            bundle = base / "target" / "release" / "bundle"
+            (bundle / "dmg").mkdir(parents=True)
+            (bundle / "macos").mkdir()
+            (bundle / "dmg" / "Agent Nexus_1.2.3_aarch64.dmg").write_bytes(b"dmg")
+            (bundle / "macos" / "Agent Nexus.app.tar.gz").write_bytes(b"tgz")
+            (bundle / "macos" / "Agent Nexus.app.tar.gz.sig").write_bytes(b"sig")
+            out = base / "out"
+            published = desktop.collect_macos(base / "target", out, "1.2.3", "aarch64", signed=True)
+            self.assertEqual([path.name for path in published], ["agent-nexus_1.2.3_aarch64.dmg",
+                             "agent-nexus_1.2.3_aarch64.app.tar.gz", "agent-nexus_1.2.3_aarch64.app.tar.gz.sig"])
+            (bundle / "macos" / "Agent Nexus.app.tar.gz.sig").unlink()
+            with self.assertRaisesRegex(RuntimeError, "updater bundle"):
+                desktop.collect_macos(base / "target", out, "1.2.3", "aarch64", signed=True)
+            self.assertEqual(desktop.mac_arch("x86_64-apple-darwin"), "x64")
+            self.assertEqual(desktop.mac_arch("aarch64-apple-darwin"), "aarch64")

@@ -20,7 +20,11 @@
      ?side=open     open the session drawer (narrow widths; wide layouts show the list already)
      ?collapsed=1   start with the session list collapsed (the stored `sideClosed`, wide layouts)
      ?menu=agent|dir|more|perm|device   open that popover once loaded
-     ?answer=1      answer the pending approval (shows the resolved state) -->
+     ?answer=1      answer the pending approval (shows the resolved state)
+     ?gw=off        本机 not joined to a gateway: only 本机 and its folders (a stored gateway context is blocked)
+     ?ctx=1         open a session that works on 工作电脑's folder through the gateway (Codex, no connector: the warning)
+     The 目录 menu lists the other devices of the network: 工作电脑 and the long-named GPU server (agents/1: their own
+     recent folders), 研发构建机 (no agents/1: workdirs + files/1 browsing), 家里的 NAS (offline). -->
 <body>
 <script type="module">
 import { renderShell, createRouter, el, mount, toast, icon, appearanceButton } from "../../agent_nexus/static/ui/ui.js";
@@ -32,7 +36,7 @@ if (!q.get("keep")) {
   try { localStorage.removeItem(chatStorageKey(true)); } catch { /* private mode */ }
   if (q.get("collapsed")) try { localStorage.setItem(chatStorageKey(true), JSON.stringify({ sideClosed: true })); } catch { /* private mode */ }
   if (!location.hash || location.hash === "#/") {
-    history.replaceState(null, "", q.get("state") ? "#/chat?new=1" : "#/chat?device=dev-mbp&kind=claude&session=c-7f3a");
+    history.replaceState(null, "", q.get("state") ? "#/chat?new=1" : q.get("ctx") ? "#/chat?device=dev-mbp&kind=codex&session=x-77gw" : "#/chat?device=dev-mbp&kind=claude&session=c-7f3a");
   }
 }
 const api = createFakeApi({ activeRun: q.get("state") !== "first" });

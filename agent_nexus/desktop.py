@@ -137,13 +137,16 @@ def update_status(root: Path) -> dict:
         config = {}
     mode, warning = update_mode(config if isinstance(config, dict) else {})
     from . import linux_update
-    updater = "tauri" if desktop_app() is not None else "deb" if linux_update.supported() else None
+    updater = ("tauri" if desktop_app() is not None else ("apk" if linux_update.ANDROID else "deb")
+               if linux_update.supported() else None)
     return {**read_update(root), "mode": mode, "warning": warning, "desktop_app": desktop_app() is not None,
             "updater": updater}
 
 
 def autostart_enabled() -> bool | None:
     """Whether the login Run value exists; ``None`` where there is no such thing."""
+    if sys.platform == "darwin":  # the shell's LaunchAgent (desktop/src-tauri/src/autostart.rs)
+        return (Path.home() / "Library/LaunchAgents/io.github.muxigame.agentnexus.plist").is_file()
     if sys.platform != "win32":
         return None
     import winreg

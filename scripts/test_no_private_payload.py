@@ -6,12 +6,15 @@ fails on:
 * a member path with a ``.private`` component, or named ``*enrollment*.json`` or
   ``endpoint-allow``;
 * a JSON member that has an ``agent_prefix`` key (only private enrollment profiles do);
-* inside a raw ``.exe``: any embedded ZIP member under ``.private/`` or named like an
-  enrollment profile (the desktop exe embeds its runtime zip uncompressed);
+* inside a raw ``.exe`` or a Mach-O executable (the macOS app's ``agent-nexus``, also inside
+  the updater's ``.app.tar.gz``): any embedded ZIP member under ``.private/`` or named like an
+  enrollment profile (the desktop executable embeds its runtime zip uncompressed);
 * an artifact whose own file name says ``private``.
 
 The NSIS ``setup.exe`` is LZMA-compressed and is checked by name only; it installs
-the raw ``agent-nexus.exe``, which is checked byte for byte. Findings print the
+the raw ``agent-nexus.exe``, which is checked byte for byte. A macOS ``.dmg`` is checked by
+name only too; it carries the same app as the ``.app.tar.gz``, whose executable is checked.
+An Android ``.apk`` is a ZIP and is opened like one (its ``assets/runtime.zip`` included). Findings print the
 artifact and member names only. Standard library only.
 
 Usage: ``python scripts/test_no_private_payload.py <artifacts-dir-or-file>...``
@@ -31,6 +34,8 @@ ARCHIVE_SUFFIXES = (".zip", ".whl", ".deb", ".tar.xz", ".tar.gz", ".tgz", ".tar"
 EMBEDDED_PRIVATE = re.compile(rb"(PK\x03\x04.{26}|PK\x01\x02.{42})(?:[^\x00]{0,200}/)?"
                               rb"(\.private/|[^/\x00]{0,80}enrollment[^/\x00]{0,40}\.json|endpoint-allow)", re.S)
 MAX_NESTED_BYTES = 512 * 1024 * 1024
+#: Mach-O (64-bit little-endian, universal): the macOS desktop executable embeds its runtime zip.
+MACHO_MAGIC = (b"\xcf\xfa\xed\xfe", b"\xca\xfe\xba\xbe")
 
 
 def bad_name(name: str) -> str | None:
@@ -95,7 +100,7 @@ def members(name: str, data: bytes):
 
 def scan(name: str, data: bytes, findings: list, depth: int = 0) -> None:
     lower = name.lower()
-    if lower.endswith(".exe"):
+    if lower.endswith(".exe") or data[:4] in MACHO_MAGIC:
         if EMBEDDED_PRIVATE.search(data):
             findings.append(f"{name}: embedded private runtime member")
         return

@@ -334,7 +334,9 @@ class LocalGateway:
         else:
             block = {"contract": device_contract.CONTRACT, "platform": _platform_name(), "degraded": True,
                      "capabilities": {"info": {"v": 1}}}
-        hostname = self.cloud["hostname"] if "hostname" in self.cloud else (block.get("hostname") or platform.node())
+        from .android import device_name  # Android: platform.node() is always "localhost"
+        hostname = self.cloud["hostname"] if "hostname" in self.cloud else (
+            block.get("hostname") or device_name() or platform.node())
         if isinstance(hostname, str) and hostname.strip():
             block["hostname"] = hostname.strip()[:255]
         else:

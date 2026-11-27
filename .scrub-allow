@@ -1,3 +1,4 @@
 # <path-glob> <rule-id> # <reason>   (every exception needs a reason)
 *uv.lock ipv4 # four-part package version numbers (e.g. nvidia wheels), not addresses
+scripts/build_android.py ipv4 # the four-part patchelf version pin, not an address
 tests/test_hygiene.py * # synthetic positive samples that exercise every scrub rule
