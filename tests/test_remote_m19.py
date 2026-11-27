@@ -202,6 +202,12 @@ def test_the_system_service_opens_the_terminal_window_as_the_user_on_their_deskt
     (wt_dir / "wt.exe").chmod(0o755)
     monkeypatch.setattr(winsession, "environment", lambda session: {"Path": str(wt_dir), "USERPROFILE": str(tmp_path)})
     monkeypatch.setenv("PATHEXT", ".EXE")
+    # shutil.which's Windows branch needs _winapi (Python 3.13+), which a Linux runner faking win32 lacks:
+    # look the name up in the given PATH the portable way.
+    import os
+    from pathlib import Path
+    monkeypatch.setattr(remote.shutil, "which", lambda name, path=None: next(
+        (str(p) for d in (path or "").split(os.pathsep) if d for p in [Path(d) / name] if p.is_file()), None))
     opened = []
     monkeypatch.setattr(winsession, "open_window", lambda session, argv, cwd, env: opened.append((session, argv, cwd, env)) or 42)
     monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: pytest.fail("not as SYSTEM in session 0"))
