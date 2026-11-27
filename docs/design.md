@@ -1525,6 +1525,7 @@ wecom、unity 等插件只在 windows 上跑；ones、jubian-go、payment 在两
 | R21 | 邀请码在有效期内泄露，被别人拿去入网 | 一次性、默认 24 小时过期、只存摘要；设备列表能看到每台设备的入网时间和主机名，可以立即吊销（§11.5） |
 | R22 | 网页收件箱/PWA 暴露在公网 | 复用网关现有的 OAuth 登录；cookie 为 HttpOnly/Secure/SameSite=Strict；service worker 不缓存邮件内容 |
 | R23 | 插件中转把一台设备上的代码装到另一台设备上，来源设备被篡改时会扩散 | 安装前在发起的控制台显示来源设备、版本、commit 和 install steps，由用户确认；sha256 端到端校验 |
+| R24 | 本机 MCP 不要凭据：登录这台电脑的任何用户（含 Windows 远程桌面会话）的任何进程都能用它，以这台设备的身份使用网关工具 | 与现有的 8399 控制台、8400 设备插件同一信任边界；设备凭据只留在客户端进程里，CLI 配置里不写任何秘密（比把 owner 令牌明文贴进 `~/.claude.json` 更好）；`mcp_local.peers = "accounts"` 只放行核心、执行账户和当前登录用户的进程；`mcp_local.enabled=false` 或网关的 `mcp_devices=false` 关闭；网关吊销立即生效。同一用户下的恶意程序不在防护范围内（§19.6） |
 
 ---
 
@@ -1570,3 +1571,198 @@ wecom、unity 等插件只在 windows 上跑；ones、jubian-go、payment 在两
 | 10 | 是否做 7×24 连接器节点（cloud-main） | **不需要**：连接器注册表放在网关，远程 HTTP/SSE 连接器默认在网关里运行，OAuth 在网关域名上完成；stdio、受 IP 限制的可以固定到设备 | D10、§7 |
 | 11 | 发给 `me` 的邮件提醒到哪里 | agent-nexus 内部处理：收件箱页、在线设备的 Windows toast（可点击跳转、简单问题直接按钮作答）、新工具 `ask_user`、手机网页收件箱（PWA，复用 OAuth 登录）；`request_user_input` 并入；不做企业微信或邮件桥接 | D11、§8.12 |
 | 12 | GPT Companion（chatx） | 保持独立应用，wake 适配器对接它，chatx 不改；打包成插件是以后的选项 | D12、§8.7 |
+
+## 18. 设备间文件复制（file_copy；files/2、fxjob/1）
+
+### 18.1 目标
+
+AI agent 通过网关 MCP 在任意两台在线设备之间（或同一台设备内）复制**文件或整个文件夹**（递归），二进制、几 GB 的数据都可以。此前只有人能在本机控制台“文件”页传单个文件，agent 没有任何办法在设备之间搬文件（实际案例：把几年的 1 分钟 K 线从 Windows 台式机同步到 Mac 和 GPU 主机）。
+
+网关工具（`file_copy_tools.py`，列在 `RESERVED_TOOLS`，未改动任何旧工具的 schema）：
+
+| 工具 | 作用 |
+|---|---|
+| `file_copy(src_device, src_path, dst_device, dst_path, overwrite=false, route="auto"\|"p2p", concurrency?)` | 启动后台任务，立即返回 `job_id`、`mode`（push / pull / local / gateway）、运行设备 |
+| `file_copy_status(job_id, wait_ms≤50000)` | 进度：`files{total,done,skipped,failed,in_progress}`、`bytes{total,done}`、`rate_bps`、`eta_s`、`current`、`routes`、`verified`（sha256 / size）、`errors`（前 50 条）+ `errors_total`、`warnings`、`message`；`wait_ms` 等到任务**结束**或时间到才返回（不是每完成一个文件就返回）；`state` 为 `unknown` 表示运行任务的设备暂时联系不上 |
+| `file_copy_cancel(job_id)` | 取消；已完成的文件保留，正在写的临时文件删除 |
+| `file_copy_list()` | 网关上的中转任务 + 各在线 `fxjob/1` 设备最近 24 小时的任务 |
+
+结束状态：`completed` / `completed_with_errors` / `failed` / `cancelled` / `interrupted`。`interrupted`、`failed`（例如对方离线）或 `unknown` 之后，用相同参数再调用一次 `file_copy` 即可：已完成的文件跳过，未完成的续传。重复调用也是单向同步的方式（新增和改动的文件；目标端从不删除任何东西）。工具描述里写明了这些，agent 不会在 `interrupted` 上一直轮询。
+
+路径语义：各设备自己的绝对路径写法（`~` = 该设备终端账户的主目录，和“文件”页相同）。`dst_path` 是源**变成**的路径（`cp src dst`，目标文件夹已存在就合并）；以 `/` 或 `\` 结尾表示复制**到**这个文件夹里（保留源的名字）。相对路径一律以“名字列表”传递，由各设备按自己的规则拼接，Windows 和 macOS/Linux 之间不会混用分隔符。
+
+### 18.2 数据路径：谁来搬字节
+
+任务在**一台设备上运行**（runner），网关只发起（反向 RPC `fxjob_start`）并转问状态：
+
+| 顺序 | runner | 条件 | 数据路径 |
+|---|---|---|---|
+| 1 | 源设备（push） | 有 `fxjob/1` 且未锁定 | 本机读盘、计算 sha256；写对方：直连隧道 → 中转设备（端到端加密）→ 网关 HTTP 中转（用本机设备凭据） |
+| 2 | 目标设备（pull） | 同上 | 读对方（同样的线路顺序），本机写盘 |
+| 3 | 同一台设备（local） | 有 `fxjob/1` | 本机复制，同样走临时文件 + 改名 |
+| 4 | 网关自己（gateway） | 两边都不能运行任务 | 网关把源的 `fx_read` 泵进目标的 `fx_put_*`：任何 `files/1` 设备都行，但很慢（约 100 KB/s 量级），返回里有提示；最多 2 个并发，每个任务 2 个文件并行，每个文件预读 3 块（内存 ≤ 3 MiB × 2） |
+
+1 和 2 之间：如果“不运行任务的一方”没有 `remote-hub/1`（无法被打洞连入）而另一方有，就让另一方运行，这样仍能直连。`route="p2p"` 时不允许网关中转：两边都不能运行任务直接报错；runner 打不通直连也不退回网关中转（多 GB 的数据推荐用它）。
+
+选这个方案的原因：复用“文件”页已有的线路选择（`files_link` / `p2p_link` / `files_drop` / `connector.hold` / 票据预取）；有直连时字节根本不经过网关；遍历和源端哈希在源设备本地完成；网关只保存任务指针，权限检查留在原处（见 18.6）；push、pull、本机、网关泵送共用同一个引擎（`file_copy.py`，只是端点实现不同）。
+
+任务编号是 `<runner 的 agent_id>:<随机串>`（网关泵送的是 `gateway:<随机串>`），网关重启后仍能向 runner 查询状态。设备上每 5 秒把快照写到 `.anx/fxjobs/<id>.json`，管理器重启后这些任务列为 `interrupted`（“设备重启中断；重新调用 file_copy 会跳过已完成的文件并续传未完成的文件”）。自动更新会重启管理器：有任务在运行时推迟安装（日志 “copy job running, update postponed”），最多推迟 6 小时。
+
+### 18.3 协议增补
+
+功能串：设备 `files/2`（共享端理解下面的扩展）、`fxjob/1`（能运行任务：`fxjob_start/status/cancel/list`）；网关 `files/2`（文件中转透传新字段、新增路由、有 file_copy 工具）。`device_list` 里每台设备多了 `file_copy`（`fxjob/1`）和 `files_v2`（`files/2`）。设备 `agent-nexus.json` 的 `files.enabled=false` 关掉文件传输（既不能做源也不能做目标），`files.jobs=false` 只是不在本机运行任务（网关会改用另一方或自己泵送）。
+
+`FileShare`（`file_share.py`，旧调用的默认行为不变）：
+
+- `begin` 新参数：`on_exists`（`rename` 默认 = files/1 行为 \| `overwrite` \| `error` \| `skip_same`）、`resume_key`（`[A-Za-z0-9_-]{8,64}`，临时文件名固定为 `.<name>.<key>.anxpart`，带 `resume` 时追加并返回 `have`）、`mtime_ns`、以 `base` + `rel`（名字列表）指定目标；返回加 `have`、`exists`。
+- `finish` 新参数：`sha256`（与写入的字节比对，不一致删除临时文件，`code:"checksum"`）、`mtime_ns`、`wait_s`（续传的文件要整体重新哈希，在线程里做；`wait_s` 内没做完就答 `{"state":"hashing"}`，调用方再问）。覆盖时 Windows 上 `PermissionError` 重试 3 次（杀毒软件或打开的句柄），仍失败报“目标文件被占用”。
+- 带 `resume_key` 的上传在空闲回收或无 `discard` 的 `abort` 时只关闭句柄、保留临时文件；取消和校验失败带 `discard` 删除。续传过的文件 `finish` 时必须带 `sha256`，否则拒绝（`code:"unverified"`，删除临时文件，引擎从 0 重传）：之前写下的字节没有别的办法证明属于这个文件。`finish` 返回 `checked`（是否真的比对了 sha256），`verified:"sha256"` 只据此计算。
+- 临时文件名可预测（`resume_key` 来自公开信息），所以按不可信对待：新建一律先删掉同名项（删的是链接本身）再 `O_CREAT|O_EXCL|O_NOFOLLOW`、权限 0600；续传只接受本进程所有、`st_nlink==1` 的普通文件（`lstat` 与打开后的 `fstat` 的 dev/ino 一致），否则从 0 开始；`stat_many` 的 `have` 同样只认这种文件；重新哈希用 `O_NOFOLLOW` 打开并核对 dev/ino，改名前再 `lstat` 核对一次，被换掉就放弃（`code:"checksum"`）。`_give` 用 `lchown`。
+- 权限位：`begin` 可带 `mode`（源文件的权限位，来自 `walk`）。改名前（句柄还开着时 `fchmod`）：覆盖已有文件 → 沿用被替换文件的权限和属主（`fchown`），不再交给终端账户；新文件 → 源的权限位（不含 setuid 等）再减去进程 umask；没有 `mode`（旧源）→ `0666 & ~umask`，与以前相同。所以 0600 的密钥复制过去仍是 0600，覆盖 root 的 0640 文件后仍是 root 的 0640。文件夹的权限位不复制（新建文件夹用默认权限）。
+- 以 `base` + `rel` 访问（复制任务）时，`rel` 下的每一层都用 `lstat` 检查，符号链接或 junction 一律拒绝（`code:"link"`）：读之前（`stat_file`、`hash`，最后一层再用 `O_NOFOLLOW` 打开）、写之前（`begin` 在建文件夹前后各查一次）、`mkdirs`、`stat_many`（目标本身是链接时报 `link`，引擎记错误“目标位置是符号链接，不覆盖也不跟随”）。遍历只在开始时做一次，复制可能持续几小时，这样中途把文件或文件夹换成链接也不会读到或写到树外。顶层路径本身（`src_path` / `dst_path`）是链接时照常跟进。`begin` 新建的文件夹逐个交给该用户（root 运行的核心不再留下属于 root 的文件夹）。
+- 新操作：`walk`（按名字排序的先序遍历，每页 ≤2000，游标是上一页最后一条的 `rel`；每页按游标二分定位，只对本页返回的条目做 `lstat`，超过 512 项的文件夹的有序名字表在页与页之间缓存 120 秒（第一页总是重新列出），所以一个 40 万文件的平铺文件夹总代价是线性的；一页超过 20 秒就提前返回 `next`；条目带 `mode`；符号链接和 Windows junction 标 `link`、不跟进；读不了的文件夹作为带 `error` 的条目，遍历继续；顶层是符号链接则跟进）、`stat_many`（≤1000 项，用 `lstat`：是否存在、大小、mtime、是否链接、续传临时文件已有字节 `have`，以及目标位置所在磁盘的 `free`、`platform` 和展开 `~` 后的 `base`；顺带删除所在文件夹里 7 天没动过的 `.*.anxpart`，每个文件夹每小时最多扫一次——源文件改了或再没重跑的复制留下的临时文件不会永远占着空间）、`mkdirs`、`hash`（可带 offset/length）。中转名 `fx_walk` / `fx_stat_many` / `fx_mkdirs` / `fx_hash`。
+- 名字检查（纯函数 `invalid_name`）：拒绝空名、`.`、`..`、含 `/` 的名字；Windows 上另拒绝 `<>:"|?*`、控制字符、结尾的点或空格、保留名（CON、PRN、AUX、NUL、COM1–9、LPT1–9），报“文件名在 Windows 上无效：…”，不会悄悄改名；Windows 上超过 240 字符的绝对路径加 `\\?\` 前缀。
+
+远程中心（`remote_hub.py`）的 `files` 服务：新帧类型 5 begin、6 result（只有看到对方 `files/2` 的调用方才会发，旧设备永远见不到）；新操作 `walk` / `stat` / `mkdirs` / `hash`（参数放在一个 begin 帧里，因为可能超过 hello 行的 4 KB 上限）、`putx`、`getx`：
+
+- `putx`：一条流、一张票据传很多文件（begin 可带 `mode`）（省掉每个文件一次 0.35–0.7 秒的票据往返——网关在国外时，上万个小 K 线文件主要耗在这里）。每个文件：begin `{seq, base, rel, size, mtime_ns, on_exists, resume_key, offset}`、data 帧、exit `{seq, sha256}`；对方对每个文件恰好回一个 result（可能提前回：拒绝时调用方停止发送该文件的数据，仍发 exit）。临时文件已有字节与 `offset` 不符时回 `{code:"offset", have}`，调用方从 `have` 重发。续传文件重新哈希期间每 5 秒发 ready `{seq, hashing}` 保活，调用方据此延长等待（防止 120 秒超时杀掉一个 20 GB 的续传）。exit `{end:true}` 结束；流中断时临时文件保留供续传；exit `{seq, abort, discard}` 放弃当前文件。调用方在两个文件之间可以发 ready `{keepalive:true}`（只重置对方 300 秒的空闲计时）：push 续传时要先在本机哈希已发送的前缀（在发 begin 之前做，几十 GB 可能要几分钟），期间每 30 秒发一次。
+- `getx`：一条流读很多文件。begin `{seq, base, rel | path, offset}` → ready `{seq, name, size, mtime_ns}`（offset>0 时先在本机哈希前缀，期间发保活 ready）→ data → exit `{seq, sha256(整个文件), size, mtime_ns}`；找不到文件回 result `{seq, error}`，流继续可用。
+
+网关文件中转（`files_bridge.py`）：`put/begin`、`put/end`、`put/abort`、`read` 透传上面的新字段（`read` 支持 `base` + JSON 编码的 `rel`，响应头加 `X-ANX-Mtime`）；新路由 `POST /api/devices/{id}/files/walk|stat|mkdirs|hash`，目标设备没有 `files/2` 时 409 `code:"needs_files2"`；设备拒绝时 422 的 body 增加 `reason`（设备的错误码）和 `detail`（如 `have`），`code` 仍是 `files_failed`。`put/end` 的 `wait_s` 最多 20 秒，避免超出网关的 180 秒调用预算。
+
+### 18.4 引擎：计划、校验、续传、并发
+
+1. **扫描**：流式遍历源，计划里只保留紧凑的 `(rel, size, mtime_ns)`（10 万个文件约 10 MB）。符号链接、特殊文件不复制（列在 `skipped`），读不了的条目记入 `errors`。
+2. **对照目标**（`stat_many`，每批 1000）：大小和 mtime 都相同 → 跳过（mtime 按目标文件系统的精度比较：目标值是 100 ns 的整数倍时容差 100 ns（NTFS），是整秒时容差 2 秒（SMB、HFS+、FAT/exFAT），`same_mtime`；`begin` 的 `skip_same` 用同一规则）（所以重复调用同一个 `file_copy` 就是幂等的续传）；存在但不同 → `overwrite=false` 记错误“目标已存在且内容不同”，`overwrite=true` 用 `on_exists=overwrite`；有续传临时文件 → 从 `have` 继续。`resume_key = sha256([src_device, src_path, rel, size, mtime_ns, dst_device, dst_path, dst_rel])[:32]`：跨任务、跨网关重启不变，源文件一变就换新键。
+3. **动手前检查**（任何字节移动之前失败）：同一设备且目标就是源或在源之内 → 拒绝（用设备自己展开 `~` 后的路径比较：`stat_many` 返回的 `base`，所以 `~/data/inner` 也能识别）；需要的字节数大于目标磁盘可用空间 → “目标磁盘空间不足：需要 X，可用 Y”；目标是 Windows / macOS 时，仅大小写不同的两个源名字其中一个记错误；目标是 Windows 时预先检查非法名字。
+4. **复制**：N 个 worker（默认 4，最多 8；网关泵送 2），大文件先排；每个 worker 在一侧保持一条长连接（`putx` / `getx`），多个小文件复用它。读盘在线程里，每次最多 1 MiB（P2P 帧 256 KiB），任何时候都不把整个文件放进内存。
+5. **校验**：读源的一方计算整个文件的 sha256（push：runner 读盘时算，续传时先在线程里哈希本地前缀；pull：源设备 `getx` 的 exit；网关泵送：边泵边算，续传时让源设备 `fx_hash` 整个文件，超时按文件大小放宽；`fx_hash` 仍失败时没有源 sha256，目标拒绝保留续传的文件，从 0 重传——绝不会把没校验过的前缀改名成正式文件），目标在改名前与自己写下的字节比对，`verified:"sha256"`。读完后再比一次源的大小和 mtime，变了就按新状态重试一次，仍在变则报“源文件在复制过程中被修改”。
+6. **重试**（每个文件最多 4 次，退避 2 / 5 / 15 秒）：线路错误 → 重新选线路（坏掉的隧道 `files_drop`；同一 worker 连续坏两次就改走网关中转），重试前用 `stat_many` 重新问目标的 `have`，从那里续传（问不到就沿用上次的位置，目标会纠正）；`checksum` / `unverified` 从 0 重来一次；连续 `max(4, 并发数+1)` 个文件因线路错误用完全部重试 → **整个任务失败**（“对方设备可能已离线、休眠或网络中断”），而不是把剩下的十万个文件每个都磨 20 多秒；`exists`、非法名字等不重试；`ENOSPC`（含 Windows winerror 112）→ **整个任务失败**（“目标磁盘已满”），正在写的临时文件丢弃以腾出空间；读源时没有权限 → 该文件记错误，继续。
+7. **结束**：最后用 `mkdirs` 建出空文件夹；状态 `completed` / `completed_with_errors` / `failed` / `cancelled` / `interrupted`。取消不回滚已完成的文件。
+
+### 18.5 版本降级
+
+runner 从网关给的 `peer_features` 得知对方版本：
+
+| 对方 | 行为 |
+|---|---|
+| `files/2` | 多文件流、覆盖、续传、目标端 sha256 校验、保留 mtime |
+| 只有 `files/1` | 每个文件一条旧的 `put` / `get` 流（或旧的中转调用）；`overwrite` 报“目标设备客户端版本过旧，不支持覆盖（需要 0.8.31 以上）”；按大小判断相同（mtime 拿不到），`verified:"size"` 并给出警告；旧客户端一个文件夹最多列 5000 项，目标文件夹被截断时列表里找不到的文件记错误（“无法确认文件是否已存在，请升级该设备”），不会因为看不见而写出 `name (1)` 的重复文件；做源时用 `list` 递归遍历，`truncated` 的文件夹记错误，中断后从头传；不能建空文件夹（警告） |
+| 没有 `files/1` | 报“这台设备的客户端版本不支持文件传输（升级到 0.8.8 以上），或设备上关闭了文件传输” |
+
+### 18.6 权限（没有打开任何新的通路）
+
+- MCP 调用方用的是 owner 的令牌，与收件箱、文件中转认可的是同一个 `server.auth`：owner 本来就能经网关读写任何 `files/1` 设备的文件。
+- 设备上的任务用 runner 自己的设备凭据：`remote_ticket` 和文件中转都拒绝已锁定的设备，runner 本地还检查 `lock.require_unlocked()`；网关选 runner 时跳过已锁定的设备。已锁定的设备仍可以作为另一方被操作，也可以被网关泵送——与终端的规则一致（锁定 = 不能操作别人，可以被操作）。
+- 关闭 `files.enabled` 的设备不宣告 `files/1`，既不能做源也不能做目标。
+
+### 18.7 陷阱清单
+
+- 事件循环：读、写、哈希、遍历、`os.replace` 都在线程里；RPC 处理函数里只做快速的 stat，`fxjob_start` 在 5 秒内返回，遍历在后台任务里。
+- 超时：MCP 客户端约 60 秒 → 后台任务 + 状态长轮询 ≤50 秒；设备 `rpc_timeout` / `Peer.timeout` 180 秒 → 网关对设备的每个调用都有自己的上限：`fxjob_start` 15 秒（超时算作拒绝，换下一个候选或网关泵送，并在后台取消那个可能迟到的任务）、`fxjob_status` 等待时间 + 5 秒（超时答 `unknown`）、`fxjob_cancel` 40 秒、`fxjob_list` 15 秒；半开的连接（休眠的笔记本、断掉的 VPN）不会让工具卡到 180 秒；`fxjob_status` 每次最多等 25 秒，设备端等到任务结束或时间到才答，网关两次询问之间至少隔 2 秒；P2P 帧 60 秒、保存结果按大小放宽（120 秒 + 每 50 MB/s 一秒）并由保活延长；票据 60 秒有效、只用一次 → 打开流之前才取。
+- `_reap` 不删可续传的临时文件；任务从不使用 `_free` 的“ (1)”改名（`on_exists` 总是显式的）。
+- 中转设备每台最多 32 条流 → 任务并发 ≤8；整个任务期间 `connector.hold()` 保住隧道。
+- 符号链接 / junction 不跟进（避免环，也避免复制途中被换成链接后读写到树外，见 18.3）；macOS 的 NFD 文件名原样保留，不做规范化。
+- Windows 服务账户（LocalSystem）看不到映射的网络驱动器：路径不存在时提示改用 UNC 路径 `\\server\share`；macOS 上 `~/Desktop`、`~/Documents`、`~/Downloads` 报 “Operation not permitted” 时提示到“系统设置→隐私与安全性→完全磁盘访问权限”允许 Agent Nexus。
+
+### 18.8 测试
+
+- `tests/test_file_share_v2.py`：`on_exists` 四种模式、确定性续传（abort 和空闲回收后临时文件仍在、返回 `have`）、sha256 不一致删除临时文件、mtime 保留、超过 2000 条的分页遍历（无状态、含符号链接和读不了的文件夹）、`stat_many` / `mkdirs` / `hash`、Windows 名字规则、新建文件夹的属主。
+- `tests/test_file_transfer.py`：真实 `RemoteHub` 上的 `putx`（一张票据 200 个小文件 + 一个大文件、单个文件出错不断流、offset 不符、续传重新哈希期间的保活）和 `getx`（多文件、续传、缺失文件后流仍可用），以及 P2P 的 `walk` / `stat`。
+- `tests/test_file_copy_engine.py`：两个本地端点之间的整树复制（含空文件夹）、目标路径的两种写法、重复运行全部跳过、只读剩余部分的续传、线路中断后重选线路、磁盘满、空间预检、取消、源在复制中被修改、复制进自身被拒绝、并发和块大小上限、长轮询、配置开关、重启后列为 interrupted。
+- `tests/test_file_copy_gateway.py`：MCP 工具的标题与注解、push / pull（源锁定）/ 网关泵送 / 同设备、P2P 流两个方向及隧道坏掉后的回退、`files/1` 目标（不能覆盖、按大小校验）、离线与缺功能的报错、取消、新的 Gateway 实例仍能查询设备上的任务、`device_list` 的新字段。
+- 评审修复的回归测试：重试从目标的 `have` 续传（断言第二次读的偏移 > 0）；网关泵送续传时 `fx_hash` 失败不会保留未校验的文件；对方一直离线时任务很快失败；目标把 mtime 截成 100 ns / 整秒后重跑仍全部跳过；长轮询等到结束而不是下一个文件（设备任务和网关泵送都测）；临时文件名处预埋的符号链接不被跟随；权限位随文件复制、覆盖保留原权限；源文件复制中被换成符号链接不会被读；目标文件夹被换成链接不会写穿；同设备 `~` 目标识别为复制进自身；旧目标的超大文件夹报错而不是重复；push 续传先哈希前缀、空闲流有保活；分页遍历每个条目只 stat 约一次；无源 sha256 的续传被拒；过期临时文件被清理；不是本进程独有的临时文件从 0 开始；设备不回应时工具在时限内返回。
+- `tests/test_file_copy_legacy.py`：对照 0.8.30 真正发布的 `file_share.py`（冻结在 `tests/compat/fixtures/legacy_file_share_0_8_30.py`，校验 sha256）：push 到旧设备、从旧设备 pull、两台旧设备之间网关泵送，各自重跑一次必须全部跳过。
+- `tests/test_file_copy_e2e.py`：真实网关端口 + 两条真实设备连接 + MCP 客户端：A 经网关 HTTP 中转（自己的凭据）把文件夹复制到 B 并逐字节比对；A 锁定后改为网关泵送；取消不留临时文件；`file_copy_list` 合并各处任务。
+
+---
+
+## 19. 本机 MCP（设备凭据代理）
+
+### 19.1 目标
+
+装了客户端之后，这台电脑上的 CLI（Claude Code、Codex、Gemini CLI……）和用户自己写的 Agent 直接连 `http://127.0.0.1:<控制台端口>/mcp`（默认 8399），**不需要任何凭据**，得到的工具和连网关 MCP 完全相同。以前每台电脑都要在 CLI 里手动填网关地址和 owner 令牌（网关控制台 → 设置 → 在 AI 客户端中添加 Agent Nexus），经网关模式的对话没有连接器时还会提示“没有配连接器”。
+
+### 19.2 架构
+
+```
+CLI ──HTTP（无凭据）──▶ 本机控制台 127.0.0.1:8399/mcp（LocalMcp：guard + 透传）
+                          │ 加上本设备凭据：Authorization: Bearer <设备令牌>、X-ANX-Device
+                          ▼
+                       网关 <mcp path>/device（DeviceMcpAuth）──▶ 与 /mcp 同一个 FastMCP（Gateway.build）
+```
+
+- **网关**（`device_mcp.py`，功能 `mcp_device/1`）：`/mcp/device` 和 `/mcp` 是同一个 FastMCP 应用，工具、INSTRUCTIONS、未读邮件提示都相同；调用方 `client_id = "device:<id>"`、`subject = "device"`。每个请求都检查：缺凭据或凭据无效/已吊销 → 401（不带 `WWW-Authenticate`），网关主人关闭了 `mcp_devices` → 403，设备不在线 → 409，设备已锁定 → 423（**整台设备**拒绝，和终端、文件、Agent 中转一致）。`server.auth` 不变：控制台和收件箱仍然只认 owner，`InboxWeb._verify` 另外拒绝 `subject` 为 `device` 的令牌。经设备选出的工作区在 handle 的 meta 里记 `via: device:<id>`。ready 消息的 `anx` 多两个键：`mcp_path`、`device_mcp`。
+- **客户端**（`local_mcp.py`）：控制台自己的服务器在 `/mcp` 上应答（Streamable HTTP，无状态）。就绪时把请求原样转发到网关的 `/mcp/device`，只转发 content-type、accept、mcp-protocol-version、mcp-session-id、last-event-id，再加上本设备凭据；本地调用方带的 Authorization、Cookie、Origin、Host、X-ANX-Device 一律丢弃，选不了身份；转发时要求 `Accept-Encoding: identity`，响应体解码后流回（即使网关前面的 nginx / Cloudflare 压缩了，CLI 收到的也是明文），不转发 content-encoding、content-length。响应（JSON 或 SSE）边收边转。CLI 断开（取消、被杀）时立刻关闭到网关的流，不占着共享连接池等长调用结束，审计记 `client_gone`。设备令牌从不离开客户端进程。
+- **不就绪时本地应答**：`initialize` 照常成功，instructions 里写原因；`tools/list` 只有 `nexus_status`；其他工具调用返回 `isError` 和原因；不会给 CLI 回 HTTP 401（否则 CLI 会对 127.0.0.1 发起 OAuth）。上游 401 → “已吊销/凭据不被接受”，403 `mcp_devices_off` → “网关主人关闭了设备 MCP 接入”（缓存 60 秒），404/405 → 网关过旧（请求带 `Mcp-Session-Id` 时除外：有状态网关的会话过期了，404 原样交给 CLI，它会重新 initialize），409/网络错误 → 网关未连接，423 → 已锁定。
+
+| 状态 | 原因（中文，显示在设置页和 instructions 里） |
+|---|---|
+| off | 本机 MCP 已关闭（404） |
+| exposed | `manager.host` 不是回环地址：一律 403 |
+| not_joined | 这台设备还没加入网关，Agent Nexus 工具不可用 |
+| offline | 网关未连接，稍后再试 |
+| revoked | 这台设备已被网关吊销，重新加入后才能使用 |
+| locked | 这台设备已锁定，解锁后才能使用 Agent Nexus 网关工具 |
+| gateway_old | 网关版本过旧，不支持本机 MCP 接入；请把网关更新到 0.8.31 或更新版本 |
+| device_access_off | 网关主人关闭了设备 MCP 接入 |
+| rejected | 网关不接受这台设备的凭据（已被吊销或需要重新加入；上游 401 后 30 秒内） |
+| ready | 已就绪：与网关 MCP 相同的工具，调用方记为本设备 |
+
+### 19.3 访问控制（guard）
+
+依次检查，第一条不满足就拒绝：开关关闭 → 404；控制台监听的不是回环地址 → 403；对端 IP 不是 127.0.0.0/8、::1、::ffff:127.x → 403；Host 必须正好是 `127.0.0.1:<端口>`、`localhost:<端口>` 或 `[::1]:<端口>`（不接受 `manager.host`，防 DNS rebinding 和伪造的局域网 Host）；带 Origin 时必须是这三个之一（`null` 拒绝），从不发送 CORS 头；只接受 POST / DELETE（GET 405）；POST 必须 `application/json`（挡住浏览器的“简单请求”）；`mcp_local.peers = "accounts"` 时用 psutil 按完整的四元组（客户端 IP 和端口、服务端 IP 和端口，状态 ESTABLISHED，每次现查不缓存）找到对端进程和用户，只放行核心自己的用户、执行账户和 Windows 当前登录用户；查不到或有多个候选一律拒绝；这时修改本机 MCP 设置（`PUT /api/mcp/local`）也要求同样的账户。注意控制台其余部分仍对这台电脑的所有本地账户开放，`accounts` 只限制本机 MCP；请求体最大 8 MiB。`LocalOnly` 对 `/mcp` 不再要求 `X-ANX`（MCP 客户端不会带），其余路径不变。
+
+每次工具调用在 `<root>/.anx/logs/local-mcp.jsonl`（0600，5 MB × 3 轮转）记一行：时间、状态、工具名、workspace_id 前 8 位、结果、耗时、（peers=accounts 时）对端 pid / 用户；不记参数和结果。
+
+配置（`agent-nexus.json`）：`"mcp_local": {"enabled": true, "auto_config": true, "peers": "any"}`，三项都可省略。地址固定 `http://127.0.0.1:<控制台端口>/mcp`（用 127.0.0.1 不用 localhost：Windows 上 localhost 可能先解析成 ::1），不会和 8400（设备插件）、8401（Unity MCP）、8405 冲突。网关主人的开关在网关控制台“设置 → 在 AI 客户端中添加 Agent Nexus”（`mcp_devices`，默认开）。
+
+### 19.4 CLI 配置里的专用配置项（像 Unity MCP 那样）
+
+`agents/mcp_link.py` 事先在每个已安装 CLI 的用户级配置里写一个名为 `agent-nexus` 的配置项（不含凭据）：
+
+| CLI | 位置 | 内容 | 方式 |
+|---|---|---|---|
+| Claude Code | `~/.claude.json`（或 `$CLAUDE_CONFIG_DIR/.claude.json`）的 `mcpServers` | `{"type":"http","url":…}` | 能直接运行 claude 时用 `claude mcp add-json --scope user`（Claude 一直在改写这个文件，用它自己的命令不会丢更新）；否则原位编辑 JSON，替换前核对 mtime，冲突重试 3 次 |
+| Codex | `$CODEX_HOME/config.toml`（`~/.codex`） | `[mcp_servers.agent-nexus]` `url`、`tool_timeout_sec = 900` | 在文件末尾追加一个表；删除时只删这个表；用 tomllib 重新解析，核对其他设置一个不变 |
+| Gemini CLI | `~/.gemini/settings.json` | `mcpServers["agent-nexus"] = {"httpUrl":…, "timeout": 900000}` | 原位编辑 JSON |
+
+- 每次写入前先备份为 `<文件>.anx-backup-<时间>`（每个文件只留最新 2 份）；条目已经正确时不写也不备份；写完重新解析校验；保留其他所有条目、格式、BOM 和 CRLF；追加后再删除能还原成原来的字节。临时文件（随机名）和备份从第一个字节起就是原文件的权限（root 时连属主一起），不会有一瞬间对其他用户可读（这些文件常含令牌）；替换前再核对一次 mtime，期间 Claude Code 写过就放弃重来，不会吞掉它的修改。
+- **以运行 CLI 的账户写入**：系统服务（Windows SYSTEM、Linux root）把 `python -I -m agent_nexus.cli mcp link --kind K --url URL --json` 作为执行账户（Windows 上是当前登录用户）启动，文件的属主和 ACL 都是那个用户的，绝不写进服务自己的配置目录；单用户安装直接在进程里写。Windows 服务找不到执行账户（没人登录，或终端账户设为 SYSTEM）时什么都不写、不检测、不运行用户目录里的程序（否则会以 SYSTEM 运行别人放进去的 `claude.cmd`，或者把文件属主改成 SYSTEM）。
+- **归属记录** `<root>/.anx/mcp-link.json`：只修改或删除记录为我们写入、且 URL 仍是我们写的那个的条目。我们写过、后来被用户删掉的记为 `user_removed`，不再自动加回。指向网关的外来 `agent-nexus`（就是网关控制台教程里的名字）算作网关连接器——URL 不是回环地址（IP、别名、公开地址都算）或带 Authorization 头即可，不要求主机名一致；回环地址的其他端口或 stdio 记为“名称被占用”，不动它，对话也不再另接一个，只提示用已有的。
+- **何时整理**：客户端启动后、连上网关时、首次看到某个 CLI、本机 MCP 设置或端口变化、检测结果变化、每 6 小时，以及设置页的按钮。整理排队合并，正在整理时来的变化会在这次结束后再整理一次（关闭开关不会等到 6 小时后）。规则：本机 MCP 关闭或暴露 → 删除我们的；未加入 / 已吊销 / 网关过旧 / 关闭了设备接入 → 保留已有的（以后会自动生效），不新增（连上网关后的整理会加上）；Codex 版本低于 0.50.0（更老的版本不认只有 `url` 的条目，可能整个 config.toml 都读不了）→ 不写、对话也不临时接入，已有的我们的条目删除；CLI 已经通过网关接入（配置项或账户连接器）→ 删除我们的（除非用户在设置页坚持添加，记为 pinned）；无法确定 → 不添加；确定没有 → 自动接入打开且不是用户删掉的 → 添加；端口变了 → 改写 URL。
+- 命令行：`anx mcp status`、`anx mcp unlink [--kind K | --all]`，`anx mcp link --kind K --url URL [--remove]`。客户端没在运行时 `unlink` 只改当前用户的、记录里那个文件，别的账户的条目跳过。
+- **卸载**：Windows 卸载程序（不是更新）在停服务之前运行 `agent-nexus.exe --unlink-mcp`，Ubuntu 的 prerm（remove）调用 `POST /api/mcp/local/unlink`：运行中的核心以各 CLI 的账户删掉我们写的条目，并且在退出前不再添加。核心没在运行时条目保留（之后可以 `anx mcp unlink --all`）。
+
+### 19.5 去重：CLI 已经通过别的方式接入网关
+
+`agents/mcp_probe.py` 把一个 CLI 的情况归为：`local`（本机 MCP 的配置项）、`gateway_config`（配置里名字像 Agent Nexus 或指向网关主机的条目）、`gateway_account`（厂商账户里加的连接器）、`both`、`none`、`unknown`、`name_taken`、`unsupported`。账户级连接器不会出现在配置文件里（真机：Codex 用 ChatGPT 登录，账户里加了网关连接器，`config.toml` 里只有 unityMCP 和 node_repl，`codex mcp list` 也看不到它），所以另外检测：
+
+- **Claude Code**：去重只看用户级（`.claude.json` 顶层 `mcpServers`）；某个项目里的条目（`projects[<目录>].mcpServers`、`<目录>/.mcp.json`）只在那个目录里的对话算数，别的目录照样添加或临时接入。被动、权威——对话里 `system/init` 列出实际加载的服务器和工具：名字像 Agent Nexus 的 claude.ai 连接器不管状态（failed / pending / needs-auth，网关可能只是暂时连不上）都算有；同时有 `device_list` 和 `use_device` 的 claude.ai 服务器也算（工具名前缀 `mcp__claude_ai_<名字>__`）；只有所有 claude.ai 连接器都已连接且没有一个是 Agent Nexus 时才记“没有”，否则不改缓存的答案。主动——只在整理和“重新检测”时（不在打开对话时）以该账户运行 `claude mcp list`（30 秒），解析 `claude.ai <名字>: <url>` 行，名字折叠后含 `agentnexus` 或 URL 主机是网关主机即算。
+- **Codex**：已登录时以该账户启动 `codex app-server`（stdio JSON-RPC，20 秒）：`initialize` → `initialized` → `app/list` → `mcpServerStatus/list`（0.164.0 的二进制里有这两个方法；不认识的方法返回错误，不算数，两者都没有回答就是“无法确定”），名字折叠后含 `agentnexus`、URL 主机是网关主机、或工具列表同时有 device_list 和 use_device 即算。被动兜底：`codex exec --json` 里 server 为 `codex_apps`、工具是 use_device / device_list 的 `mcp_tool_call`。
+- **Gemini CLI**：只看配置文件。dsh 和自定义 CLI：不支持写入。
+- 设置页的“我已连接 / 未连接”是用户的手动回答，不过期。“我已连接”在 none / local / unknown / 不支持 时都显示（检测说没有，但账户里其实有），点了之后我们的条目会被删除。
+- 结果缓存在 `<root>/.anx/mcp-probe.json`，CLI 版本不变、6 小时内有效；被动观察立即覆盖。打开对话从不等待检测：没有答案就是“无法确定”。
+- **只用一个**：本机 MCP 的配置项和别的同时存在时（用户坚持添加，或本来就有），对话用 `agent-nexus`（不需要 owner 令牌、调用记在本设备、名字已知；两边是同一个网关，workspace_id 通用）；否则用找到的那一个；`agent-nexus` 现在用不了（未就绪）而另有网关连接器时改用那个；无法确定时提示词写“只用其中一个连接器”。
+
+### 19.6 Agent Nexus 发起的对话
+
+`AgentHub.agent_run_open` 对每个运行调用 `MCPLink.for_run`，得到上面的结果加上接入方式：CLI 自己的配置（`local` / `gateway_*` / `both` / `unknown`）、按运行临时接入（`none`、不支持写入、用户删掉或关闭了自动接入，且本机 MCP 能提供网关工具；自定义文本 CLI 只有命令里有 `{mcp_url}` 时才算能接入，ACP 代理在 initialize 之后才知道，提示词写“尝试接入”，不支持 http 时经网关模式给出警告——claude 的 `--mcp-config <临时目录>/anx-mcp.json`、codex 的 `-c mcp_servers.agent-nexus.url=…`、ACP 声明了 `mcpCapabilities.http` 时 `session/new` / `session/load` 的 `mcpServers`、自定义 CLI 的 `{mcp_url}`；不碰用户的文件），或者 API 模型在进程内接入（列出本机 MCP 的工具、去掉 `workspace_id` 参数并在调用时填入本次的 handle；经网关模式只提供这些工具，`readOnlyHint` 的工具不需要审批）。
+
+- 提示词：新变量 `$mcp`、`$mcp_prefix`、`$mcp_state`、`$target_device`、`$target_workdir`、`$mcp_hint`；新内置片段“Agent Nexus MCP 与工作区”（`nexus_mcp`，两种模式都启用，有 handle 时才出现），写明连接器名和工具前缀、已选好的 `workspace_id`、目标设备和目录（路径用这个目录下的绝对路径）、邮箱地址，不需要先 device_list / use_device。
+- 权限：免审批的工具按权限模式给出明确清单，从不放行整个连接器：只读 → 只读工具；逐项审批 → 只读工具 + mail_send + ask_user；自动改文件 → 再加 file_write / edit_file / patch_file（只在经网关模式；直接模式下 CLI 自己的沙箱工具改本机文件）；完全 → 全部。exec_command、write_stdin、keyboard、mouse、tooluse、use_device、file_copy 在完全之外从不免审批——它们由设备内置服务执行，不在 CLI 的沙箱里。Codex：`-c mcp_servers.<连接器>.enabled_tools=[清单]` 加 `default_tools_approval_mode="approve"`（清单外的工具这次对话里根本没有；`codex exec` 从不询问）；账户连接器不加。Claude：`--allowedTools` 是这份清单，其余在逐项审批模式下走审批卡片。启动和 `--resume` 都带。
+- “没有配置连接器”的提示已删除；只有经网关模式下什么都接不上（本机 MCP 关闭/暴露/未加入/已吊销/已锁定/网关过旧/网关关闭了设备接入/凭据不被接受，或这个 CLI 接不了，且没有别的连接器）时提示“{CLI} 无法接入 Agent Nexus MCP（原因）”。API 模型的运行整个对话只开一个 MCP 会话（断了下次调用前重连，工具调用本身不重试）；本机 MCP 只回 `nexus_status` 或列不出工具时不缓存，先用自己的工具，30 秒后再列。`agent_info` 每个 CLI 有 `nexus_mcp`；`gateway_mcp` 保留一版（只有什么都接不上时为 false），让网关上旧的 chat.js 也显示正常。
+
+### 19.7 多用户与威胁模型
+
+默认（`peers = "any"`）登录这台电脑的任何用户（含 Windows 远程桌面会话）的任何进程都能使用 `/mcp`，以这台设备的身份调用网关工具。这和现有的 8399 控制台（已经能驱动 Agent、终端、执行账户）以及无凭据的 8400 设备插件是同一个信任边界。缓解：设备令牌从不离开客户端进程，CLI 配置里不写任何秘密（以前用户要把 owner 令牌明文贴进 `~/.claude.json` / `config.toml`）；`peers = "accounts"` 按进程用户过滤；两个开关；网关吊销。同一用户下的恶意程序不在防护范围内（风险 R24）。浏览器攻击由 Host、Origin、Content-Type 三项检查挡住。
+
+### 19.8 测试
+
+- `tests/test_gateway_device_mcp.py`：设备凭据在 `/mcp/device` 上得到与 owner 相同的工具名；工具里 `get_access_token().client_id == "device:pc-a"`；console-run handle 直接用于设备工具和 `mail_send`；use_device 记 `via`；离线 409、锁定 423、开关关闭 403、无效/吊销 401 且无 `WWW-Authenticate`；设备凭据在 `/mcp`、`/api/settings` 上不是 owner；ready 的 `anx` 带 `mcp_path`、`device_mcp`。
+- `tests/test_local_mcp.py`：guard 各项、`LocalOnly` 放行 `/mcp` 但其他写请求仍要 `X-ANX`；透传只带设备凭据、SSE 流过；上游 401/403/404/409/423 和网络错误变成本地应答；各不就绪状态只有 `nexus_status`；审计不含参数。
+- `tests/test_mcp_link.py`：Codex TOML（BOM、CRLF、注释、unityMCP）追加删除逐字节还原、幂等、备份、端口变更；Gemini / Claude JSON；假 `claude` 命令；以执行账户启动写入子进程；整理规则表（none / local / gateway_config / gateway_account / unknown / pinned / off / gateway_old / 名称被占用 / 用户删除不再加回）。
+- `tests/test_mcp_probe.py`：`claude mcp list` 解析与工具前缀、`system/init` 被动检测、假 `codex app-server`（有方法 / 没有方法 / 不回答）、缓存有效期与手动回答。
+- `tests/test_local_mcp_review.py`：压缩的上游响应解码后转发、CLI 断开即关闭上游流、有状态会话的 404 原样转发、四元组对端匹配、整理期间的变化不丢、Windows 服务不为“没人”写入、Claude 项目级条目、外来主机的 `agent-nexus`、不能提供网关工具时不新增、旧 Codex、both 时改用另一个连接器、卸载、私密文件的权限和并发写入、权限模式的审批清单、文本 CLI / ACP、`system/init` 的 failed 连接器、API 模型的降级列表和单一会话。
+- `tests/test_agents_hub.py`、`tests/test_local_mcp_runs.py`：经网关和直接模式的提示词带连接器名、handle、目标设备、目录和地址；无法确定时用通用写法；Codex 审批覆盖只给这个连接器；按运行接入的 claude `--mcp-config`（每种权限模式）和 codex `-c`；Claude `--allowedTools`；ACP 只在支持 http 时传 `mcpServers`；`{mcp_url}`；API 模型合并本机 MCP 的工具。`tests/nexus_mcp_note.test.cjs`：对话页提示的映射。
+- 真机验证（在主人的 Windows 工作电脑上，由主会话做）：Codex 识别为 ChatGPT 账户连接器、`config.toml` 不写入、对话无警告；Claude 的 `agent-nexus` 写进 `C:\Users\<用户>\.claude.json`、属主是该用户、有备份；经网关对话第一次工具调用直接用 handle；锁定后只剩 `nexus_status`；网关关闭设备接入后一个请求内给出原因；Unity 的 8401 不受影响；`codex exec` 调用账户连接器的工具是否需要审批。

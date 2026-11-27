@@ -500,7 +500,58 @@ def plans(kind: str, *, remove: bool, hooks: bool = False, base_argv: list[str] 
     raise IntegrateError(f"unknown client {kind!r}")
 
 
-def apply(plan: Plan, *, now: float | None = None) -> None:
+def _private_write(path: Path, data: bytes, like: os.stat_result | None) -> None:
+    """Create ``path`` (it must not exist) holding ``data`` with the mode (and, as root, the owner) of ``like`` from
+    its first byte on -- never a moment where a secret-bearing config is readable by other local users. A new
+    file (``like`` None) is 0600."""
+    mode = (like.st_mode & 0o777) if like is not None else 0o600
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), mode)
+    try:
+        if hasattr(os, "fchmod"):
+            os.fchmod(fd, mode)  # the umask may have narrowed it; never wider than the original
+        if like is not None and hasattr(os, "fchown") and hasattr(os, "geteuid") and os.geteuid() == 0:
+            with contextlib.suppress(OSError):
+                os.fchown(fd, like.st_uid, like.st_gid)
+        view = memoryview(data)
+        while view:
+            view = view[os.write(fd, view):]
+    except BaseException:
+        os.close(fd)
+        with contextlib.suppress(OSError):
+            os.unlink(path)
+        raise
+    os.close(fd)
+
+
+def safe_backup(path: Path, backup: Path) -> None:
+    """A copy of ``path`` at ``backup`` with the original's mode from the start (never shutil.copy2: it writes
+    first and narrows the mode afterwards)."""
+    like = path.stat()
+    _private_write(backup, path.read_bytes(), like)
+    with contextlib.suppress(OSError):
+        os.utime(backup, ns=(like.st_atime_ns, like.st_mtime_ns))
+
+
+def prune_backups(path: Path, keep: int) -> None:
+    """Keep only the ``keep`` newest ``<name>.anx-backup-*`` copies next to ``path``."""
+    found = sorted(path.parent.glob(glob_escape(path.name) + ".anx-backup-*"), key=lambda p: p.stat().st_mtime_ns
+                   if p.exists() else 0)
+    for old in found[:-keep] if keep > 0 else found:
+        with contextlib.suppress(OSError):
+            old.unlink()
+
+
+def glob_escape(text: str) -> str:
+    import glob
+    return glob.escape(text)
+
+
+def apply(plan: Plan, *, now: float | None = None, expect_mtime: float | None | bool = False,
+          keep_backups: int | None = None) -> None:
+    """Write ``plan``: a backup first, then a temp file (random name, the original's mode and owner from the start)
+    renamed over the file. ``expect_mtime`` (not False): the file's mtime when it was read (None: it did not exist);
+    checked again right before the rename, :class:`InterruptedError` when another program wrote it meanwhile.
+    ``keep_backups``: prune older ``.anx-backup`` copies of this file down to that many."""
     if plan.delete:
         # Only our entries were in it: no backup (nothing of the owner's is lost).
         with contextlib.suppress(FileNotFoundError):
@@ -510,13 +561,37 @@ def apply(plan: Plan, *, now: float | None = None) -> None:
         return
     now = time.time() if now is None else now
     plan.path.parent.mkdir(parents=True, exist_ok=True)
-    if plan.path.exists():
+    try:
+        like = plan.path.stat()
+    except FileNotFoundError:
+        like = None
+    if like is not None:
         plan.backup = _backup_path(plan.path, now)
-        shutil.copy2(plan.path, plan.backup)
-    temp = plan.path.with_name(plan.path.name + ".anx-tmp")
+        safe_backup(plan.path, plan.backup)
+    import secrets
+    temp = plan.path.with_name(f"{plan.path.name}.anx-tmp-{secrets.token_hex(6)}")
     # A BOM the file had stays in front (the notify block goes after it, not before).
-    temp.write_text(plan.text, encoding="utf-8-sig" if plan.bom else "utf-8", newline="")
-    os.replace(temp, plan.path)
+    data = plan.text.encode("utf-8-sig" if plan.bom else "utf-8")
+    _private_write(temp, data, like)
+    try:
+        if expect_mtime is not False:
+            try:
+                now_mtime = plan.path.stat().st_mtime
+            except FileNotFoundError:
+                now_mtime = None
+            if now_mtime != expect_mtime:
+                raise InterruptedError("changed while editing")
+        os.replace(temp, plan.path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            temp.unlink()
+        if plan.backup is not None and expect_mtime is not False:
+            with contextlib.suppress(OSError):
+                plan.backup.unlink()
+            plan.backup = None
+        raise
+    if keep_backups is not None:
+        prune_backups(plan.path, keep_backups)
 
 
 def run(kind: str, *, dry_run: bool = False, remove: bool = False, hooks: bool = False,

@@ -14,7 +14,9 @@ RESERVED_TOOLS = {"set_workspace", "workspace_list", "device_list", "use_device"
                   "mcplist", "mcpdetail", "toolsearch", "tooluse",
                   # The mailbox (M6, design §5.5, §8.5) and ask_user (decision D11).
                   "mail_send", "mail_inbox", "mail_read", "mail_wait", "mail_who", "mail_bye",
-                  "mail_status", "mail_recall", "ask_user"}
+                  "mail_status", "mail_recall", "ask_user",
+                  # Device-to-device file copy (docs/design.md §18).
+                  "file_copy", "file_copy_status", "file_copy_cancel", "file_copy_list"}
 MAX_MESSAGE_BYTES = 32 * 1024 * 1024
 #: The device plugin was called ``workspace`` before agent-nexus. Either name
 #: reaches it, whichever one a connected (old or new) agent reports.

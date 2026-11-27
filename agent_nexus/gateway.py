@@ -121,6 +121,7 @@ INSTRUCTIONS = (
     "Every tool result ends with a notice when you have unread mail. ask_user asks the owner a question. "
     "Third-party MCP connectors added by the owner run on the gateway as hub/<name> (mcplist, toolsearch, "
     "tooluse) and work even when no device is online. "
+    "file_copy copies files or folders between devices as a background job (poll file_copy_status). "
     "Tool execution is never retried automatically."
 )
 
@@ -139,6 +140,14 @@ def _client_id() -> str | None:
         if token is not None and isinstance(getattr(token, "client_id", None), str):
             return token.client_id[:200]
     return None
+
+
+def caller_device() -> str | None:
+    """The device id when the MCP caller is a joined device on ``/mcp/device`` (``client_id`` ``device:<id>``),
+    else None (the owner). Attribution only: a locked device never gets this far -- ``DeviceMcpAuth`` refuses
+    every request of a locked device with 423 before any routing, so no per-target lock check is needed here."""
+    client_id = _client_id()
+    return client_id[7:] if client_id and client_id.startswith("device:") else None
 
 
 def _session_meta(session_name, kind, resume_id, companion_route, wake) -> dict:
@@ -224,6 +233,9 @@ class Gateway:
         self.enrollment = None
         #: P2PGateway (p2p/1), set by build_cloud_app.
         self.p2p = None
+        # file_copy (docs/design.md §18): who moves the bytes, and the jobs the gateway pumps itself.
+        from .file_copy_gateway import FileCopyService
+        self.file_copy = FileCopyService(hub, self.devices)
 
     async def selection(self, workspace_id: str | None = None) -> dict | None:
         if workspace_id:
@@ -576,6 +588,9 @@ class Gateway:
             raise RoutingError("workspace context limit reached")
         handle = uuid4().hex
         client_id = _client_id()
+        via = caller_device()
+        if via:  # selected through a device's 本机 MCP: who asked, for the gateway's own records
+            meta = {**(meta or {}), "via": f"device:{via}"}
         self.store.put_handle(handle, agent_id, workspace, client_id=client_id, meta=meta or None)
         # Identity (design §8.2): every handle gets a mailbox address.
         kind_hint = client_name = None
@@ -986,6 +1001,9 @@ class Gateway:
         async def tooluse(mcp_id: str, tool: str, arguments: dict[str, Any], workspace_id: str | None = None) -> ToolResult:
             """Execute an internal MCP tool with the arguments given by mcpdetail/toolsearch."""
             return await self.call(mcp_id, tool, arguments, workspace_id)
+
+        from . import file_copy_tools
+        file_copy_tools.register(server, self)
 
         if self.mailbox_config["enabled"]:
             from . import mail_tools

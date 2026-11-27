@@ -447,3 +447,167 @@ async def test_remote_callers_cannot_use_full_unless_allowed(hub, box):
     info = await remote["agent_info"]({})
     assert info["policy"]["full"] is False
     assert hub_mod.remote_handlers(hub.handlers(), allow_full=True).keys() == set(OPS)
+
+
+# ---------------------------------------------------------------------------------------------- 本机 MCP
+
+class FakeLocal:
+    url = "http://127.0.0.1:8399/mcp"
+
+    def __init__(self, state="ready", auto=True):
+        self._state = state
+        self.settings = {"enabled": True, "auto_config": auto, "peers": "any"}
+
+    def state(self):
+        return self._state
+
+    def status(self):
+        return {"state": self._state, "reason": "网关未连接，稍后再试" if self._state != "ready" else "已就绪"}
+
+
+def linked_hub(box, local=None):
+    from agent_nexus.agents import mcp_link
+    local = local or FakeLocal()
+    link = mcp_link.MCPLink(box["root"], local_mcp=local, accounts=lambda: [None],
+                            definitions=registry.definitions, gateway_host=lambda: "gw.example")
+    hub = AgentHub(box["root"], gateway=FakeGateway(), workspaces=list, mcp_link=link,
+                   device=lambda: {"id": "pc-1", "name": "笔记本", "gateway": "https://gw.example"})
+    return hub, link
+
+
+async def open_and_argv(handlers, log, params):
+    opened = await handlers["agent_run_open"](params)
+    assert "error" not in opened, opened
+    events = await read_until(handlers, opened["rid"], turns_ended(1))
+    argv = json.loads(log.read_text().splitlines()[-1])["argv"]
+    await handlers["agent_run_close"]({"rid": opened["rid"]})
+    return opened, events, argv
+
+
+def codex_prompt(argv):
+    return json.loads(next(a for a in argv if a.startswith("developer_instructions=")).split("=", 1)[1])
+
+
+async def test_runs_use_the_dedicated_entry_with_the_ready_workspace_and_no_warning(box):
+    hub, link = linked_hub(box)
+    link.probe.put("user", "codex", {"state": "absent", "connectors": [], "source": "probe"})
+    link.account_name = lambda account: "user"
+    await link.reconcile("test")
+    assert "agent-nexus" in (box["home"] / ".codex" / "config.toml").read_text()
+    handlers = hub.handlers()
+    log = box["tmp"] / "argv-nx.jsonl"
+    os.environ["FAKE_ARGV_LOG"] = str(log)
+    try:
+        for mode, context in (("gateway", {"mode": "gateway", "device": "pc-2", "workdir": "/srv/app"}), ("direct", {})):
+            opened, events, argv = await open_and_argv(handlers, log, {
+                "kind": "codex", "workdir": str(box["home"] / "proj"), "prompt": "hi", "context": context})
+            assert not any(e["type"] == "error" and "MCP" in e.get("text", "") for e in events)
+            assert 'mcp_servers.agent-nexus.default_tools_approval_mode="approve"' in argv
+            # permission "ask": only the read tools + mail_send / ask_user exist in the run; never exec_command
+            enabled = next(a for a in argv if a.startswith("mcp_servers.agent-nexus.enabled_tools="))
+            tools = json.loads(enabled.split("=", 1)[1])
+            assert "file_read" in tools and "mail_send" in tools and "ask_user" in tools
+            assert not {"exec_command", "write_stdin", "file_write", "keyboard", "tooluse", "use_device"} & set(tools)
+            assert not any(a.startswith("mcp_servers.agent-nexus.url") for a in argv)  # the entry is in config
+            text = codex_prompt(argv)
+            folder = "/srv/app" if mode == "gateway" else str(box["home"] / "proj")
+            assert f'workspace_id="{opened["handle"]}"' in text and "连接器 agent-nexus" in text
+            assert folder in text and "不需要先调用 device_list / use_device" in text and "@笔记本" in text
+        info = await handlers["agent_info"]({})
+        codex = next(a for a in info["agents"] if a["kind"] == "codex")
+        assert codex["nexus_mcp"]["state"] == "local" and codex["gateway_mcp"] is True
+    finally:
+        os.environ.pop("FAKE_ARGV_LOG", None)
+        hub.close()
+
+
+async def test_without_an_entry_the_run_attaches_the_local_mcp_by_flags(box):
+    hub, link = linked_hub(box, FakeLocal(auto=False))
+    link.probe.put(link.account_name(None), "codex", {"state": "absent", "connectors": [], "source": "probe"})
+    handlers = hub.handlers()
+    log = box["tmp"] / "argv-flags.jsonl"
+    os.environ["FAKE_ARGV_LOG"] = str(log)
+    try:
+        _opened, _events, argv = await open_and_argv(handlers, log, {
+            "kind": "codex", "workdir": str(box["home"] / "proj"), "prompt": "hi",
+            "context": {"mode": "gateway", "device": "pc-2", "workdir": "/srv/app"}})
+        assert 'mcp_servers.agent-nexus.url="http://127.0.0.1:8399/mcp"' in argv
+        assert argv.index('mcp_servers.agent-nexus.url="http://127.0.0.1:8399/mcp"') < argv.index("--json")
+        assert not (box["home"] / ".codex" / "config.toml").exists()  # the user's files are untouched
+    finally:
+        os.environ.pop("FAKE_ARGV_LOG", None)
+        hub.close()
+
+
+async def test_an_unknown_account_answer_gives_the_generic_context(box):
+    hub, link = linked_hub(box)
+    handlers = hub.handlers()
+    log = box["tmp"] / "argv-unknown.jsonl"
+    os.environ["FAKE_ARGV_LOG"] = str(log)
+    try:
+        opened, events, argv = await open_and_argv(handlers, log, {
+            "kind": "codex", "workdir": str(box["home"] / "proj"), "prompt": "hi",
+            "context": {"mode": "gateway", "device": "pc-2", "workdir": "/srv/app"}})
+        text = codex_prompt(argv)
+        assert "只用其中一个连接器" in text and f'workspace_id="{opened["handle"]}"' in text
+        assert not any(e["type"] == "error" and "MCP" in e.get("text", "") for e in events)
+        assert not any("default_tools_approval_mode" in a or "mcp_servers.agent-nexus.url" in a for a in argv)
+    finally:
+        os.environ.pop("FAKE_ARGV_LOG", None)
+        hub.close()
+
+
+async def test_a_local_mcp_that_cannot_work_warns_in_gateway_mode(box):
+    hub, link = linked_hub(box, FakeLocal(state="gateway_old"))
+    link.probe.put(link.account_name(None), "codex", {"state": "absent", "connectors": [], "source": "probe"})
+    handlers = hub.handlers()
+    log = box["tmp"] / "argv-old.jsonl"
+    os.environ["FAKE_ARGV_LOG"] = str(log)
+    try:
+        _opened, events, _argv = await open_and_argv(handlers, log, {
+            "kind": "codex", "workdir": str(box["home"] / "proj"), "prompt": "hi",
+            "context": {"mode": "gateway", "device": "pc-2", "workdir": "/srv/app"}})
+        assert any(e["type"] == "error" and "无法接入 Agent Nexus MCP" in e.get("text", "") for e in events)
+    finally:
+        os.environ.pop("FAKE_ARGV_LOG", None)
+        hub.close()
+
+
+@pytest.mark.parametrize("permission,expect", [
+    ("edits", "mcp__agent-nexus__mail_send"),
+    ("readonly", "mcp__agent-nexus__device_list"),
+    ("ask", "mcp__agent-nexus__ask_user"),
+    ("full", None),
+])
+async def test_claude_gets_the_connector_allowed_and_the_flags_file_in_every_mode(box, permission, expect):
+    hub, link = linked_hub(box, FakeLocal(auto=False))
+    link.probe.put(link.account_name(None), "claude", {"state": "absent", "connectors": [], "source": "probe"})
+    handlers = hub.handlers()
+    log = box["tmp"] / f"argv-claude-{permission}.jsonl"
+    os.environ["FAKE_ARGV_LOG"] = str(log)
+    try:
+        opened = await handlers["agent_run_open"]({"kind": "claude", "workdir": str(box["home"] / "proj"),
+                                                   "prompt": "hi", "permission": permission})
+        assert "error" not in opened, opened
+        await read_until(handlers, opened["rid"], turns_ended(1))
+        argv = json.loads(log.read_text().splitlines()[-1])
+        config = json.loads(open(argv[argv.index("--mcp-config") + 1], encoding="utf-8").read())["mcpServers"]
+        assert config["agent-nexus"] == {"type": "http", "url": "http://127.0.0.1:8399/mcp"}
+        assert ("anx" in config) == (permission == "ask")
+        if expect is None:
+            assert "--allowedTools" not in argv
+        else:
+            allowed = argv[argv.index("--allowedTools") + 1].split(",")
+            assert expect in allowed
+            # never the whole server, never a tool that runs outside the CLI's own sandbox
+            assert "mcp__agent-nexus" not in allowed
+            assert not {"mcp__agent-nexus__exec_command", "mcp__agent-nexus__write_stdin",
+                        "mcp__agent-nexus__tooluse", "mcp__agent-nexus__use_device"} & set(allowed)
+            if permission == "edits":  # direct mode: the CLI's own tools edit this computer's files
+                assert "mcp__agent-nexus__file_write" not in allowed
+            if permission == "readonly":
+                assert "mcp__agent-nexus__mail_send" not in allowed
+        await handlers["agent_run_close"]({"rid": opened["rid"]})
+    finally:
+        os.environ.pop("FAKE_ARGV_LOG", None)
+        hub.close()

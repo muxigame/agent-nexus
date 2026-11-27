@@ -132,6 +132,9 @@ class HubLink:
         self.features: frozenset[str] = frozenset()
         self.display_name: str | None = None
         self.gateway_version: str | None = None
+        #: the gateway's MCP path and whether its owner lets devices use ``<path>/device`` (本机 MCP)
+        self.mcp_path: str = "/mcp"
+        self.device_mcp: bool | None = None
         self._send = None
         self._pending: dict[str, asyncio.Future] = {}
         #: Reverse RPCs the hosting process answers beyond the link's own (method -> async handler),
@@ -159,6 +162,10 @@ class HubLink:
     def attach(self, send, anx: Any) -> None:
         self.features = anx_features.parse_features(anx)
         self.gateway_version = anx_features.peer_version(anx)
+        path = anx.get("mcp_path") if isinstance(anx, dict) else None
+        self.mcp_path = path if isinstance(path, str) and path.startswith("/") and len(path) <= 200 else "/mcp"
+        device_mcp = anx.get("device_mcp") if isinstance(anx, dict) else None
+        self.device_mcp = device_mcp if isinstance(device_mcp, bool) else None
         name = anx.get("display_name") if isinstance(anx, dict) else None
         self.display_name = name if isinstance(name, str) and len(name) <= 255 else None
         self._send = send
@@ -863,7 +870,9 @@ async def _run_connections(agent_id: str, url: str, token: str, cloud: dict, gat
                 status.pop("error", None)
                 status.update(state="connected", since=time.time(), mcps=len(catalog["mcps"]), workspaces=len(catalog["workspaces"]),
                               gateway_features=sorted(hub.features), gateway_version=hub.gateway_version,
-                              display_name=hub.display_name)
+                              display_name=hub.display_name,
+                              gateway_mcp_path=getattr(hub, "mcp_path", "/mcp"),
+                              gateway_device_mcp=getattr(hub, "device_mcp", None))
                 log.info("connected to %s as %s (%d local MCPs)", url, agent_id, len(catalog["mcps"]))
                 if ready:
                     ready.set()

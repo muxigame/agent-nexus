@@ -61,6 +61,13 @@
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL
+  ; A real uninstall: the running core first removes the agent-nexus entries it wrote into the CLIs' own MCP
+  ; config (as each CLI's user), so no CLI is left pointing at a dead http://127.0.0.1:<port>/mcp.
+  ${If} $UpdateMode <> 1
+    IfFileExists "$INSTDIR\agent-nexus.exe" 0 +3
+      DetailPrint "Removing the Agent Nexus MCP entries from the CLIs' config..."
+      ExecWait '"$INSTDIR\agent-nexus.exe" --unlink-mcp'
+  ${EndIf}
   ${If} $MultiUser.InstallMode == "AllUsers"
     ${If} $UpdateMode <> 1
       DetailPrint "Removing the Agent Nexus service..."

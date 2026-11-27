@@ -47,7 +47,7 @@ def test_variables_defaults_and_placeholders():
 def test_builtins_and_default_render(store):
     doc = store.load()
     ids = [f["id"] for f in doc["fragments"]]
-    assert ids == ["identity", "workdir", "communicate", "team", "gateway", "project"]
+    assert ids == ["identity", "workdir", "communicate", "team", "nexus_mcp", "gateway", "project"]
     assert all(f["builtin"] and not f["modified"] for f in doc["fragments"])
     assert {p["id"] for p in doc["presets"]} == {"default", "minimal"}
     out = store.render("default", CTX)

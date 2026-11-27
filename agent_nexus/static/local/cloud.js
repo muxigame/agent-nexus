@@ -32,7 +32,8 @@ function nextCard(info) {
   return el("section", { class: "card" }, el("div", { class: "card-head" }, el("h2", {}, "接下来")),
     el("div", { class: "card-body" }, el("div", { class: "steps" },
       step(el("a", { href: "#/plugins" }, "启用本机插件"), "插件页里打开开关；需要配置的会提示你填写。"),
-      step("在 AI 客户端添加网关", el("span", {}, "ChatGPT、Claude 只需添加一次网关的 MCP 地址，",
+      step("在 AI 客户端添加网关", el("span", {}, "本机的 CLI 已自动接入",
+        el("a", { href: "#/settings" }, "本机 MCP"), "；其他电脑上的 AI 客户端（以及网页版 ChatGPT、Claude）再按网关设置添加，",
         info.hub ? el("a", { href: `${info.hub}/#/settings`, target: "_blank", rel: "noopener" }, "在云端设置页查看") : "见云端设置页", "。")),
       step(el("a", { href: "#/inbox" }, "查看收件箱"), "Agent 发给你的邮件和提问会出现在这里。"))));
 }

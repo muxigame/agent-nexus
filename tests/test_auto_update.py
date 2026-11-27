@@ -75,3 +75,30 @@ def test_windows_round_uses_the_desktop_shell(tmp_path, monkeypatch):
 
 async def _no_sleep(_seconds):
     return None
+
+
+def test_a_running_copy_job_postpones_the_install(tmp_path, monkeypatch):
+    """Installing restarts the manager: not while a file_copy job runs here (at most six hours)."""
+    import asyncio
+    rounds, sleeps = [], []
+    monkeypatch.setattr(auto_update, "mode", lambda root: "auto")
+
+    async def run_once(root):
+        rounds.append(root)
+        return {"result": "current"}
+    monkeypatch.setattr(auto_update, "run_once", run_once)
+    busy = {"value": True}
+
+    async def sleep(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) == 3:
+            busy["value"] = False
+        if len(sleeps) > 4:
+            raise asyncio.CancelledError
+    monkeypatch.setattr(auto_update.asyncio, "sleep", sleep)
+    try:
+        asyncio.run(auto_update.loop(tmp_path, busy=lambda: busy["value"]))
+    except asyncio.CancelledError:
+        pass
+    # first check + two busy rounds: no install; then idle rounds install
+    assert len(rounds) == 2

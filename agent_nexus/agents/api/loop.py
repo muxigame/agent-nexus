@@ -26,6 +26,7 @@ Tool-call ids are made unique in the session (a provider that numbers its calls 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 import uuid
@@ -48,6 +49,7 @@ TOOL_OUTPUT_MAX = 8000  # in the chat event; the model gets up to tools.OUTPUT_M
 ASK_WAIT_S = 600.0  # ask_user waits this long for the owner's answer, like an approval card
 ASK_POLL_S = 3.0
 STOPPED = "（用户停止了这一轮，没有执行）"
+MCP_RETRY_S = 30.0  # a run whose 本机 MCP listing failed or was degraded lists again after this
 
 
 class ApiAdapter(Adapter):
@@ -72,6 +74,15 @@ class ApiAdapter(Adapter):
         #: the run's gateway handle (its mailbox address) and ``hub_call``: ask_user / mail_send
         self.handle: str = str(spec.get("handle") or "")
         self._gateway: Callable[[str, dict], Any] | None = spec.get("gateway") if self.handle else None
+        #: the 本机 MCP (docs/design.md "本机 MCP"): the gateway's tools, this run's workspace handle filled in
+        self.mcp_url: str = str(spec.get("mcp_url") or "") if self.handle else ""
+        self.mode: str = str(spec.get("mode") or "direct")
+        self._mcp_client_factory: Callable[[str], Any] | None = spec.get("mcp_client")
+        self._mcp_specs: list[dict] | None = None  # offered specs (None: not loaded yet, or not usable yet)
+        self._mcp_retry_at = 0.0  # a failed or degraded listing is tried again from this time on
+        self._mcp_warned = False
+        self._mcp_open: Any = None  # one MCP client session for the whole run (opened on first use)
+        self._mcp_tools: dict[str, dict] = {}  # offered name -> {name, read_only, workspace}
         self.ask_wait_s: float = float(spec.get("ask_wait_s") or ASK_WAIT_S)
         self.ask_poll_s: float = float(spec.get("ask_poll_s") or ASK_POLL_S)
         self._uid = uuid.uuid4().hex[:6]  # event ids of this run never collide with a resumed session's
@@ -142,6 +153,9 @@ class ApiAdapter(Adapter):
         if task is not None and not task.done():
             task.cancel()
         self.turn_active = False
+        if self._mcp_open is not None:
+            with contextlib.suppress(RuntimeError):  # no running loop: the process is going away anyway
+                asyncio.get_running_loop().create_task(self._mcp_drop())
 
     def exited(self, code: int | None, stderr_tail: str) -> list[dict]:
         return []
@@ -152,7 +166,113 @@ class ApiAdapter(Adapter):
     def _offered(self) -> list[dict]:
         if self.model.get("tools") is False:
             return []
+        mcp = self._mcp_specs or []
+        if mcp:
+            if self.mode == "gateway":  # the target is another device: only the gateway's tools act on it
+                return list(mcp)
+            return tools.specs(self.opts.permission, gateway=False) + list(mcp)
         return tools.specs(self.opts.permission, gateway=self._gateway is not None)
+
+    def _mcp_client(self):
+        if self._mcp_client_factory is not None:
+            return self._mcp_client_factory(self.mcp_url)
+        from fastmcp import Client
+        from fastmcp.client.transports import StreamableHttpTransport
+        return Client(StreamableHttpTransport(self.mcp_url), timeout=900)
+
+    async def _mcp_session(self) -> Any:
+        """The run's MCP client session, opened once (initialize + initialized), reopened when it dropped."""
+        client = self._mcp_open
+        if client is not None:
+            connected = getattr(client, "is_connected", None)
+            if callable(connected) and not connected():
+                await self._mcp_drop()
+                client = None
+        if client is None:
+            client = self._mcp_client()
+            await client.__aenter__()
+            self._mcp_open = client
+        return client
+
+    async def _mcp_drop(self) -> None:
+        client, self._mcp_open = self._mcp_open, None
+        if client is not None:
+            with contextlib.suppress(Exception):
+                await client.__aexit__(None, None, None)
+
+    async def _load_mcp(self) -> None:
+        """List the 本机 MCP's tools: ``workspace_id`` is hidden (the run's handle is filled in), the legacy names
+        are dropped, a name that clashes with a local tool gets ``nx_`` in front. A listing that failed, or that
+        offers only ``nexus_status`` (the 本机 MCP is not ready: the gateway reconnecting, locked...), is not kept:
+        the run goes on with its own tools and tries again after :data:`MCP_RETRY_S`."""
+        if self._mcp_specs is not None or not self.mcp_url or self.model.get("tools") is False:
+            return
+        if time.monotonic() < self._mcp_retry_at:
+            return
+        listed = None
+        error: Exception | None = None
+        for _attempt in range(2):  # listing is idempotent: one reconnect
+            try:
+                client = await self._mcp_session()
+                listed = await client.list_tools()
+                break
+            except Exception as exc:  # noqa: BLE001 - the chat goes on with its own tools
+                error = exc
+                await self._mcp_drop()
+        if listed is None or not [t for t in listed if getattr(t, "name", "") not in ("", "nexus_status")]:
+            self._mcp_retry_at = time.monotonic() + MCP_RETRY_S
+            if not self._mcp_warned:
+                self._mcp_warned = True
+                why = f"没能连接 Agent Nexus 本机 MCP（{error}）" if listed is None else "Agent Nexus 本机 MCP 暂时不可用"
+                log.info("agents: the 本机 MCP is unavailable for an API run (%s)", error or "degraded")
+                self._emit([{"type": "error", "level": "warn", "text": f"{why}，先只用本地工具，稍后自动重试"}])
+            return
+        specs: list[dict] = []
+        local = {spec["name"] for spec in tools.SPECS}
+        for tool in listed:
+            name = getattr(tool, "name", "")
+            if not name or name in ("workspace_list", "set_workspace", "nexus_status"):
+                continue
+            schema = dict(getattr(tool, "input_schema", None) or getattr(tool, "inputSchema", None)
+                          or {"type": "object", "properties": {}})
+            props = dict(schema.get("properties") or {})
+            workspace = "workspace_id" in props
+            props.pop("workspace_id", None)
+            schema["properties"] = props
+            if isinstance(schema.get("required"), list):
+                schema["required"] = [r for r in schema["required"] if r != "workspace_id"]
+            annotations = getattr(tool, "annotations", None)
+            read_only = bool(getattr(annotations, "read_only_hint", None) if hasattr(annotations, "read_only_hint")
+                             else getattr(annotations, "readOnlyHint", False)) if annotations is not None else False
+            if self.opts.permission == "readonly" and not read_only and name != "ask_user":
+                continue
+            offered = f"nx_{name}" if name in local else name
+            self._mcp_tools[offered] = {"name": name, "read_only": read_only, "workspace": workspace}
+            specs.append({"name": offered, "description": str(getattr(tool, "description", "") or "")[:2000],
+                          "parameters": schema})
+        self._mcp_specs = specs
+
+    async def _mcp_call(self, entry: dict, args: dict) -> tools.Outcome:
+        arguments = dict(args)
+        if entry["workspace"]:
+            arguments["workspace_id"] = self.handle
+        try:
+            client = await self._mcp_session()
+        except Exception as exc:  # noqa: BLE001 - could not even connect: nothing was called
+            await self._mcp_drop()
+            return tools.Outcome(f"调用 {entry['name']} 失败：{exc}", error=True)
+        try:
+            result = await client.call_tool_mcp(entry["name"], arguments)
+        except Exception as exc:  # noqa: BLE001 - never retried (the call may have run); the next one reconnects
+            await self._mcp_drop()
+            return tools.Outcome(f"调用 {entry['name']} 失败：{exc}", error=True)
+        content = getattr(result, "content", None) or []
+        parts = []
+        for block in content:
+            text = getattr(block, "text", None)
+            parts.append(text if isinstance(text, str) else f"[{getattr(block, 'type', 'content')}]")
+        return tools.Outcome("\n".join(parts) or "（无输出）", error=bool(getattr(result, "is_error", None) if hasattr(result, "is_error")
+                                                                     else getattr(result, "isError", False)))
 
     async def _request(self, http: Any, history: list[dict], ids: dict, partial: dict) -> TurnResult:
         """One streamed request, retried once on 429 after ``retry-after``."""
@@ -180,6 +300,7 @@ class ApiAdapter(Adapter):
     async def _turn(self, prompt: str, turn_no: int, previous: asyncio.Task | None = None) -> None:
         if previous is not None and not previous.done():
             await asyncio.wait([previous], timeout=10)
+        await self._load_mcp()
         history = self._load()
         history[:] = repair(history)  # a tool call left without its result never reaches the provider
         user_msg = {"role": "user", "text": prompt}
@@ -295,7 +416,14 @@ class ApiAdapter(Adapter):
                    "status": "running"}
         self._emit([running])
         permission = self.opts.permission
-        if not tools.allowed(name, permission) or (self.model.get("tools") is False):
+        entry = self._mcp_tools.get(name)
+        if entry is not None:
+            denied = None
+            if not entry["read_only"] and entry["name"] != "ask_user" and permission != "full" and \
+                    (permission == "ask" or entry["name"] not in ("mail_send",)):
+                denied = await self._approve(name, args, call_id)
+            outcome = tools.Outcome(denied, error=True) if denied is not None else await self._mcp_call(entry, args)
+        elif not tools.allowed(name, permission) or (self.model.get("tools") is False):
             outcome = tools.Outcome(f"当前权限模式下不能使用 {name}", error=True)
         else:
             denied = None

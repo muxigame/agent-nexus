@@ -410,9 +410,22 @@ class Console:
         except EnrollError as exc:
             return self._json(exc.body(), exc.status)
 
+    def mcp_devices(self) -> bool:
+        """设置 → 在 AI 客户端中添加 Agent Nexus: joined devices may use the device MCP (their 本机 MCP), default on."""
+        try:
+            return self.store.setting("mcp_devices")[0] is not False
+        except Exception:  # noqa: BLE001
+            return True
+
     async def settings(self, request: Request) -> Response:
         if await self.owner(request) is None:
             return self.unauthorized()
+        if request.method == "PUT":
+            body = await self._body(request)
+            if body is None or not isinstance(body.get("mcp_devices"), bool):
+                return self._json({"error": "mcp_devices must be true or false"}, 400)
+            self.store.set_setting("mcp_devices", body["mcp_devices"])
+            return self._json({"mcp_devices": self.mcp_devices()})
         mailbox = self.facade.mailbox_config
         return self._json({
             "gateway": self._gateway_info(request),
@@ -421,6 +434,7 @@ class Console:
                         "escalation": mailbox.get("escalation")},
             "invites": {"default_ttl_s": self.enrollment.default_ttl_s, "max_ttl_s": self.enrollment.max_ttl_s},
             "clients": self._clients(),
+            "mcp_devices": self.mcp_devices(),
             "downloads": {"dir": str(self.downloads.dir), "release_url": self.downloads.release_url}})
 
     # -- public ------------------------------------------------------------------------
@@ -480,7 +494,7 @@ class Console:
             Route("/api/devices/{device_id}/revoke", self.revoke, methods=["POST"]),
             Route("/api/invites", self.invites, methods=["GET", "POST"]),
             Route("/api/invites/{invite_id}", self.invites, methods=["DELETE"]),
-            Route("/api/settings", self.settings, methods=["GET"]),
+            Route("/api/settings", self.settings, methods=["GET", "PUT"]),
             Route("/api/downloads", self.downloads_api, methods=["GET"]),
             Route("/downloads", self.downloads_page, methods=["GET", "HEAD"]),
             Route("/downloads/latest/{asset}", self.download_latest, methods=["GET", "HEAD"]),

@@ -21,7 +21,7 @@ Agent Nexus：MCP 插件管理器与云端网关（gateway）：本机服务管�
    - MCP 地址是 `https://hub.example.test/mcp`。
    - ChatGPT：设置 → 连接器（Connectors）→ 创建，填入上面的地址，认证选 OAuth，按提示登录授权。
    - Claude（claude.ai 或桌面版）：设置 → 连接器 → 添加自定义连接器，填入同一地址，按提示完成 OAuth 登录。
-   - 连接后先调用 `device_list`（旧名 `workspace_list`）查看在线设备，再用 `use_device`（旧名 `set_workspace`）选择设备，之后的工具调用都会在该设备上执行。
+   - 连接后先调用 `device_list`（旧名 `workspace_list`）查看在线设备，再用 `use_device`（旧名 `set_workspace`）选择设备，之后的工具调用都会在该设备上执行。设备之间复制文件或整个文件夹用 `file_copy`（后台任务），再用 `file_copy_status` / `file_copy_cancel` / `file_copy_list` 查看、取消、列出。
 5. **更新**：默认自动更新（设置页可改为只提示或关闭）。Windows 和 macOS 用同一个带 minisign 签名的更新通道；Ubuntu 用 apt 安装新的 deb；Android 自动下载新的 APK 后用通知和弹窗请你确认安装（系统要求用户确认，首次还要允许 Agent Nexus “安装未知应用”）；使用流量计费网络（移动数据）时不自动下载，连上 Wi-Fi 后再下，设置页的“立即更新”照常下载。
 
 ### 运维：部署网关
@@ -357,6 +357,8 @@ make desktop                  # 先生成内嵌运行包，再构建 artifacts/a
   - **终端**：在窗口里打开对方的 shell（xterm.js，Windows Terminal 风格）；“⋯ → 在本机终端打开”用这台电脑的终端（装了 Windows Terminal 就用它）。Windows 上有 PowerShell 7 / Windows PowerShell / 命令提示符 / Git Bash / WSL；Linux / macOS 上有 bash、zsh、fish 等。终端页下方列出对方的命令行环境（Claude Code、Codex、git、node、python、uv、docker……及版本）。
 - **打洞直连（muxi-p2p）**：终端和远程桌面优先走设备之间的直连——IPv6 / 局域网 / 路由器端口映射，其次 UDP+QUIC 和 TCP 打洞，数据不经过网关；页面上的标签写着实际走的路线。终端在直连失败时自动退回网关中转（标签会写原因）；远程桌面只走直连。
 - **没有桌面的机器**：`agent-nexus term [设备]`（Windows 上 `anx term`），`Ctrl+]` 再按 `q` 退出；`--shells` 列出对方的 shell 和命令行工具。
+- **文件复制（AI 可用）**：`file_copy(src_device, src_path, dst_device, dst_path, overwrite=false)` 把一个文件或整个文件夹（递归）从一台设备复制到另一台（或同一台的另一个位置），几 GB 的二进制数据也可以；立即返回 `job_id`，用 `file_copy_status(job_id, wait_ms=30000)` 看进度（文件数、字节数、速度、剩余时间、实际线路、错误），`file_copy_cancel` 取消，`file_copy_list` 列出最近的任务。任务由源设备（或目标设备）自己执行，数据优先走直连或中转设备（端到端加密），不经过网关；两端客户端都太旧时才由网关中转（慢，返回里会说明），`route="p2p"` 可禁止网关中转。每个文件写到临时名、核对 sha256 后才改名；重复执行同一个复制会跳过已有的相同文件、续传没传完的文件（任务 `interrupted`、因对方离线而 `failed` 或状态 `unknown` 时，用相同参数再调用一次即可；这也是单向同步的方式，目标端从不删除文件）；`overwrite=false` 时不同内容的已有文件只报错不覆盖，`overwrite=true` 覆盖时保留原文件的权限和属主，新文件沿用源文件的权限位；符号链接不跟进，复制途中被换成链接的文件或文件夹也不会被读写。设备 `agent-nexus.json` 写 `"files": {"jobs": false}` 不在本机运行复制任务，`"files": {"enabled": false}` 完全关闭文件传输。详见 docs/design.md §18。
+- **本机 MCP（不用填网关地址和令牌）**：装了客户端的电脑在本机控制台端口的 `/mcp`（默认 `http://127.0.0.1:8399/mcp`）提供一个本机 MCP，工具和网关 MCP 完全相同（device_list、use_device、各设备的工具、mail_*、ask_user、file_copy……），调用方记为这台设备；不需要任何凭据，只接受本机的连接，设备凭据始终留在客户端进程里。客户端会自动在已安装的 Claude Code（`~/.claude.json`）、Codex（`~/.codex/config.toml`）、Gemini CLI（`~/.gemini/settings.json`）里写入一个名为 `agent-nexus` 的配置项指向它（写入前备份，可在“设置 → 本机 MCP”移除；关掉开关会一并移除）。已经通过云端网关接入的 CLI——配置里已有网关地址，或者在 Claude.ai / ChatGPT 账户里加过 Agent Nexus 连接器——不会重复添加。Agent Nexus 发起的对话会自动带上这个连接器和已选好的工作区（`workspace_id`），模型不用先调 device_list / use_device。设备锁定或被吊销时它只提供一个 `nexus_status` 工具；网关主人可以在网关控制台“设置 → 在 AI 客户端中添加 Agent Nexus”关闭设备接入；网关需要 0.8.31 以上。命令行：`anx mcp status`、`anx mcp unlink --all`；卸载客户端时会自动移除这些配置项。详见 docs/design.md §19。
 - **锁定**：右上角的锁。锁定后这台电脑**不能操作其他设备，但其他设备仍然可以操作它**；锁定密码可选（设置 → 锁定密码）。网关同样拒绝已锁定设备发起的操作。
 
 每台设备的客户端带着 `tools/muxi-p2p-agent`（和 MsQuic），作为后台进程向网关的信令（`/p2p`）登记自己并响应打洞；对方每次连接都要先经网关向这台设备要一张一次性票据（60 秒，只能用一次）。网关在 UDP 45701–45703、TCP 45711–45712 上运行反射器（`gateway.json` 的 `p2p.reflector_hosts` 写网关自己的公网 IP，不要写 CDN 的域名），防火墙需要放行这些端口。Windows 第一次运行直连组件时可能弹出防火墙提示，允许即可（不允许也能打洞，只是少了局域网直连）。

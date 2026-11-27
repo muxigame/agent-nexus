@@ -18,6 +18,31 @@ Types: 0 data, 1 resize ``{"cols","rows"}``, 2 ready ``{...}``, 3 exit ``{"code"
 ``put`` ``{"dir", "name", "size"}`` -> ready ``{"id", ...}``; the caller sends data frames and then
 exit; the reply is exit ``{"code": 0, "path", "size"}`` (or error).
 
+``files/2`` adds two frame types, 5 begin ``{...}`` and 6 result ``{...}``, which only a caller that
+saw ``files/2`` on this device sends (an older hub never meets them), and these ops:
+
+``walk`` / ``stat`` / ``mkdirs`` / ``hash``: the hello carries only ``op``; the caller sends one begin
+frame with the parameters (``FileShare.walk`` / ``stat_many`` / ``mkdirs`` / ``hash``: they may be
+longer than a hello line) and gets ready ``{result}`` or error.
+
+``putx``: many files on one stream (one ticket). Ready ``{"putx": 1}``, then per file the caller sends
+begin ``{"seq", "base", "rel", "size", "mtime_ns", "on_exists", "resume_key", "offset"}``, data frames
+and exit ``{"seq", "sha256"}``; this side answers each file with exactly one result ``{"seq", "path",
+"size", "sha256"}`` or ``{"seq", "error", "code"}`` (which may come early: the caller then stops
+sending that file's data and still sends its exit). When the part on disk holds a different number
+of bytes than ``offset`` the result is ``{"code": "offset", "have"}``. While a resumed file is
+re-hashed, ready ``{"seq", "hashing": bytes}`` comes every few seconds (a keepalive). The caller
+may send ready ``{"keepalive": true}`` between files (while it hashes a resumed prefix before the
+next begin); it only resets the idle timer. The caller ends the stream with exit ``{"end": true}``;
+a part left by a broken stream stays for a resume. ``mode`` in a begin is the source's permission
+bits (optional).
+
+``getx``: many files read on one stream. Ready ``{"getx": 1}``; per file the caller sends begin
+``{"seq", "base", "rel" | "path", "offset"}`` and gets ready ``{"seq", "name", "size", "mtime_ns"}``
+(then keepalive readies ``{"seq", "hashing"}`` while a prefix is hashed), data frames from
+``offset``, and exit ``{"seq", "sha256" (of the whole file), "size", "mtime_ns"}``; or result
+``{"seq", "error"}``. Exit ``{"end": true}`` ends the stream.
+
 Through a relay (docs/relay-mesh.md) the caller first opens the relay's ``relay`` service::
 
     ANX-REMOTE/1 {"service": "relay", "ticket": "<relay's ticket>", "target": "<device>", "via": "<relay>"?}
@@ -57,6 +82,12 @@ TICKET_TTL_S = 60.0
 MAX_LINE = 4096
 MAX_FRAME = 1024 * 1024
 DATA, RESIZE, READY, EXIT, ERROR = 0, 1, 2, 3, 4
+#: files/2 only (see above)
+BEGIN, RESULT = 5, 6
+#: how long a files/2 stream may sit idle between frames
+FILES_IDLE_S = 300.0
+#: keepalive interval while a resumed file is hashed
+HASH_KEEPALIVE_S = 5.0
 SERVICES = ("terminal", "desktop", "files", "relay")
 #: streams one relay forwards at the same time
 RELAY_MAX_STREAMS = 32
@@ -391,12 +422,188 @@ class RemoteHub:
                 finally:
                     if not done:
                         files.abort(upload)
+            elif op in ("walk", "stat", "mkdirs", "hash"):
+                kind, payload = await asyncio.wait_for(read_frame(reader), 60)
+                if kind != BEGIN:
+                    await fail("expected the parameters")
+                    return
+                params = json.loads(payload)
+                method = {"walk": files.walk, "stat": files.stat_many, "mkdirs": files.mkdirs, "hash": files.hash}[op]
+                writer.write(frame(READY, await asyncio.to_thread(method, params if isinstance(params, dict) else {})))
+                await writer.drain()
+            elif op == "putx":
+                await self._putx(files, reader, writer)
+            elif op == "getx":
+                await self._getx(files, reader, writer)
             else:
                 await fail(f"unknown files op {op!r}")
         except FileShareError as exc:
-            await fail(str(exc))
+            writer.write(frame(ERROR, exc.body()))
+            await writer.drain()
         except OSError as exc:
             await fail(f"{type(exc).__name__}: {exc}")
+
+    @staticmethod
+    async def _putx(files, reader, writer) -> None:
+        """Many uploads on one stream (files/2, see the module docstring)."""
+        from .file_share import FileShareError
+
+        async def result(body: dict) -> None:
+            writer.write(frame(RESULT, body))
+            await writer.drain()
+
+        writer.write(frame(READY, {"putx": 1}))
+        await writer.drain()
+        current: dict | None = None  # {"seq", "id"} while writing; {"seq"} while draining after an error
+        try:
+            while True:
+                kind, payload = await asyncio.wait_for(read_frame(reader), FILES_IDLE_S)
+                if kind == BEGIN:
+                    meta = json.loads(payload)
+                    seq = meta.get("seq")
+                    if current is not None and current.get("id"):
+                        files.abort({"id": current["id"]})
+                    current = {"seq": seq}
+                    offset = max(0, int(meta.get("offset") or 0))
+                    params = {key: meta.get(key) for key in ("base", "rel", "dir", "name", "size", "mtime_ns",
+                                                              "on_exists", "resume_key", "mode")}
+                    params["resume"] = offset > 0
+                    try:
+                        started = await asyncio.to_thread(files.begin, params)
+                    except FileShareError as exc:
+                        await result({"seq": seq, **exc.body()})
+                        continue
+                    except OSError as exc:
+                        await result({"seq": seq, "error": f"{type(exc).__name__}: {exc}"})
+                        continue
+                    if started.get("skipped"):
+                        await result({"seq": seq, **started})
+                    elif int(started.get("have") or 0) != offset:
+                        files.abort({"id": started["id"]})  # a keyed part stays
+                        await result({"seq": seq, "error": f"续传位置不一致：已有 {started.get('have')}，请求 {offset}",
+                                      "code": "offset", "have": int(started.get("have") or 0)})
+                    else:
+                        current["id"] = started["id"]
+                elif kind == DATA:
+                    if current is None:
+                        raise ValueError("data before begin")
+                    if current.get("id"):
+                        try:
+                            await asyncio.to_thread(files.write_bytes, {"id": current["id"]}, payload)
+                        except FileShareError as exc:
+                            current.pop("id", None)
+                            await result({"seq": current["seq"], **exc.body()})
+                elif kind == EXIT:
+                    info = json.loads(payload)
+                    if info.get("end"):
+                        writer.write(frame(EXIT, {"code": 0}))
+                        await writer.drain()
+                        return
+                    if current is None:
+                        continue
+                    if info.get("abort"):  # the caller gave up on this file (a cancelled job: discard)
+                        if current.get("id"):
+                            files.abort({"id": current["id"], "discard": bool(info.get("discard"))})
+                        current = None
+                        continue
+                    upload_id, seq = current.get("id"), current["seq"]
+                    current = None
+                    if not upload_id:
+                        continue  # its result was sent already
+                    try:
+                        while True:
+                            done = await asyncio.to_thread(files.finish, {"id": upload_id, "sha256": info.get("sha256"),
+                                                                          "wait_s": HASH_KEEPALIVE_S})
+                            if done.get("state") != "hashing":
+                                break
+                            writer.write(frame(READY, {"seq": seq, "hashing": done.get("hashed", 0)}))
+                            await writer.drain()
+                        await result({"seq": seq, **done})
+                    except FileShareError as exc:
+                        await result({"seq": seq, **exc.body()})
+        finally:
+            if current is not None and current.get("id"):
+                files.abort({"id": current["id"]})  # keeps a keyed part for the next job
+
+    @staticmethod
+    async def _getx(files, reader, writer) -> None:
+        """Many downloads on one stream (files/2, see the module docstring)."""
+        import hashlib
+        import os as _os
+
+        from .file_share import STREAM_CHUNK, FileShareError, open_read
+
+        writer.write(frame(READY, {"getx": 1}))
+        await writer.drain()
+        while True:
+            kind, payload = await asyncio.wait_for(read_frame(reader), FILES_IDLE_S)
+            if kind == EXIT and json.loads(payload).get("end"):
+                writer.write(frame(EXIT, {"code": 0}))
+                await writer.drain()
+                return
+            if kind != BEGIN:
+                continue
+            meta = json.loads(payload)
+            seq = meta.get("seq")
+            try:
+                path, size = await asyncio.to_thread(files.stat_file, meta)
+                info = await asyncio.to_thread(_os.stat, path)
+                offset = max(0, int(meta.get("offset") or 0))
+                if offset > size:
+                    raise FileShareError(f"续传位置超过文件大小：{offset} > {size}", "offset", have=size)
+                writer.write(frame(READY, {"seq": seq, "name": path.name, "size": size, "mtime_ns": info.st_mtime_ns,
+                                           "offset": offset}))
+                await writer.drain()
+                hasher = hashlib.sha256()
+                handle = await asyncio.to_thread(open_read, path, files.nofollow(meta))
+                try:
+                    if offset:
+                        progress = {"read": 0}
+
+                        def prefix() -> None:
+                            while progress["read"] < offset:
+                                block = handle.read(min(1024 * 1024, offset - progress["read"]))
+                                if not block:
+                                    break
+                                hasher.update(block)
+                                progress["read"] += len(block)
+
+                        task = asyncio.ensure_future(asyncio.to_thread(prefix))
+                        while True:
+                            done, _ = await asyncio.wait({task}, timeout=HASH_KEEPALIVE_S)
+                            if done:
+                                task.result()
+                                break
+                            writer.write(frame(READY, {"seq": seq, "hashing": progress["read"]}))
+                            await writer.drain()
+                    await asyncio.to_thread(handle.seek, offset)
+
+                    def chunk() -> bytes:
+                        data = handle.read(STREAM_CHUNK)
+                        hasher.update(data)
+                        return data
+
+                    sent = offset
+                    while True:
+                        data = await asyncio.to_thread(chunk)
+                        if not data:
+                            break
+                        sent += len(data)
+                        writer.write(frame(DATA, data))
+                        await writer.drain()
+                finally:
+                    handle.close()
+                after = await asyncio.to_thread(_os.stat, path)
+                writer.write(frame(EXIT, {"seq": seq, "sha256": hasher.hexdigest(), "size": sent,
+                                          "mtime_ns": after.st_mtime_ns}))
+                await writer.drain()
+            except FileShareError as exc:
+                writer.write(frame(RESULT, {"seq": seq, **exc.body()}))
+                await writer.drain()
+            except PermissionError as exc:
+                writer.write(frame(RESULT, {"seq": seq, "error": f"没有权限读取：{exc.filename or exc}",
+                                            "code": "permission"}))
+                await writer.drain()
 
     def handlers(self) -> dict:
         return {"remote_ticket": self.issue}

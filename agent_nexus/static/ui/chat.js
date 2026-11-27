@@ -148,6 +148,31 @@ function kindMark(kind, opts = {}) {
   return el("span", { class: `aa-mark ${opts.size || "sm"}`, dataset: { kind: "api" }, "aria-hidden": "true" }, "API");
 }
 
+// ---------------------------------------------------------------- 本机 MCP note
+
+// 本机 MCP (docs/design.md "本机 MCP"): a run gets the Agent Nexus connector by itself (the agent-nexus entry, the
+// user's own gateway connector, or per-run flags). Only when nothing can attach is there a note: which reason.
+const NEXUS_MCP_DOWN = {
+  off: "本机 MCP 已关闭", exposed: "本机 MCP 未开放", not_joined: "未加入网关", offline: "网关未连接",
+  revoked: "已被吊销", locked: "已锁定", gateway_old: "网关版本过旧",
+  device_access_off: "网关关闭了设备接入", rejected: "凭据不被网关接受",
+};
+export function nexusMcpNote(info) {
+  if (!info) return null;
+  const nx = info.nexus_mcp;
+  if (!nx) { // an older device: only its config-file check
+    return info.gateway_mcp === false ? { text: "未检测到网关连接器", down: "未检测到网关连接器", title: "在运行设备上添加网关 MCP（网关控制台 → 设置 → 在 AI 客户端中添加 Agent Nexus）" } : null;
+  }
+  if (nx.state === "gateway_account" && nx.stale) {
+    return { text: "Agent Nexus 连接器过时", down: "连接器过时", title: nx.label || "账户里的 Agent Nexus 连接器工具列表过时：到它的连接器设置里刷新" };
+  }
+  if (["gateway_config", "gateway_account", "both", "unknown", "name_taken"].includes(nx.state)) return null;
+  const down = NEXUS_MCP_DOWN[nx.local_state] || (nx.state === "unsupported" && !nx.attach ? "这个 CLI 接不了" : "");
+  if (!down) return null;
+  const reason = NEXUS_MCP_DOWN[nx.local_state] ? nx.local_reason || down : nx.label || down;
+  return { text: `Agent Nexus MCP：${down}`, down, title: `${reason}（本机控制台 → 设置 → 本机 MCP）` };
+}
+
 // ---------------------------------------------------------------- context usage (§16.3)
 
 /** 872100 -> "872.1K", 1000000 -> "1M" (the ring's title and its no-limit count). */
@@ -180,7 +205,8 @@ function usageRing(view) {
   track.setAttribute("class", "chat-usage-track");
   bar.setAttribute("class", "chat-usage-bar");
   bar.setAttribute("stroke-dasharray", `${(Math.min(1, view.ratio) * c).toFixed(2)} ${c.toFixed(2)}`);
-  bar.setAttribute("transform", "rotate(-90 9 9)");
+  // starts at 12 o'clock and fills counter-clockwise (mirrored), like the ring of the CLIs' own apps
+  bar.setAttribute("transform", "translate(18 0) scale(-1 1) rotate(-90 9 9)");
   svg.append(track, bar);
   return svg;
 }
@@ -197,7 +223,7 @@ if (typeof document !== "undefined") {   // (the module also loads without a DOM
   document.addEventListener("pointerdown", () => { keyboardUse = false; }, true);
 }
 
-function placePop(panel, anchor, align) {
+function placePop(panel, anchor, align, above = false) {
   const rect = anchor.getBoundingClientRect ? anchor.getBoundingClientRect() : { left: anchor.x, right: anchor.x, top: anchor.y, bottom: anchor.y };
   const vw = window.innerWidth, vh = window.innerHeight;
   panel.style.maxWidth = `${vw - 16}px`;
@@ -205,16 +231,16 @@ function placePop(panel, anchor, align) {
   let left = align === "end" ? rect.right - w : rect.left;
   left = Math.max(8, Math.min(left, vw - w - 8));
   let top = rect.bottom + 6;
-  if (top + h > vh - 8 && rect.top - h - 6 > 8) top = rect.top - h - 6;
+  if ((above || top + h > vh - 8) && rect.top - h - 6 > 8) top = rect.top - h - 6;
   top = Math.max(8, Math.min(top, vh - h - 8));
   Object.assign(panel.style, { position: "fixed", left: `${Math.round(left)}px`, top: `${Math.round(top)}px` });
 }
 
-function popover(anchor, content, { align = "start", role = "dialog", label = "", cls = "", onClose = null } = {}) {
+function popover(anchor, content, { align = "start", role = "dialog", label = "", cls = "", onClose = null, above = false } = {}) {
   closePop();
   const panel = el("div", { class: `menu chat-pop ${cls}`, role, "aria-label": label || null, tabindex: "-1" }, content);
   document.body.append(panel);
-  placePop(panel, anchor, align);
+  placePop(panel, anchor, align, above);
   const isEl = anchor instanceof Element;
   const outside = (event) => { if (!panel.contains(event.target) && !(isEl && anchor.contains(event.target))) close(); };
   const onKey = (event) => {
@@ -243,7 +269,7 @@ function popover(anchor, content, { align = "start", role = "dialog", label = ""
     if (openPop?.panel === panel) openPop = null;
     onClose?.();
   }
-  openPop = { close, panel, reposition: () => placePop(panel, anchor, align) };
+  openPop = { close, panel, reposition: () => placePop(panel, anchor, align, above) };
   const viaKeyboard = keyboardUse;
   requestAnimationFrame(() => {
     const first = viaKeyboard && (panel.querySelector("[aria-checked='true'], [aria-selected='true']") || panel.querySelector("button:not(:disabled), input"));
@@ -423,9 +449,21 @@ export function mountChat(container, api, opts = {}) {
   const stopBtn = el("button", { class: "btn chat-stop", type: "button", hidden: true, "aria-label": "停止", title: "停止这一轮", onclick: () => stop() }, icon("square", { size: 13 }), el("span", { class: "chat-stop-text" }, "停止"));
   const composerNote = el("div", { class: "chat-note", hidden: true });
   // a button: phones show no title tooltip, so a tap shows the figures
-  const usageNode = el("button", { class: "chat-usage", type: "button", hidden: true, onclick: () => {
+  let usageClosedAt = 0;
+  // a small floating layer next to the ring (no backdrop): the composer and its send button stay usable
+  const usageNode = el("button", { class: "chat-usage", type: "button", hidden: true, "aria-haspopup": "dialog", onclick: (event) => {
+    if (openPop?.panel?.classList.contains("chat-usage-pop")) { closePop(); return; }
+    if (Date.now() - usageClosedAt < 400) return; // this click's pointerdown just closed it: a toggle
     const view = usageView(S.usage);
-    if (view) toast(`上下文${view.title}`, { type: "info", timeout: 5000 });
+    if (!view) return;
+    const pct = view.pct === null ? null : Math.min(100, view.pct);
+    // placed above the whole composer, right-aligned with the ring: it never covers the input or the send button
+    const ring = event.currentTarget.getBoundingClientRect();
+    popover({ x: ring.right, y: composer.getBoundingClientRect().top }, [
+      el("div", { class: "chat-usage-pop-head" }, el("span", {}, "上下文"), pct === null ? null : el("strong", {}, `${pct}%`)),
+      pct === null ? null : el("div", { class: `chat-usage-pop-bar ${view.tone}` }, el("i", { style: `width:${pct}%` })),
+      el("p", { class: "chat-usage-pop-text" }, view.title),
+    ], { align: "end", label: "上下文占用", cls: "chat-usage-pop", above: true, onClose: () => { usageClosedAt = Date.now(); } });
   } });
   const composer = el("div", { class: "chat-composer" },
     composerNote,
@@ -601,10 +639,8 @@ export function mountChat(container, api, opts = {}) {
     toast(`${source}${name}${why}，已改用${deviceName(used)}`, { type: "info", timeout: 4200 });
   }
 
-  async function init(want = {}) {
-    let devices = [];
-    try { devices = (await api.devices()) || []; } catch { devices = []; }
-    if (!alive()) return;
+  /** Store a fresh device list (sorted, with 本机) and its note. */
+  function applyDevices(devices) {
     devices = devices.slice().sort((a, b) => (b.self ? 1 : 0) - (a.self ? 1 : 0) || (b.online ? 1 : 0) - (a.online ? 1 : 0) || String(a.name).localeCompare(String(b.name), "zh-CN"));
     if (opts.localDevice !== false && !devices.some((d) => d.self)) devices.unshift({ id: null, name: "本机", online: true, self: true });
     S.devices = devices;
@@ -613,6 +649,38 @@ export function mountChat(container, api, opts = {}) {
     for (const id of [...targetDirs.keys()]) if (!targets().some((t) => t.id === id && t.online && t.agents)) targetDirs.delete(id);
     if (gatewayCtx() && targetOf(S.context.device)) S.context.name = targetOf(S.context.device).name;
     S.devicesNote = (typeof api.devicesNote === "function" && api.devicesNote()) || "";
+    devicesAt = Date.now();
+    pollDevices();
+    return devices;
+  }
+
+  // The gateway link is often still coming up when the page opens (app start, just joined): the list then
+  // holds only 本机. Read it again every few seconds while there is a note, and when the menu opens.
+  let devicesAt = 0, devicesTimer = null, devicesBusy = false;
+  function pollDevices() {
+    clearTimeout(devicesTimer);
+    devicesTimer = S.devicesNote ? setTimeout(() => { if (alive()) refreshDevices(); }, 5000) : null;
+  }
+  async function refreshDevices() {
+    if (devicesBusy || !alive()) return;
+    devicesBusy = true;
+    let devices = null;
+    try { devices = (await api.devices()) || []; } catch { devices = null; } finally { devicesBusy = false; }
+    if (!alive()) return;
+    if (!devices) { pollDevices(); return; }
+    const before = S.devices.map((d) => `${d.id}:${d.online}:${d.hint || ""}`).join() + S.devicesNote;
+    applyDevices(devices);
+    if (before !== S.devices.map((d) => `${d.id}:${d.online}:${d.hint || ""}`).join() + S.devicesNote) {
+      if (S.device === undefined && S.devices.some((d) => d.online !== false)) { init(); return; }
+      renderBar(); renderComposer(); renderWelcome();
+    }
+  }
+
+  async function init(want = {}) {
+    let devices = [];
+    try { devices = (await api.devices()) || []; } catch { devices = []; }
+    if (!alive()) return;
+    devices = applyDevices(devices);
     if (!devices.some((d) => d.online !== false)) {
       S.device = undefined;
       S.loading = false;
@@ -1022,7 +1090,7 @@ export function mountChat(container, api, opts = {}) {
       el("button", { class: "btn btn-sm", type: "button", onclick: () => (S.devices.length ? selectDevice(S.device) : init()) }, "重试")) : null;
     // gateway mode: one line saying where the CLI runs and whose folder it works on (and what is in the way)
     const problem = contextProblem();
-    const mcpMissing = agentInfo()?.gateway_mcp === false;
+    const mcpNote = nexusMcpNote(agentInfo());
     const dirChip = () => chips.querySelector(".chat-chip-dir");
     const gateway = gatewayCtx() ? el("div", { class: `chat-ctx ${problem ? "warn" : ""}` }, icon(problem ? "triangle-alert" : "network", { size: 14 }),
       el("span", { class: "grow chat-ctx-text", title: `CLI 在 ${deviceName()} 上运行，经网关操作 ${targetName(c.device)} 上的 ${c.workdir}` },
@@ -1030,8 +1098,7 @@ export function mountChat(container, api, opts = {}) {
         el("span", { class: "chat-ctx-run" }, "CLI 在 ", el("strong", {}, deviceName()), " 上运行，"), "经网关操作 ",
         el("strong", { class: "chat-ctx-target" }, targetName(c.device)), " 的 ", el("code", {}, shortPath(c.workdir)),
         problem ? `（${problem}）` : ""),
-      mcpMissing ? el("span", { class: "chat-ctx-warn", title: `${kindShort(S.kind, agentInfo())} 没有配 Agent Nexus MCP 连接器，调用不了 use_device：在 ${deviceName()} 上添加网关 MCP（网关控制台 → 设置 → AI 客户端接入）` },
-        icon("triangle-alert", { size: 13 }), "未检测到网关连接器") : null,
+      mcpNote ? el("span", { class: "chat-ctx-warn", title: mcpNote.title }, icon("triangle-alert", { size: 13 }), mcpNote.text) : null,
       el("button", { class: "btn btn-ghost btn-sm", type: "button", onclick: () => { const anchor = dirChip(); if (anchor) dirMenu(anchor); } }, "更改"),
       el("button", { class: "btn btn-ghost btn-icon btn-sm", type: "button", "aria-label": `改回 ${deviceName()} 上的目录`, title: `改回 ${deviceName()} 上的目录`,
         onclick: () => { S.context = directContext(); persist(); renderBar(); renderComposer(); renderWelcome(); } }, icon("x", { size: 14 }))) : null;
@@ -1040,6 +1107,7 @@ export function mountChat(container, api, opts = {}) {
   }
 
   function deviceMenu(anchor) {
+    if (Date.now() - devicesAt > 10000) refreshDevices();
     menu(anchor, [
       { heading: "CLI 在哪台设备上运行" },
       ...S.devices.map((d) => ({
@@ -1336,9 +1404,6 @@ export function mountChat(container, api, opts = {}) {
       return box;
     };
 
-    const info = agentInfo();
-    const mcpWarn = info?.gateway_mcp === false ? el("div", { class: "chat-dir-warn" }, icon("triangle-alert", { size: 13 }),
-      el("span", {}, `${kindShort(S.kind, info)} 在 ${deviceName()} 上没有配 Agent Nexus 连接器，经网关时调用不了 use_device。在 ${deviceName()} 上给它添加网关 MCP（网关控制台 → 设置 → AI 客户端接入）后再用。`)) : null;
     const content = el("div", { class: "chat-dirs" },
       all.length || S.devicesNote ? el("div", { class: "chat-dir-dev-head runner" }, icon(remote ? "monitor" : "laptop", { size: 14 }),
         el("span", { class: "chat-dir-dev-name truncate", title: deviceName() }, deviceName()), el("span", { class: "chat-dir-tag" }, "运行设备"),
@@ -1354,7 +1419,6 @@ export function mountChat(container, api, opts = {}) {
       all.length ? [
         el("div", { class: "menu-sep" }),
         el("div", { class: "chat-menu-heading chat-dir-others" }, icon("network", { size: 12 }), "其他设备 · 经网关"),
-        mcpWarn,
         online.map(section),
         !online.length ? el("p", { class: "chat-dirs-empty" }, "网关上没有其他在线设备。") : null,
         offline.length ? el("p", { class: "chat-dirs-empty chat-dir-offline" },
@@ -1530,9 +1594,9 @@ export function mountChat(container, api, opts = {}) {
       mount(composerNote,
         S.session && !S.rid ? el("span", { class: "chat-note-resume" }, canResume(S.session.kind)
           ? "将续接这个会话" : `${kindShort(S.session.kind, agentInfo(S.session.kind))} 不支持续接，发消息会开一个新对话`) : null,
-        gatewayCtx() && agentInfo()?.gateway_mcp === false
-          ? el("span", { class: "chat-note-warn", title: `经网关模式需要 ${name} 配置 Agent Nexus MCP 连接器，否则它调用不了 use_device` },
-            icon("triangle-alert", { size: 13 }), `${name} 没有配置网关连接器`) : null);
+        gatewayCtx() && nexusMcpNote(agentInfo())
+          ? el("span", { class: "chat-note-warn", title: nexusMcpNote(agentInfo()).title },
+            icon("triangle-alert", { size: 13 }), `${name} 无法使用 Agent Nexus MCP：${nexusMcpNote(agentInfo()).down}`) : null);
     }
     composerNote.hidden = !composerNote.childElementCount;
   }

@@ -610,6 +610,58 @@ def cmd_integrate(args: argparse.Namespace, root: Path) -> int:
     return integrate.run(args.kind, dry_run=args.dry_run, remove=args.remove, hooks=args.hooks, root=root)
 
 
+def cmd_mcp(args: argparse.Namespace, root: Path) -> int:
+    """``anx mcp link|unlink|status``: the ``agent-nexus`` entry of the 本机 MCP in the CLIs' own config.
+
+    ``link --kind K --url URL [--remove]`` edits this user's config directly (it is also what the system service
+    starts as the CLI's user); ``unlink --all`` and ``status`` ask the running client, which knows what is ours."""
+    from .agents import mcp_link
+    if args.mcp_cmd == "link":
+        return mcp_link.cli_main(args)
+    cfg = load_manager_config(root)
+    api = Api(cfg)
+    if args.mcp_cmd == "status":
+        try:
+            code, data = api.call("GET", "/api/mcp/local", timeout=60)
+        except (OSError, ValueError) as exc:
+            print(f"{PROG}: the client is not running ({exc})", file=sys.stderr)
+            return 1
+        if args.json:
+            print(json.dumps(data, ensure_ascii=False, indent=1))
+            return 0 if code == 200 else 1
+        print(f"本机 MCP: {data.get('url')} -- {data.get('reason')}")
+        for cli in data.get("clis") or []:
+            print(f"  {cli.get('kind'):7} {cli.get('account') or '':12} {cli.get('label')}")
+        return 0 if code == 200 else 1
+    # unlink
+    kinds = list(mcp_link.KINDS) if args.all or not args.kind else [args.kind]
+    try:
+        if api.alive():
+            failed = 0
+            for kind in kinds:
+                code, data = api.call("POST", "/api/mcp/local/clis", {"kind": kind, "action": "remove"}, timeout=90)
+                if code >= 400 and data.get("code") not in ("not_ours",):
+                    print(f"{PROG} mcp unlink {kind}: {data.get('error')}", file=sys.stderr)
+                    failed += 1
+            return 1 if failed else 0
+    except (OSError, ValueError):
+        pass
+    # the client is not running: what this user's files hold of ours, by the record
+    failed = 0
+    for result in mcp_link.unlink_offline(root, kinds):
+        print(f"{result['kind']}: {result.get('error') or ('removed' if result.get('changed') else 'skipped')}")
+        failed += 0 if result.get("ok") else 1
+    return 1 if failed else 0
+
+
+def _is_mcp_link(argv: list[str]) -> bool:
+    """``anx mcp link ...``: a child started as the CLI's user; no logging set-up, no root needed."""
+    index = 0
+    while index < len(argv) and argv[index].startswith("-"):
+        index += 2 if argv[index] == "--root" else 1
+    return argv[index:index + 2] == ["mcp", "link"]
+
+
 def _is_hook_call(argv: list[str]) -> bool:
     """``anx [--root R] hook ...``, found before argparse: it exits 2 on bad arguments, and 2 blocks a Claude prompt."""
     index = 0
@@ -708,7 +760,7 @@ def cmd_term(args: argparse.Namespace, root: Path) -> int:
 
 
 ROOT_COMMANDS = {"migrate": cmd_migrate, "secrets": cmd_secrets, "device": cmd_device, "wake": cmd_wake,
-                 "hook": cmd_hook, "integrate": cmd_integrate, "term": cmd_term}
+                 "hook": cmd_hook, "integrate": cmd_integrate, "term": cmd_term, "mcp": cmd_mcp}
 
 COMMANDS = {
     "serve": cmd_serve, "status": cmd_status, "start": cmd_lifecycle, "stop": cmd_lifecycle,
@@ -802,6 +854,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--hooks", action="store_true",
                    help="codex: use Codex's hooks.json instead of the notify setting")
 
+    p = sub.add_parser("mcp", help="the 本机 MCP entry (agent-nexus) in Claude Code / Codex / Gemini CLI config")
+    mcp_sub = p.add_subparsers(dest="mcp_cmd", required=True)
+    q = mcp_sub.add_parser("link", help="add (or --remove) the agent-nexus entry for this user")
+    q.add_argument("--kind", required=True, choices=["claude", "codex", "gemini"])
+    q.add_argument("--url", required=True)
+    q.add_argument("--remove", action="store_true")
+    q.add_argument("--drop-empty", action="store_true", help=argparse.SUPPRESS)
+    q.add_argument("--json", action="store_true")
+    q = mcp_sub.add_parser("unlink", help="remove the agent-nexus entries this client added")
+    q.add_argument("--kind", choices=["claude", "codex", "gemini"])
+    q.add_argument("--all", action="store_true")
+    q = mcp_sub.add_parser("status", help="the 本机 MCP and each CLI's connector")
+    q.add_argument("--json", action="store_true")
+
     p = sub.add_parser("mail", help="mailbox settings")
     mail_sub = p.add_subparsers(dest="mail_cmd", required=True)
     address_parser = mail_sub.add_parser("address", help="mailbox addresses")
@@ -858,6 +924,9 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     if _is_hook_call(sys.argv[1:] if argv is None else list(argv)):
         return _main_hook(sys.argv[1:] if argv is None else list(argv))
+    if _is_mcp_link(sys.argv[1:] if argv is None else list(argv)):
+        args = build_parser().parse_args(sys.argv[1:] if argv is None else list(argv))
+        return cmd_mcp(args, Path("."))
     from mcpkit.runtime import install_windows_socket_cleanup
     install_windows_socket_cleanup()
     for stream in (sys.stdout, sys.stderr):

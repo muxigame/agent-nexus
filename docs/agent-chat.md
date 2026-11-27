@@ -18,7 +18,10 @@
 - **经网关操作其他设备**（模式 `gateway`）：CLI 在运行设备上跑，但要操作上下文设备 Y 的目录 D。界面上不是单独的选项：
   在“目录”标签里选了其他设备上的目录就是这个模式，选运行设备自己的目录就是 `direct`（见 §11“目录”标签）。网关为 (Y, D) 签发一个
   workspace handle（`use_device` 的 `workspace_id`），提示词片段“网关工作方式”被启用并带上 `$handle`、`$context_device`、`$context_workdir`。
-  这要求运行设备的 CLI 已配置 Agent Nexus 网关 MCP 连接器；状态栏显示是否检测到。
+  CLI 通过运行设备的**本机 MCP**（`http://127.0.0.1:8399/mcp`，design.md §19）使用网关工具，不需要手动配置：客户端事先在 CLI 的配置里
+  写好 `agent-nexus` 配置项（CLI 已经通过云端网关接入时用它原有的连接器，不重复添加），写不进去的（dsh、命令里有 `{mcp_url}` 的自定义 CLI、关闭了自动接入）
+  这次运行用参数临时接入；API 模型在进程内接入。提示词片段“Agent Nexus MCP 与工作区”（`$mcp_hint`）写明用哪个连接器、
+  已选好的 `workspace_id`、目标设备和目录、邮箱地址。只有什么都接不上时（本机 MCP 关闭、未加入、已吊销、已锁定、网关过旧、网关关闭了设备接入、凭据不被接受，或这个 CLI 接不了）状态栏才提示原因。
 
 `direct` 模式下网关仍然用于 ask_user / 邮件：运行开始时网关为 (运行设备, workdir) 签发 handle 并绑定邮箱地址，
 这样 Agent 调 `ask_user`、`mail_send` 时能落到同一个会话里。网关不可达时（本机 + 云端断开），对话照常进行，只是没有 ask_user / 邮件。
@@ -211,8 +214,9 @@ UI：侧栏顶部是 CLI 标签（Claude Code / Codex / DeepSeek / 全部），�
   - 选其他设备的目录 → `context = {mode: "gateway", device, workdir}`；选运行设备的目录 → `direct`。标签显示「目录名 · 设备名」
     （网络图标、强调色，各自省略，完整内容在 title），对话区上方一行说明“CLI 在 X 上运行，经网关操作 Y 的 D”，带“更改”和改回的 ×
     （手机上省掉“CLI 在 X 上运行”、设备名截短，保证目录可见）。
-  - 运行设备的 CLI 没有 Agent Nexus 连接器（`gateway_mcp: false`）时仍可选，菜单里和输入框上方给出提示和修法（在 X 上给 CLI 添加网关 MCP，
-    步骤在网关控制台 → 设置 → AI 客户端接入）。目标设备离线、网关不可达时不能发送，提示里给“改用 X 上的目录”。
+  - 运行设备的 CLI 什么连接器都接不上时仍可选，目录菜单里没有提示；只有对话区上方的状态行和输入框上方写
+    “Agent Nexus MCP：<原因>” / “{CLI} 无法使用 Agent Nexus MCP：<原因>”，修法在本机控制台 → 设置 → 本机 MCP（旧设备没有
+    `nexus_mcp` 时仍按 `gateway_mcp: false` 提示添加网关 MCP）。目标设备离线、网关不可达时不能发送，提示里给“改用 X 上的目录”。
   - 经网关时 `agent_run_open.workdir` 是运行设备上的起点：续接会话时用会话自己的 cwd（Claude 按目录存会话），新对话留空（主目录）；
     这个起点不进“最近使用”。打开会话时 `S.workdir` 总是取会话的 cwd（不论模式），
     所以改回 direct 后续接仍在会话自己的目录里，不会带上前一个对话的目录。会话仍按运行设备列出，副标题写「⇄ Y · D」；会话元数据记下 `context {device, workdir}`
@@ -377,7 +381,15 @@ FEATURE = "agents/1"
 用系统提示里的 workspace_id 调网关的 `mail_send`，邮件进了这个地址的会话（`/api/inbox/conversation`，聊天里合并显示）。
 发现：`codex exec` 从不询问，需要审批的 MCP 工具一律被拒（"该工具需要审批，但当前审批策略为 never"）。Codex 的
 `mcp_servers.<name>.default_tools_approval_mode`（取值 auto / prompt / writes / approve，从 0.164 的二进制里查到）设为 `approve` 后正常 →
-经网关模式下非只读的 Codex 运行，对检测到的 Agent Nexus 连接器自动加这条覆盖；没有连接器时对话里给出提示，`agent_info.gateway_mcp` 报告检测结果。
+经网关模式下非只读的 Codex 运行，对检测到的 Agent Nexus 连接器自动加这条覆盖。
+
+0.8.31 起由本机 MCP 接管（design.md §19）：每个对话最多一个 Agent Nexus 连接器——`agent-nexus` 配置项、用户原有的网关连接器
+（配置项或 Claude.ai / ChatGPT 账户连接器），或者按运行临时接入（claude `--mcp-config` 里的 `agent-nexus`、codex `-c mcp_servers.agent-nexus.url=…`、
+ACP `mcpServers` 的 http 项、自定义 CLI 的 `{mcp_url}`）；检测结果是“无法确定”（unknown）时什么都不接，提示词只写“如果你有 Agent Nexus
+的工具，只用其中一个连接器”。免审批的工具按权限模式给出明确清单（只读：只读工具；逐项审批：再加 mail_send + ask_user；自动改文件：
+经网关时再加 file_write / edit_file / patch_file；完全：全部），exec_command 等在完全之外从不免审批：Codex 用 `enabled_tools` 只留下清单里的
+工具再加审批覆盖，Claude 用 `--allowedTools` 列出清单。`agent_info` 的 `nexus_mcp` 报告每个 CLI
+用哪个连接器（`gateway_mcp` 保留一版，只有什么都接不上时为 false）；“没有配置连接器”的提示已删除。
 
 **Claude Code（真机，Mac mini）**：桌面版自带的 Claude Code 2.1.331 需要单独 `auth login`（桌面版的登录不给命令行用；登录信息进钥匙串
 `Claude Code-credentials`）。登录后：`claude-stream` 两轮对话正常（第一轮用 `Read` 读测试文件并回复内容，第二轮续接）；会话出现在列表里，

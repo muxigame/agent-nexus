@@ -95,6 +95,88 @@ def configured_workspaces(root: Path) -> list[dict]:
     return out
 
 
+#: Agent Nexus tools that only read (claude readonly / ask: allowed without a prompt).
+READ_TOOLS = ("device_list", "curr_time", "device_info", "file_read", "file_list", "file_stat", "file_glob",
+              "file_grep", "view_image", "mail_inbox", "mail_read", "mail_who", "mail_status", "mcplist", "mcpdetail",
+              "toolsearch", "file_copy_status", "file_copy_list")
+#: Agent Nexus tools that edit files on the workspace's device (gateway mode, ``edits``: without a prompt).
+EDIT_TOOLS = ("file_write", "edit_file", "patch_file")
+ATTACHED = ("local", "gateway_config", "gateway_account", "both")
+#: the 本机 MCP cannot serve the gateway's tools in these states: a run that depends on it is warned
+LOCAL_DOWN = ("off", "exposed", "not_joined", "revoked", "locked", "gateway_old", "device_access_off", "rejected")
+
+
+def can_attach(nx: dict | None) -> bool | None:
+    """Whether a run of this CLI gets an Agent Nexus connector (None: cannot tell)."""
+    if not nx:
+        return None
+    if nx.get("state") in ("unknown", "name_taken"):
+        return None  # name_taken: the user's own "agent-nexus" (whatever it is) -- the context stays generic
+    if nx.get("state") in ("gateway_config", "gateway_account"):
+        return True
+    if nx.get("local_state") in LOCAL_DOWN:
+        return nx.get("state") == "both"
+    return nx.get("state") in ATTACHED or nx.get("attach") in ("flags", "inprocess")
+
+
+def connector_name(nx: dict | None) -> str:
+    """The one connector a run is told to use ("" when unknown or there is none)."""
+    if not nx or nx.get("state") == "unknown" or not can_attach(nx):
+        return ""
+    return str(nx.get("use") or "")
+
+
+def approved_tools(permission: str, mode: str = "gateway") -> list[str] | None:
+    """The Agent Nexus tools a run may call without a prompt in ``permission`` mode (None: all of them, ``full``).
+
+    Never exec_command / write_stdin / keyboard / mouse / tooluse / use_device / file_copy outside ``full``: they
+    run on the device's builtin, outside any CLI sandbox. ``edits`` adds the file edit tools only in gateway mode
+    (in direct mode the CLI's own, sandboxed tools edit this computer's files)."""
+    if permission == "full":
+        return None
+    tools = list(READ_TOOLS)
+    if permission in ("ask", "edits"):
+        tools += ["mail_send", "ask_user"]
+    if permission == "edits" and mode == "gateway":
+        tools += list(EDIT_TOOLS)
+    return tools
+
+
+def claude_allowed(prefix: str, permission: str, mode: str = "gateway") -> list[str]:
+    """``--allowedTools`` for the connector's tools in ``permission`` mode (full: everything is allowed anyway);
+    always an explicit list, never the whole server."""
+    tools = approved_tools(permission, mode)
+    if not prefix or tools is None:
+        return []
+    return [prefix + tool for tool in tools]
+
+
+def mcp_hint(nx: dict | None, v: dict) -> str:
+    """The ``nexus_mcp`` fragment's text: the connector to use and the ready workspace (needs a handle)."""
+    tail = (f"工作区已经为你选好：workspace_id=\"{v.get('handle')}\"，指向 {v.get('target_device')} 上的 "
+            f"{v.get('target_workdir')}；调用它的设备工具、mail_*、ask_user、file_copy 时每次都带上这个 workspace_id，"
+            f"不需要先调用 device_list / use_device。传 workdir 或路径时用 {v.get('target_workdir')} 下的绝对路径。"
+            f"你的邮箱地址是 {v.get('address')}。")
+    name = connector_name(nx)
+    if not name:
+        if nx and nx.get("state") not in ("unknown", None) and not can_attach(nx):
+            return ""
+        return ("如果你有 Agent Nexus 的 MCP 工具（含 device_list / use_device / mail_send），只用其中一个连接器，"
+                "不要重复调用；" + tail)
+    prefix = nx.get("tool_prefix") or ""
+    if nx.get("acp_pending"):
+        return (f"本次对话尝试接入 Agent Nexus MCP（连接器 {name}）；如果你的工具里没有它，说明这个 Agent 接不了，"
+                "就不要调用这些工具。" + tail)
+    head = f"本次对话已接入 Agent Nexus MCP（连接器 {name}" + (f"，工具名前缀 {prefix}" if prefix else "") + "）。"
+    if nx.get("also"):
+        head += f"另有 {'、'.join(nx['also'])} 指向同一个网关，只用 {name}，不要重复调用。"
+    ours = bool(nx.get("attach")) or nx.get("state") == "local" or \
+        (nx.get("state") == "both" and not nx.get("swapped"))
+    if ours and nx.get("local_state") not in (None, "ready"):
+        head += f"注意：本机 MCP 现在不可用（{nx.get('local_reason')}），恢复前这些工具只会返回状态。"
+    return head + tail
+
+
 def _error(message: str, code: str, **extra: Any) -> dict:
     return {"error": message, "code": code, **extra}
 
@@ -112,12 +194,14 @@ class AgentHub:
     def __init__(self, root: Path, *, account: Callable[[], Any] | None = None,
                  gateway: Callable[[str, dict], Awaitable[dict | None]] | None = None,
                  device: Callable[[], dict] | None = None, workspaces: Callable[[], list[dict]] | None = None,
-                 config: Callable[[], dict] | None = None, runs: Runs | None = None):
+                 config: Callable[[], dict] | None = None, runs: Runs | None = None, mcp_link: Any = None):
         self.root = Path(root)
         self.account = account or (lambda: None)
         self.gateway = gateway
         self.device = device or (lambda: {"id": "", "name": _host_name(), "gateway": ""})
         self.workspaces = workspaces or (lambda: configured_workspaces(self.root))
+        #: the 本机 MCP's link (agents/mcp_link.MCPLink): which Agent Nexus connector each run uses; None: none
+        self.mcp_link = mcp_link
         self._config = config or (lambda: registry.load_config(self.root))
         self.meta = sessions.SessionMeta(self.root)
         self.recent = Recent(self.root)
@@ -288,6 +372,31 @@ class AgentHub:
             self._sweeper.cancel()
             self._sweeper = None
 
+    def _connector(self, kind: str, account: Any, env: dict, api: bool = False, workdir: str | None = None,
+                   d: Any = None) -> dict | None:
+        """The Agent Nexus connector ``kind`` uses (mcp_link.for_run), or None without a link."""
+        if self.mcp_link is None:
+            return None
+        try:
+            return self.mcp_link.for_run(kind, account, env, api=api, workdir=workdir, d=d)
+        except Exception:  # noqa: BLE001 - never break the chat over this
+            log.exception("agents: resolving the MCP connector of %s failed", kind)
+            return None
+
+    def _observer(self, kind: str, account: Any):
+        """A run's report of the Agent Nexus servers its CLI really loaded (passive detection, mcp_probe)."""
+        link = self.mcp_link
+        if link is None:
+            return None
+        name = link.account_name(account)
+
+        def observe(connectors: list[dict], version: str | None = None) -> None:
+            try:
+                link.probe.observe(name, kind, connectors, version=version)
+            except Exception:  # noqa: BLE001
+                log.debug("agents: recording the MCP observation failed", exc_info=True)
+        return observe
+
     # -- CLIs ------------------------------------------------------------------------------------------------
     async def agent_info(self, params: dict) -> dict:
         await self.api.pull(force=bool(params.get("fresh")))
@@ -307,11 +416,29 @@ class AgentHub:
         api_agents = await asyncio.to_thread(self.api.info, set(api_defs))
         device = self._device()
         home = self._home(account, env)
+        undecided = False
         for item in agents:
-            try:
-                item["gateway_mcp"] = registry.gateway_mcp(item["kind"], home, env, str(device.get("gateway") or ""))
-            except Exception:  # noqa: BLE001 - a broken config file must not break agent_info
-                item["gateway_mcp"] = None
+            if self.mcp_link is not None and item.get("version") and hasattr(self.mcp_link, "note_version"):
+                self.mcp_link.note_version(account, item["kind"], item["version"])
+            nx = await asyncio.to_thread(self._connector, item["kind"], account, env, False, None,
+                                         defs.get(item["kind"])) if item.get("installed") else None
+            if nx is None:
+                try:
+                    item["gateway_mcp"] = registry.gateway_mcp(item["kind"], home, env, str(device.get("gateway") or ""))
+                except Exception:  # noqa: BLE001 - a broken config file must not break agent_info
+                    item["gateway_mcp"] = None
+                continue
+            item["nexus_mcp"] = nx
+            # kept for one release (an older chat.js served by a gateway): false only when nothing can attach
+            item["gateway_mcp"] = can_attach(nx)
+            undecided = undecided or (nx["state"] in ("none", "unknown") and not nx.get("entry"))
+        if undecided and self.mcp_link is not None:
+            self.mcp_link.soon("a CLI without a connector")
+        for item in api_agents:
+            if self.mcp_link is not None:
+                nx = await asyncio.to_thread(self._connector, item["kind"], account, env, True)
+                if nx is not None:
+                    item["nexus_mcp"] = nx
         agents += api_agents
         return {"agents": agents, "device": {"id": device.get("id"), "name": device.get("name"),
                                              "os": prompts_mod.os_name()},
@@ -528,6 +655,7 @@ class AgentHub:
                            else f"网关没有为这个对话分配邮箱（{reason}）：ask_user / 邮件暂不可用", "gateway": False})
 
         device = self._device()
+        nx = await asyncio.to_thread(self._connector, kind, account, run_env, api_spec is not None, workdir, d)
         session_name = address.split("@", 1)[0] if address else (params.get("title") or f"{kind}-{rid[:6]}")
         variables = {
             "kind": kind, "mode": mode, "device": device.get("name") or "", "device_id": device.get("id") or "",
@@ -538,6 +666,12 @@ class AgentHub:
             variables["context_device"] = (bound or {}).get("device_display") or (bound or {}).get("display_name") \
                 or str(context.get("device"))
             variables["context_workdir"] = (bound or {}).get("path") or str(context.get("workdir"))
+        variables["target_device"] = variables.get("context_device") or variables["device"]
+        variables["target_workdir"] = variables.get("context_workdir") or workdir
+        connector = connector_name(nx)
+        variables.update(mcp=connector or "", mcp_prefix=(nx or {}).get("tool_prefix") or "" if connector else "",
+                         mcp_state=(nx or {}).get("state") or "")
+        variables["mcp_hint"] = mcp_hint(nx, variables) if handle else ""
         draft = params.get("draft") if isinstance(params.get("draft"), dict) else None
         if draft is None and isinstance(params.get("fragments"), list):
             draft = {"fragments": params["fragments"], "presets": self.prompts.load()["presets"]}
@@ -557,9 +691,37 @@ class AgentHub:
         console["workdir"] = workdir
         if api_spec is not None and handle:
             # ask_user / mail_send of an API model (§16.4): through the gateway, as this run's mailbox address
-            api_spec.update(handle=handle, gateway=self._gateway_call)
+            api_spec.update(handle=handle, gateway=self._gateway_call, mode=mode)
+            if nx is not None and nx.get("ready"):
+                api_spec.update(mcp_url=nx["url"])  # the 本机 MCP's tools, the handle filled in
         extra: dict = {"api": api_spec} if api_spec is not None else {}
-        if mode == "gateway" and api_spec is None:
+        permission = str(params.get("permission") or "ask")
+        if nx is not None and api_spec is None:
+            use = nx.get("use")
+            if nx.get("local_state") not in ("off", "exposed"):
+                extra["mcp_url"] = nx["url"]  # {mcp_url} of custom CLIs
+            if nx.get("attach") == "flags" and use:
+                extra["mcp_attach"] = {"name": use, "url": nx["url"], "gateway": mode == "gateway"}
+            if use and kind == "codex" and connector_name(nx) and nx.get("source") != "account:chatgpt" \
+                    and nx["state"] != "gateway_account":
+                # codex exec never asks: the tools this permission mode allows are approved, every other tool of
+                # the connector is left out of the run (enabled_tools), never approved
+                extra["mcp_approve"] = [use]
+                tools_ok = approved_tools(permission, mode)
+                if tools_ok is not None:
+                    extra["mcp_enabled_tools"] = tools_ok
+            if use and kind == "claude" and connector_name(nx):
+                allowed = claude_allowed(nx.get("tool_prefix") or "", permission, mode)
+                if allowed:
+                    extra["mcp_allow"] = allowed
+            observe = self._observer(kind, account)
+            if observe is not None:
+                extra["on_mcp"] = observe
+            if mode == "gateway" and can_attach(nx) is False:
+                events.append({"type": "error", "level": "warn",
+                               "text": f"{d.label} 无法接入 Agent Nexus MCP（{nx.get('local_reason') or '本机 MCP 不可用'}），"
+                                       "经网关模式下它调用不了 use_device / 文件工具"})
+        elif nx is None and mode == "gateway" and api_spec is None:
             try:
                 names = await asyncio.to_thread(registry.gateway_mcp_names, kind, self._home(account, run_env),
                                                 run_env, str(device.get("gateway") or ""))
@@ -569,8 +731,7 @@ class AgentHub:
                 events.append({"type": "error", "level": "warn",
                                "text": f"{d.label} 没有配置 Agent Nexus MCP 连接器，经网关模式下它调用不了 use_device / "
                                        "文件工具；先在 CLI 里加上网关的 MCP 地址"})
-            elif names and kind == "codex" and str(params.get("permission") or "ask") != "readonly":
-                # codex exec never asks: without this it refuses every call to the gateway's tools
+            elif names and kind == "codex" and permission != "readonly":
                 extra["mcp_approve"] = names
         try:
             result = await self.runs.open(console, binary=binary, system_prompt=system_prompt, tmpdir=str(tmpdir),
@@ -590,7 +751,9 @@ class AgentHub:
                            # as the console sent them (a device id, the folder typed / picked): stored with the
                            # session and listed with the run, so reopening it restores the same context
                            "context_device_id": str(context.get("device") or "") if mode == "gateway" else "",
-                           "context_workdir_raw": str(context.get("workdir") or "") if mode == "gateway" else ""}
+                           "context_workdir_raw": str(context.get("workdir") or "") if mode == "gateway" else "",
+                           "connector": {"state": (nx or {}).get("state"), "use": connector_name(nx) or None,
+                                         "attach": (nx or {}).get("attach")}}
         try:
             if mode == "direct":  # gateway mode: the folder is the other device's; the runner's cwd is only a base
                 await asyncio.to_thread(self.recent.add, workdir, kind=kind)

@@ -166,3 +166,22 @@ def test_every_op_is_routable_locally(local):
         response = post(client, f"/api/agents/local/{op}", {})
         assert response.status_code == 200, op
         assert isinstance(response.json(), dict)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the fake CLIs are /bin/sh shims")
+def test_the_local_console_serves_the_local_mcp_and_its_settings(local):
+    client, root, home = local
+    port = json.loads((root / "agent-nexus.json").read_text())["manager"]["port"]
+    view = client.get("/api/mcp/local").json()
+    assert view["url"] == f"http://127.0.0.1:{port}/mcp" and view["state"] == "not_joined" and view["enabled"]
+    assert [c["kind"] for c in view["clis"]] == ["codex"]
+    assert client.put("/api/mcp/local", json={"auto_config": False}).status_code == 403  # X-ANX still needed here
+    changed = client.put("/api/mcp/local", json={"auto_config": False, "peers": "accounts"}, headers=WRITE).json()
+    assert changed["auto_config"] is False and changed["peers"] == "accounts"
+    assert json.loads((root / "agent-nexus.json").read_text())["mcp_local"] == {"auto_config": False, "peers": "accounts"}
+    # "accounts": a caller that is not one of those accounts cannot switch it back (TestClient's peer is unknown)
+    refused = client.put("/api/mcp/local", json={"peers": "any"}, headers=WRITE)
+    assert refused.status_code == 403 and refused.json()["code"] == "forbidden_account"
+    assert json.loads((root / "agent-nexus.json").read_text())["mcp_local"]["peers"] == "accounts"
+    # TestClient's peer is not a loopback address: the MCP itself refuses it (no X-ANX needed to get that far)
+    assert client.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "ping"}).status_code == 403

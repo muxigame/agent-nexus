@@ -90,7 +90,10 @@ class InboxWeb:
         except Exception:
             return False
         required = set(getattr(self.server.auth, "required_scopes", None) or [])
-        return verified is not None and required <= set(getattr(verified, "scopes", None) or [])
+        if verified is None or getattr(verified, "subject", None) == "device" or \
+                str(getattr(verified, "client_id", "") or "").startswith("device:"):
+            return False  # a device's MCP identity (device_mcp.py) is never the owner
+        return required <= set(getattr(verified, "scopes", None) or [])
 
     async def owner(self, request: Request) -> str | None:
         """``"bearer"`` or ``"cookie"`` for the authenticated owner, else ``None``."""
