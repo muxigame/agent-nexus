@@ -25,12 +25,14 @@ import sys
 import time
 from pathlib import Path
 
+from . import lifeline
+
 log = logging.getLogger(__name__)
 FEATURE = "p2p/1"
 EXE = "muxi-p2p-agent.exe" if sys.platform == "win32" else "muxi-p2p-agent"
 CONNECT_TIMEOUT_S = 25.0
 IDLE_S = 1800.0
-NO_WINDOW = getattr(__import__("subprocess"), "CREATE_NO_WINDOW", 0)
+NO_WINDOW = lifeline.NO_WINDOW
 
 
 ANDROID_LIBS_ENV = "ANX_ANDROID_NATIVE_LIBS"   # the APK's nativeLibraryDir, set by the Android app
@@ -62,13 +64,16 @@ def _free_port(preferred: int) -> int:
     """``preferred`` when nothing listens there (a stable port helps router mappings), else any."""
     import socket
     for port in (preferred, 0):
-        family = socket.AF_INET6 if socket.has_ipv6 else socket.AF_INET
-        with socket.socket(family, socket.SOCK_STREAM) as probe:
+        # IPv6 first; a kernel without it (has_ipv6 is still True there) gets IPv4
+        for family, host in ((socket.AF_INET6, "::"), (socket.AF_INET, "0.0.0.0")):
+            if family == socket.AF_INET6 and not socket.has_ipv6:
+                continue
             try:
-                probe.bind(("::" if family == socket.AF_INET6 else "0.0.0.0", port))
+                with socket.socket(family, socket.SOCK_STREAM) as probe:
+                    probe.bind((host, port))
+                    return probe.getsockname()[1]
             except OSError:
                 continue
-            return probe.getsockname()[1]
     return preferred
 
 
@@ -135,6 +140,8 @@ class AgentSidecar:
         #: reaches our debug log)
         self.log_file = log_file
         self.process: asyncio.subprocess.Process | None = None
+        #: ends the agent with this process, also when it crashes or is killed
+        self.lifeline = lifeline.Lifeline()
         self.task: asyncio.Task | None = None
         self.config: dict | None = None
         self.target_port = 0
@@ -163,7 +170,7 @@ class AgentSidecar:
         while True:
             started = time.monotonic()
             try:
-                self.process = await asyncio.create_subprocess_exec(
+                self.process, self.lifeline = await lifeline.spawn(
                     *args, env=env, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.STDOUT, creationflags=NO_WINDOW)
                 self.status = {"state": "running", "pid": self.process.pid, "since": time.time()}
@@ -184,6 +191,7 @@ class AgentSidecar:
                                 warned[kind] = time.monotonic()
                                 log.warning("p2p agent: %s", line[-300:])
                 code = await self.process.wait()
+                self.lifeline.release()
                 log.warning("p2p agent exited (%s); last output:\n  %s", code, "\n  ".join(tail))
                 self.status = {"state": "exited", "code": code, "last": self.status.get("last")}
             except asyncio.CancelledError:
@@ -202,6 +210,8 @@ class AgentSidecar:
                 process.terminate()
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(process.wait(), 5)
+        if process is None or process.returncode is not None:
+            self.lifeline.release()
 
     async def stop(self) -> None:
         if self.task is not None:
@@ -213,8 +223,10 @@ class AgentSidecar:
 
 
 class _Link:
-    def __init__(self, process: asyncio.subprocess.Process, port: int, route: str):
+    def __init__(self, process: asyncio.subprocess.Process, port: int, route: str,
+                 tie: lifeline.Lifeline | None = None):
         self.process, self.port, self.route = process, port, route
+        self.lifeline = tie or lifeline.Lifeline()
         self.used = time.monotonic()
         self.lost = False
         #: streams using the tunnel now (an open terminal or desktop): never idle meanwhile
@@ -274,7 +286,7 @@ class Connector:
                 self.log_dir.mkdir(parents=True, exist_ok=True)
                 stderr = open(self.log_dir / f"{_safe_name(target)}.stderr.log", "wb")
         try:
-            process = await asyncio.create_subprocess_exec(
+            process, tie = await lifeline.spawn(
                 self.exe, "connect", "--control-plane", config["control_plane"], "--server-id", target,
                 "--reflector", ",".join(config.get("reflectors") or []), env=env,
                 stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=stderr,
@@ -304,7 +316,7 @@ class Connector:
                     last = str(event["text"])[:200]
                     log.info("p2p connect %s: %s", target, last)
                 if event.get("event") == "ready":
-                    link = _Link(process, int(event["port"]), str(event.get("route") or "P2P"))
+                    link = _Link(process, int(event["port"]), str(event.get("route") or "P2P"), tie)
                     asyncio.ensure_future(self._watch(link))
                     return link
                 if event.get("event") == "error":
@@ -312,6 +324,9 @@ class Connector:
         except BaseException:
             with contextlib.suppress(ProcessLookupError):
                 process.kill()
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(asyncio.shield(process.wait()), 5)
+            tie.release()
             raise
 
     async def _watch(self, link: _Link) -> None:
@@ -321,6 +336,9 @@ class Connector:
                 if b'"lost"' in raw:
                     link.lost = True
         link.lost = True
+        with contextlib.suppress(Exception):
+            await link.process.wait()
+        link.lifeline.release()
 
     def reap(self) -> None:
         now = time.monotonic()
