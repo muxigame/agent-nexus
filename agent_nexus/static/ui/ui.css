@@ -1055,9 +1055,6 @@ details[open] > summary .chat-caret { transform: rotate(90deg); }
 @media (max-width: 768px) {
   .page .chat { margin-inline: calc(-1 * var(--sp-4)); border-radius: 0; border-left: 0; border-right: 0; }
   .chat { --chat-h: calc(100dvh - 52px - var(--tabbar-h) - 40px - env(safe-area-inset-bottom, 0px)); min-height: 460px; }
-  /* On the Overview the head sits above the chat: it is one compact row there (see .overview-head), and the
-     chat fills what is left above the tab bar, so the composer is visible without scrolling. */
-  .overview-chat .chat { --chat-h: calc(100dvh - 52px - var(--sp-2) - 40px - var(--sp-4) - var(--tabbar-h) - 8px - env(safe-area-inset-bottom, 0px)); min-height: 420px; }
   .chat-pop { max-width: calc(100vw - 16px); }
 }
 
@@ -1189,6 +1186,61 @@ details[open] > summary .chat-caret { transform: rotate(90deg); }
   .pe-editor-grid { grid-template-columns: minmax(0, 1fr); }
 }
 .chat-working.waiting .chat-dots i { background: var(--warn); animation: none; opacity: .8; }
+
+/* ---------------------------------------------------------------- 对话 page, phase 2 (ui/chat-page.js, docs/agent-chat.md §16) */
+/* The chat fills the content area: viewport − top bar (− the tab bar on phones); the page itself does not scroll. */
+.page.page-chat { padding-top: var(--sp-2); padding-bottom: var(--sp-4); gap: 0; }
+.page-chat .chat-page { display: contents; }
+.page-chat .chat { --chat-h: calc(100dvh - var(--topbar-h) - var(--sp-2) - var(--sp-4)); min-height: 420px; }
+@media (max-width: 768px) {
+  .page.page-chat { padding: 0 0 calc(var(--tabbar-h) + env(safe-area-inset-bottom, 0px)); }
+  .page-chat .chat { --chat-h: calc(100dvh - 52px - var(--tabbar-h) - env(safe-area-inset-bottom, 0px)); min-height: 360px; margin-inline: 0;
+    border-bottom: 0; border-radius: 0; }
+}
+
+/* wide layouts: the session list can be collapsed (remembered); the bar's toggle brings it back */
+.chat-side-collapse { flex: none; }
+@container chat (max-width: 899px) { .chat-side-collapse { display: none; } }
+@container chat (min-width: 900px) {
+  .side-collapsed .chat-side, .side-collapsed .chat-scrim { display: none; }
+  .side-collapsed .chat-main { grid-column: 1 / -1; }
+  .side-collapsed .chat-side-toggle { display: inline-flex; flex: none; margin-right: 4px; }
+}
+
+/* context usage (§16.3): an 18px ring at the composer's bottom-right; a token count while the limit is unknown */
+.chat-usage { display: inline-flex; align-items: center; justify-content: center; height: 32px; min-width: 24px; padding: 0 3px; color: var(--text-3); cursor: pointer; border: 0; background: transparent; font: inherit; border-radius: 8px; }
+.chat-usage[hidden] { display: none; }
+.chat-usage:hover { background: var(--surface-2); }
+.chat-usage svg { display: block; }
+.chat-usage circle { fill: none; stroke-width: 2.5; }
+.chat-usage-track { stroke: var(--surface-3); }
+.chat-usage-bar { stroke: var(--text-2); stroke-linecap: round; transition: stroke-dasharray var(--dur) var(--ease); }
+.chat-usage.warn .chat-usage-bar { stroke: var(--warn); }
+.chat-usage.bad .chat-usage-bar { stroke: var(--bad); }
+.chat-usage-num { font: 500 11px/1 var(--font-mono); font-variant-numeric: tabular-nums; color: var(--text-3); }
+
+/* §16.6: level "notice" (a CLI's own config hints) is one grey line, expandable; "warn" is yellow, no level red */
+.chat-notice { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 11.5px; line-height: 1.5; color: var(--text-3); }
+details.chat-notice { display: block; }
+.chat-notice > summary { display: flex; align-items: center; gap: 6px; min-width: 0; cursor: pointer; list-style: none; border-radius: var(--radius-sm); }
+.chat-notice > summary::-webkit-details-marker { display: none; }
+.chat-notice > summary:hover { color: var(--text-2); }
+.chat-notice > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.chat-notice .icon { flex: none; }
+.chat-notice-text { min-width: 0; }
+.chat-notice-body { margin: 4px 0 2px 19px; padding: 0; white-space: pre-wrap; word-break: break-word; font: 11.5px/1.5 var(--font-mono); color: var(--text-3); background: none; }
+.chat-error.warn { border-color: var(--warn-border); background: var(--warn-bg); }
+.chat-error.warn > .icon { color: var(--warn); }
+
+/* API models (§16.4) in the Agent picker and the session list */
+.aa-mark[data-kind="api"] { background: var(--ok-bg); color: var(--ok); font-size: 9px; letter-spacing: 0; }
+.aa-mark.md[data-kind="api"] { font-size: 10.5px; }
+
+/* the Overview's 对话 card */
+.chat-card .card-head h2 { flex: none; }
+.chat-card-device { flex: 1; min-width: 0; }
+.chat-card-item .title { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.chat-card .card-body .btn { margin-top: var(--sp-2); }
 
 /* Overview with the agent chat (local/overview.js, console/pages.js): a phone keeps only the head's primary action */
 @media (max-width: 768px) {

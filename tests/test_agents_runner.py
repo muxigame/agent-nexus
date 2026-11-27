@@ -87,6 +87,10 @@ async def test_claude_streams_deltas_and_keeps_one_process_across_turns(runs, wo
     assert any(e["type"] == "thinking" and e["text"] == "hmm" for e in events)
     done = events[-1]
     assert done["state"] == "done" and done["usage"] == {"input": 12, "output": 5, "cached": 2, "cost_usd": 0.0123}
+    # §16.3: right before the status, the context of the last main-chain message and the model's window
+    usage = events[-2]
+    assert usage["type"] == "usage" and usage["context"] == {"used": 1243, "limit": 1000000, "model": "fake-model"}
+    assert usage["turn"] == {"input": 12, "output": 5, "cached": 2, "cost_usd": 0.0123}
 
     first_turn = len(reader.events)
     sent = await runs.send({"rid": opened["rid"], "prompt": "again"})
@@ -251,10 +255,17 @@ async def test_codex_exec_turns_and_resume_argv(runs, work, tmp_path):
     assert todo["output"] == "[x] look\n[ ] fix"
     assert reader.text() == "codex: hi"
     assert events[-1]["state"] == "done" and events[-1]["usage"] == {"input": 100, "output": 7, "cached": 40}
+    # no rollout to read (no CODEX_HOME here): the turn's tokens, the window unknown
+    usage = events[-2]
+    assert usage["type"] == "usage" and usage["context"] == {"used": 107, "limit": None, "model": None}
+    assert usage["turn"] == {"input": 100, "output": 7, "cached": 40}
     thread = runs.runs[opened["rid"]].session_id
 
     await runs.send({"rid": opened["rid"], "prompt": "more"})
-    await reader.until(ended(2))
+    events = await reader.until(ended(2))
+    # each exec process numbers its items from item_0: the second turn's tool is a card of its own (e2e regression)
+    shell = [e["id"] for e in events if e["type"] == "tool" and e["name"] == "shell"]
+    assert shell[:2] == ["item_1", "item_1"] and len(set(shell)) == 2 and shell[-1] == "item_1.t2"
     first, second = (entry["argv"] for entry in lines(log))
     assert first[:5] == ["exec", "--json", "--skip-git-repo-check", "-C", work] and first[-1] == "hi"
     assert "--ask-for-approval" not in first and 'approval_policy="never"' in first
@@ -263,6 +274,105 @@ async def test_codex_exec_turns_and_resume_argv(runs, work, tmp_path):
     assert json.loads(instructions.split("=", 1)[1]) == '说 "你好"\n第二行'
     assert second[second.index("resume") + 1:] == [thread, "more"]
     assert reader.text().endswith("codex: more")
+
+
+async def test_codex_usage_comes_from_the_rollout(runs, work, tmp_path):
+    codex_home = tmp_path / "codex-home"
+    opened = await runs.open({"kind": "codex", "workdir": work, "prompt": "hi", "permission": "ask"},
+                             binary=CODEX, env={"CODEX_HOME": str(codex_home)}, run_as=None)
+    reader = Reader(runs, opened["rid"])
+    events = await reader.until(ended(1))
+    usage = events[-2]
+    # the rollout's latest token_count: last_token_usage input + output, model_context_window, the turn_context model
+    assert usage["type"] == "usage" and usage["context"] == {"used": 1230, "limit": 258400, "model": "gpt-5-codex"}
+    assert usage["turn"] == {"input": 100, "output": 7, "cached": 40}, "the turn's own tokens from turn.completed"
+    assert events[-1]["state"] == "done"
+    # a later turn whose rollout is not (yet) written: the file found before still answers
+    await runs.send({"rid": opened["rid"], "prompt": "norollout"})
+    await reader.until(ended(2))
+    assert reader.events[-2]["context"]["limit"] == 258400
+
+
+def test_codex_usage_without_rollout_uses_the_model_table():
+    d = registry.builtin_definitions()["codex"]
+    d = registry.AgentDef(**{**d.__dict__, "command": [*d.command[:-1], "-m", "gpt-5-codex", d.command[-1]]})
+    calls = []
+    adapter = adapters.make(d, adapters.AdapterOptions(binary="x", workdir="/w",
+                                                       context_lookup=lambda sid: calls.append(sid)))
+    adapter.argv("hi")
+    adapter.feed('{"type": "thread.started", "thread_id": "019a0000-0000-7000-8000-000000000000"}')
+    events = adapter.feed(json.dumps({"type": "turn.completed", "usage": {"input_tokens": 50, "output_tokens": 5}}))
+    assert calls == ["019a0000-0000-7000-8000-000000000000"]
+    assert events[0] == {"type": "usage", "context": {"used": 55, "limit": 272000, "model": "gpt-5-codex"},
+                         "turn": {"input": 50, "output": 5}}
+    assert events[1]["state"] == "done"
+
+    def broken(sid):
+        raise OSError("unreadable")
+    adapter = adapters.make(registry.builtin_definitions()["codex"],
+                            adapters.AdapterOptions(binary="x", workdir="/w", context_lookup=broken))
+    adapter.argv("hi")
+    adapter.feed('{"type": "thread.started", "thread_id": "t-1"}')
+    events = adapter.feed('{"type": "turn.completed", "usage": {}}')
+    assert [e["type"] for e in events] == ["status"], "nothing known: no usage event, and no crash"
+
+
+def test_codex_legacy_token_count_becomes_usage():
+    adapter = adapters.make(registry.builtin_definitions()["codex"], adapters.AdapterOptions(binary="x", workdir="/w"))
+    adapter.argv("hi")
+    assert adapter.feed(json.dumps({"id": "1", "msg": {"type": "token_count", "info": {
+        "last_token_usage": {"input_tokens": 70, "output_tokens": 3}, "model_context_window": 128000}}})) == []
+    events = adapter.feed('{"id": "1", "msg": {"type": "task_complete"}}')
+    assert events[0]["context"] == {"used": 73, "limit": 128000, "model": None}
+    assert events[0]["turn"] == {"input": 70, "output": 3}
+
+
+def test_claude_usage_without_model_usage_falls_back_to_the_table():
+    adapter = adapters.make(registry.builtin_definitions()["claude"], adapters.AdapterOptions(binary="x", workdir="/w"))
+    adapter.argv()
+    adapter.begin_turn("hi")
+    adapter.feed(json.dumps({"type": "system", "subtype": "init", "session_id": "s", "model": "claude-sonnet-4-5"}))
+    adapter.feed(json.dumps({"type": "assistant", "message": {"id": "m", "content": [{"type": "text", "text": "a"}],
+                                                              "usage": {"input_tokens": 10, "output_tokens": 2}}}))
+    events = adapter.feed(json.dumps({"type": "result", "subtype": "success", "usage": {"input_tokens": 10}}))
+    assert events[0]["context"] == {"used": 12, "limit": 200000, "model": "claude-sonnet-4-5"}
+    # a stopped turn still reports, before its status
+    adapter.begin_turn("more")
+    adapter.stop()
+    events = adapter.feed(json.dumps({"type": "result", "subtype": "error_during_execution",
+                                      "modelUsage": {"claude-sonnet-4-5": {"contextWindow": 1000000}}}))
+    assert [e["type"] for e in events] == ["usage", "status"] and events[0]["context"]["limit"] == 1000000
+
+
+def test_acp_and_text_usage_only_when_reported():
+    defs = registry.builtin_definitions()
+    acp = adapters.make(defs["dsh"], adapters.AdapterOptions(binary="x", workdir="/w"))
+    acp.start()
+    acp.feed(json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"agentCapabilities": {}}}))
+    acp.feed(json.dumps({"jsonrpc": "2.0", "id": 2, "result": {"sessionId": "s1"}}))
+    acp.begin_turn("hi")
+    events = acp.feed(json.dumps({"jsonrpc": "2.0", "id": 3, "result": {"stopReason": "end_turn"}}))
+    assert [e["type"] for e in events] == ["status"], "no data: no usage event"
+    acp.begin_turn("again")
+    events = acp.feed(json.dumps({"jsonrpc": "2.0", "id": 4, "result": {
+        "stopReason": "end_turn", "usage": {"inputTokens": 400, "outputTokens": 20}}}))
+    # §16.3: only the turn's tokens -- they are not the context's size, so no context figures
+    assert events[0] == {"type": "usage", "context": {"used": None, "limit": None, "model": None},
+                         "turn": {"input": 400, "output": 20}}
+    acp.begin_turn("third")
+    update = acp.feed(json.dumps({"jsonrpc": "2.0", "method": "session/update", "params": {
+        "sessionId": "s1", "update": {"sessionUpdate": "usage_update", "used": 5000, "size": 128000}}}))
+    assert update == [{"type": "usage", "context": {"used": 5000, "limit": 128000, "model": None}}]
+    events = acp.feed(json.dumps({"jsonrpc": "2.0", "id": 5, "result": {"stopReason": "end_turn"}}))
+    assert events[0]["context"] == {"used": 5000, "limit": 128000, "model": None} and events[-1]["type"] == "status"
+
+    text = adapters.make(registry.AgentDef(kind="x", label="X", binaries=("x",), command=["{bin}", "{prompt}"]),
+                         adapters.AdapterOptions(binary="x", workdir="/w"))
+    text.argv("hi")
+    assert text.feed('{"type": "message", "text": "hey"}') == [{"type": "message", "role": "assistant", "text": "hey"}]
+    events = text.feed('{"type": "result", "usage": {"input_tokens": 30, "output_tokens": 4}, "model": "m1"}')
+    assert events == [{"type": "usage", "context": {"used": None, "limit": None, "model": "m1"},
+                       "turn": {"input": 30, "output": 4}}]
 
 
 async def test_codex_long_prompt_goes_through_stdin(runs, work, tmp_path, monkeypatch):
@@ -594,12 +704,19 @@ def test_codex_nonfatal_error_is_one_warning_per_turn():
     note = "Codex is ignoring 1 unrecognized configuration setting."
     adapter.feed('{"type": "turn.started"}')
     first = adapter.feed(json.dumps({"type": "item.completed", "item": {"id": "e", "type": "error", "message": note}}))
-    assert first == [{"type": "error", "level": "warn", "text": note}]
+    assert first == [{"type": "error", "level": "notice", "text": note}]  # the CLI's own config: a notice (§16.6)
     assert adapter.feed(json.dumps({"type": "error", "message": note})) == []
     adapter.feed('{"type": "turn.completed", "usage": {}}')
     adapter.feed('{"type": "turn.started"}')
     assert adapter.feed(json.dumps({"type": "error", "message": note})) == []  # held for one line
-    assert adapter.feed('{"type": "turn.completed", "usage": {}}')[0]["level"] == "warn"
+    assert adapter.feed('{"type": "turn.completed", "usage": {}}')[0]["level"] == "notice"
+    adapter.feed('{"type": "turn.started"}')
+    for text in ("unrecognized configuration key `foo` in config.toml",
+                 "`experimental_use_rmcp_client` is deprecated; use `[features].rmcp_client`"):
+        events = adapter.feed(json.dumps({"type": "item.completed", "item": {"type": "error", "message": text}}))
+        assert events == [{"type": "error", "level": "notice", "text": text}]
+    other = adapter.feed(json.dumps({"type": "item.completed", "item": {"type": "error", "message": "stream lost"}}))
+    assert other == [{"type": "error", "level": "warn", "text": "stream lost"}]
 
 def test_approve_mcp_protocol(monkeypatch, capsys):
     monkeypatch.setattr(approve_mcp, "decide", lambda url, token, arguments, **_: {"behavior": "allow",

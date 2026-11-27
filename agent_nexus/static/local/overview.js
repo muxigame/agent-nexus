@@ -1,14 +1,14 @@
-// 本机 · 概览 (docs/ui-spec.md §4.1, docs/agent-chat.md §11): the agent chat on top, then cloud link, plugins,
-// app, recent mail. Regions refresh on their own: the 10 s poll redraws the head and the summary, never the chat.
+// 本机 · 概览 (docs/ui-spec.md §4.1, docs/agent-chat.md §16.1): the 对话 card (recent sessions → #/chat), cloud
+// link, plugins, app, recent mail. The 10 s poll redraws the head and the summary; the card reads every 30 s.
 import { el, mount, icon, fetchJSON, toast, pill, relTime, errorState, supervisorText } from "/ui/ui.js";
 import { hubHost } from "/ui/invite.js";
-import { mountChat } from "/ui/chat.js";
-import { localAgentApi, loginHandler } from "/ui/agent-wire.js";
+import { chatCard } from "/ui/chat-page.js";
+import { localAgentApi } from "/ui/agent-wire.js";
 
 const JOIN_HINT_KEY = "anx-local-join-hint-hidden";
 const PROBLEM = new Set(["needs_config", "crashed", "conflict", "invalid", "unhealthy"]);
 
-/** The Overview's head: on a phone only its primary action stays, so the chat starts higher up. */
+/** The Overview's head: on a phone only its primary action stays. */
 function overviewHead(node) { node.classList.add("overview-head"); return node; }
 
 function head(title, text, actions = []) {
@@ -19,13 +19,11 @@ function head(title, text, actions = []) {
 export async function overviewPage(ctx) {
   const { page } = ctx;
   const headHolder = el("div", { style: { display: "contents" } }, overviewHead(head("这台电脑", "正在读取…")));
-  const chatHolder = el("div", { class: "overview-chat" });
   const summaryHolder = el("div", { style: { display: "contents" } }, el("div", { class: "grid cols-4" },
     Array.from({ length: 4 }, () => el("div", { class: "card stat" }, el("span", { class: "skeleton w-40" }), el("span", { class: "skeleton title w-60" })))));
-  mount(page, headHolder, chatHolder, summaryHolder);
-  // The chat is mounted once: in process for 本机, so it works with the cloud disconnected.
-  const chat = mountChat(chatHolder, localAgentApi(), { onLogin: loginHandler({ local: true }) });
-  ctx.onLeave(() => chat.destroy());
+  mount(page, headHolder, summaryHolder);
+  // Created once (in process for 本机, so it works with the cloud disconnected); each redraw re-places it.
+  const chat = chatCard({ api: localAgentApi(), local: true });
 
   async function load() {
     let services, plugins, cloud, inbox = null, autostart = { enabled: null };
@@ -40,7 +38,8 @@ export async function overviewPage(ctx) {
     if (cloud.state === "connected") { try { inbox = await fetchJSON("/api/inbox/threads", { quiet: true }); } catch { inbox = null; } }
     try { autostart = await fetchJSON("/api/app/autostart", { quiet: true }); } catch { /* not the desktop app */ }
     // No redirect to 连接云端 on a first visit: the chat with this computer's CLIs works without a gateway, so
-    // the Overview stays, with a dismissible line under the chat about what joining adds.
+    // the Overview stays, with a dismissible line about what joining adds.
+    chat.refresh();
     render(services.manager, plugins, cloud, inbox, autostart);
   }
 
@@ -122,6 +121,7 @@ export async function overviewPage(ctx) {
 
     mount(headHolder, overviewHead(
       head("这台电脑", sentence, [
+        el("a", { class: "btn", href: "#/chat" }, icon("message-square", { size: 16 }), "对话"),
         el("a", { class: "btn", href: "#/agent" }, icon("sliders-horizontal", { size: 16 }), "Agent 设置"),
         el("a", { class: "btn", href: "#/cloud" }, icon("cloud", { size: 16 }), "连接云端"),
         el("a", { class: "btn btn-primary", href: "#/plugins?open=install" }, icon("plus", { size: 16 }), "安装插件")])));
@@ -146,7 +146,7 @@ export async function overviewPage(ctx) {
         stat("#/inbox", "inbox", "未读邮件", unread, "", inbox ? "Agent 发给 me 的" : "需要连接网关"),
         stat("#/inbox", "circle-question-mark", "待回答", asks, "", asks ? "Agent 在等你的回答" : "没有待回答的问题")),
       el("div", { class: "grid side" },
-        el("div", { class: "stack lg" }, pluginsCard, inboxCard),
+        el("div", { class: "stack lg" }, chat.node, pluginsCard, inboxCard),
         el("div", { class: "stack lg" }, cloudCard, appCard)));
   }
 

@@ -8,6 +8,7 @@ Reads stream-json user messages on stdin, answers in stream-json. What a turn do
   "die"      -- writes to stderr and exits 3
   "sysprompt"-- answers with the --append-system-prompt value
   otherwise  -- "echo: <text>" (token deltas with --include-partial-messages)
+Replies carry usage and the result modelUsage (§16.3).
 Environment: FAKE_ARGV_LOG (append argv as JSON), FAKE_OLD_CLAUDE=1 (reject --include-partial-messages).
 """
 import json
@@ -79,7 +80,10 @@ def ask_approval(tool, data):
 
 def result(text, error=False, subtype="success"):
     emit({"type": "result", "subtype": subtype, "is_error": error, "result": text, "session_id": session,
-          "total_cost_usd": 0.0123, "usage": {"input_tokens": 10, "cache_read_input_tokens": 2, "output_tokens": 5}})
+          "total_cost_usd": 0.0123, "usage": {"input_tokens": 10, "cache_read_input_tokens": 2, "output_tokens": 5},
+          "modelUsage": {"fake-haiku": {"inputTokens": 1, "outputTokens": 1, "contextWindow": 100000},
+                         "fake-model": {"inputTokens": 10, "outputTokens": 5, "cacheReadInputTokens": 2,
+                                        "contextWindow": 1000000, "costUSD": 0.0123}}})
 
 
 def say(text, msg_id):
@@ -97,8 +101,14 @@ def say(text, msg_id):
         for piece in (text[:half], text[half:]):
             emit({"type": "stream_event", "event": {"type": "content_block_delta", "index": 1,
                                                     "delta": {"type": "text_delta", "text": piece}}})
-    emit({"type": "assistant", "session_id": session, "unknown_field": 1,
-          "message": {"id": msg_id, "role": "assistant", "content": [{"type": "text", "text": text}]}})
+    emit({"type": "assistant", "session_id": session, "parent_tool_use_id": "toolu_sub", "message": {
+        "id": msg_id + "sub", "model": "fake-haiku", "role": "assistant", "content": [],
+        "usage": {"input_tokens": 999999, "output_tokens": 1}}})  # a subagent's: not this context
+    emit({"type": "assistant", "session_id": session, "unknown_field": 1, "parent_tool_use_id": None,
+          "message": {"id": msg_id, "model": "fake-model", "role": "assistant",
+                      "content": [{"type": "text", "text": text}],
+                      "usage": {"input_tokens": 3, "cache_read_input_tokens": 1000, "cache_creation_input_tokens": 200,
+                                "output_tokens": 40}}})
 
 
 threading.Thread(target=reader, daemon=True).start()

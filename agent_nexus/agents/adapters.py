@@ -17,10 +17,11 @@ from __future__ import annotations
 import difflib
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import registry
+from . import registry, sessions
 from .registry import AgentDef
 
 TOOL_OUTPUT_MAX = 8000
@@ -44,6 +45,9 @@ class AdapterOptions:
     #: claude: ask for token deltas (``--include-partial-messages``); dropped again if the CLI is too old
     partial: bool = True
     extra: dict[str, Any] = field(default_factory=dict)
+    #: codex: ``(session_id) -> {used, limit, model, turn} | None`` from the thread's rollout (§16.3); set by the
+    #: runner, which knows the run-as HOME and environment
+    context_lookup: Callable[[str], dict | None] | None = None
 
 
 def trunc(text: Any, limit: int) -> str:
@@ -131,6 +135,18 @@ def _usage(raw: Any, cost: Any = None) -> dict:
     if isinstance(cost, (int, float)) and not isinstance(cost, bool):
         usage["cost_usd"] = round(float(cost), 6)
     return usage
+
+
+def _turn_has_tokens(turn: dict | None) -> bool:
+    return bool(turn) and any(turn.get(key) for key in ("input", "output", "cached"))
+
+
+def _context_event(used: int | None, limit: int | None, model: Any, turn: dict | None) -> list[dict]:
+    """One §16.3 ``usage`` event, or none when there is nothing to show."""
+    if not used and not limit and not _turn_has_tokens(turn):
+        return []
+    turn = {key: value for key, value in (turn or {}).items() if key in ("input", "output", "cached", "cost_usd")}
+    return [sessions.usage_event(used or None, limit, model, turn or None)]
 
 
 class Adapter:
@@ -258,6 +274,8 @@ class ClaudeStream(Adapter):
         self._last_user: bytes | None = None
         self._approvals: dict[str, dict] = {}  # can_use_tool control requests (stdio permission prompts)
         self._interrupt_n = 0
+        self.model: str | None = None
+        self._context_used: int | None = None  # the last main-chain assistant message's usage (§16.3)
 
     def argv(self, prompt: str | None = None) -> list[str]:
         template = "resume_command" if self.session_id and self.d.resume_command else "command"
@@ -319,6 +337,8 @@ class ClaudeStream(Adapter):
             events.append({"type": "status", "state": "running" if self.turn_active else "idle",
                            "session_id": self.session_id})
         if kind == "system":
+            if obj.get("subtype") == "init" and isinstance(obj.get("model"), str) and obj["model"]:
+                self.model = obj["model"]
             if obj.get("subtype") == "init" and not events:
                 events.append({"type": "status", "state": "running" if self.turn_active else "idle",
                                "session_id": self.session_id, "model": obj.get("model")})
@@ -326,6 +346,8 @@ class ClaudeStream(Adapter):
         if kind == "stream_event":
             return events + self._stream_event(obj.get("event"))
         if kind == "assistant":
+            if not obj.get("parent_tool_use_id"):  # a subagent's messages are not this context
+                self._note_context(obj.get("message"))
             return events + self._assistant(obj.get("message"))
         if kind == "user":
             return events + self._user(obj.get("message"))
@@ -393,6 +415,31 @@ class ClaudeStream(Adapter):
                                "input": _small(data), "status": "running"})
         return events
 
+    def _note_context(self, message: Any) -> None:
+        if not isinstance(message, dict):
+            return
+        if isinstance(message.get("model"), str) and message["model"] and message["model"] != "<synthetic>":
+            self.model = message["model"]
+        used = sessions.claude_context_used(message.get("usage"))
+        if used:
+            self._context_used = used
+
+    def _context(self, obj: dict, turn: dict) -> list[dict]:
+        """The turn's ``usage`` event: the window from ``result.modelUsage[<model>].contextWindow``."""
+        model_usage = obj.get("modelUsage") if isinstance(obj.get("modelUsage"), dict) else {}
+        entries = {str(name): entry for name, entry in model_usage.items() if isinstance(entry, dict)}
+        model, entry = self.model, None
+        if model:
+            base = model.split("[")[0]
+            entry = entries.get(model) or next((e for name, e in entries.items() if name.split("[")[0] == base), None)
+        if entry is None and entries:  # the model that did most of the work
+            name = max(entries, key=lambda key: sum(sessions._int(entries[key].get(k)) for k in (
+                "inputTokens", "outputTokens", "cacheReadInputTokens", "cacheCreationInputTokens")))
+            entry, model = entries[name], model or name
+        entry = entry or {}
+        limit = sessions._int(entry.get("contextWindow")) or sessions.context_window(model, self._context_used)
+        return _context_event(self._context_used, limit, model, turn)
+
     def _find_block(self, message_id: str, kind: Any, block: dict, position: int) -> str:
         """The id the deltas of this block used. Partial assistant messages carry one block each, so the
         block's position in the message is not its index: match on the streamed text instead."""
@@ -422,11 +469,11 @@ class ClaudeStream(Adapter):
 
     def _result(self, obj: dict) -> list[dict]:
         usage = _usage(obj.get("usage"), obj.get("total_cost_usd", obj.get("cost_usd")))
-        events: list[dict] = []
+        events: list[dict] = self._context(obj, usage)
         was_stopping = self.stopping
         self.turn_active, self.stopping = False, False
         if was_stopping:
-            return [{"type": "status", "state": "stopped", "session_id": self.session_id, "usage": usage}]
+            return events + [{"type": "status", "state": "stopped", "session_id": self.session_id, "usage": usage}]
         if obj.get("is_error") or (isinstance(obj.get("subtype"), str) and obj["subtype"].startswith("error")):
             text = obj.get("result") if isinstance(obj.get("result"), str) else ""
             reason = {"error_max_turns": "达到了最大轮数", "error_during_execution": "执行中出错"}.get(
@@ -439,7 +486,7 @@ class ClaudeStream(Adapter):
             events.append({"type": "error", "text": text or reason or f"{self.d.label} 这一轮没有成功完成"})
             events.append({"type": "status", "state": "failed", "session_id": self.session_id, "usage": usage})
             return events
-        return [{"type": "status", "state": "done", "session_id": self.session_id, "usage": usage}]
+        return events + [{"type": "status", "state": "done", "session_id": self.session_id, "usage": usage}]
 
     # -- stdio permission prompts (``--permission-prompt-tool stdio``); harmless when they never come
     def _control_request(self, obj: dict) -> list[dict]:
@@ -589,8 +636,9 @@ class CodexExec(Adapter):
         if kind == "turn.completed":
             self._turn_done = True
             stopping, self.turn_active, self.stopping = self.stopping, False, False
-            return [{"type": "status", "state": "stopped" if stopping else "done",
-                     "session_id": self.session_id, "usage": _usage(obj.get("usage"))}]
+            usage = _codex_turn_usage(obj.get("usage"))
+            return self._context(usage) + [{"type": "status", "state": "stopped" if stopping else "done",
+                                            "session_id": self.session_id, "usage": usage}]
         if kind == "turn.failed":
             self._turn_done, self.turn_active, self.stopping = True, False, False
             error = obj.get("error") if isinstance(obj.get("error"), dict) else {}
@@ -605,6 +653,10 @@ class CodexExec(Adapter):
     def _item(self, item: dict, phase: str) -> list[dict]:
         kind = item.get("type") or item.get("item_type")
         item_id = str(item.get("id") or "")
+        if item_id and self.turns > 1:
+            # every ``codex exec`` process numbers its items from item_0 again: without the turn, the second
+            # turn's tool calls would update the first turn's cards instead of showing up as their own
+            item_id = f"{item_id}.t{self.turns}"
         done = phase == "completed"
         if kind in ("agent_message", "assistant_message"):
             text = item.get("text") if isinstance(item.get("text"), str) else text_of(item.get("content"))
@@ -669,16 +721,45 @@ class CodexExec(Adapter):
             return self._warn(str(item.get("message") or "Codex 报告了一个错误")) if done else []
         return []
 
+    def _context(self, turn: dict) -> list[dict]:
+        """The turn's ``usage`` event (§16.3): the rollout's latest ``token_count`` when the runner can find it
+        (window and the last request's tokens), else this turn's tokens and the built-in model table."""
+        found = None
+        lookup = self.opts.context_lookup
+        if lookup is not None and self.session_id:
+            try:
+                found = lookup(self.session_id)
+            except (OSError, ValueError, TypeError):  # a rollout we cannot read never breaks the turn
+                found = None
+        found = found or getattr(self, "_legacy_context", None) or {}
+        model = found.get("model") or self._model_arg()
+        used = found.get("used")
+        if used is None and _turn_has_tokens(turn):
+            used = int(turn.get("input") or 0) + int(turn.get("output") or 0)
+        limit = found.get("limit") or sessions.context_window(model)
+        return _context_event(used, limit, model, turn if _turn_has_tokens(turn) else found.get("turn"))
+
+    def _model_arg(self) -> str | None:
+        """The model this run asked for: ``-m`` / ``--model`` or ``-c model=…`` in the command template."""
+        argv = list(self.d.command or [])
+        for index, item in enumerate(argv[:-1]):
+            if item in ("-m", "--model") and "{" not in argv[index + 1]:
+                return argv[index + 1]
+            if item == "-c" and argv[index + 1].startswith("model="):
+                return argv[index + 1].split("=", 1)[1].strip().strip('"')
+        return None
+
     def _warn(self, text: str) -> list[dict]:
         """Codex's ``error`` events and items are non-fatal (a failed turn comes as ``turn.failed``) and the same
-        notice (e.g. "ignoring 1 unrecognized configuration setting") arrives as both: once per turn, as a warning."""
+        notice (e.g. "ignoring 1 unrecognized configuration setting") arrives as both: once per turn. Notes about
+        the CLI's own configuration are ``notice`` (§16.6), anything else a warning."""
         seen = getattr(self, "_warned", None)
         if seen is None:
             seen = self._warned = set()
         if text in seen:
             return []
         seen.add(text)
-        return [{"type": "error", "level": "warn", "text": text}]
+        return [{"type": "error", "level": "notice" if _codex_config_notice(text) else "warn", "text": text}]
 
     def _legacy(self, msg: dict) -> list[dict]:
         kind = msg.get("type")
@@ -699,9 +780,14 @@ class CodexExec(Adapter):
             output = msg.get("aggregated_output") or msg.get("stdout") or ""
             return [{"type": "tool", "id": str(msg.get("call_id") or ""), "status": "ok" if code == 0 else "error",
                      "output": trunc(output, TOOL_OUTPUT_MAX)}]
+        if kind == "token_count":
+            found = sessions.codex_token_info(msg.get("info"))
+            if found is not None:
+                self._legacy_context = found
+            return []
         if kind == "task_complete":
             self._turn_done, self.turn_active, self.stopping = True, False, False
-            return [{"type": "status", "state": "done", "session_id": self.session_id}]
+            return self._context({}) + [{"type": "status", "state": "done", "session_id": self.session_id}]
         if kind == "error":
             return [{"type": "error", "text": str(msg.get("message") or "Codex 报告了一个错误")}]
         return []
@@ -711,6 +797,24 @@ class CodexExec(Adapter):
         if self._turn_done:  # turn.completed / turn.failed already closed the turn
             return [held] if held else []
         return ([held] if held else []) + super().exited(code, stderr_tail)
+
+
+_CODEX_CONFIG_NOTICE = re.compile(r"codex is ignoring|unrecognized configuration|unknown configuration|"
+                                  r"deprecat|config(?:uration)?\.toml", re.IGNORECASE)
+
+
+def _codex_config_notice(text: str) -> bool:
+    """Whether a Codex error is a note about the CLI's own configuration (§16.6)."""
+    return bool(_CODEX_CONFIG_NOTICE.search(text or ""))
+
+
+def _codex_turn_usage(raw: Any) -> dict:
+    """``turn.completed.usage``: Codex's ``input_tokens`` already include ``cached_input_tokens``."""
+    raw = raw if isinstance(raw, dict) else {}
+    usage = {"input": sessions._int(raw.get("input_tokens")), "output": sessions._int(raw.get("output_tokens"))}
+    if sessions._int(raw.get("cached_input_tokens")):
+        usage["cached"] = sessions._int(raw.get("cached_input_tokens"))
+    return usage
 
 
 def _codex_status(status: Any, exit_code: Any, done: bool) -> str:
@@ -916,8 +1020,19 @@ class Acp(Adapter):
                 events.append({"type": "error", "text": f"{self.d.label} 拒绝了这个请求"})
             elif reason in ("max_tokens", "max_turn_requests"):
                 events.append({"type": "error", "text": f"{self.d.label} 这一轮达到了上限（{reason}）"})
+            events += self._context(usage)
             return events + [status]
         return []
+
+    def _context(self, turn: dict | None) -> list[dict]:
+        """ACP: the agent's own ``usage_update`` (used / size) when it sent one this turn, else only the turn's
+        tokens (§16.3: ``context.used`` and ``limit`` null -- a turn's tokens are not the context's size)."""
+        reported, self._reported = getattr(self, "_reported", None), None
+        if reported:
+            return _context_event(reported["used"], reported["limit"], None, turn)
+        if not _turn_has_tokens(turn):
+            return []
+        return _context_event(None, None, None, turn)
 
     def _drain_notices(self) -> list[dict]:
         events = [{"type": "error", "text": text, "level": "warn"} for text in self.notices]
@@ -994,6 +1109,12 @@ class Acp(Adapter):
                      for entry in entries if isinstance(entry, dict)]
             return [{"type": "tool", "id": "plan", "name": "plan", "title": "计划", "status": "ok",
                      "output": "\n".join(lines)}]
+        if kind == "usage_update":  # ACP's (unstable) context report: {used, size, cost?}
+            used, size = sessions._int(update.get("used")), sessions._int(update.get("size"))
+            if not used and not size:
+                return []
+            self._reported = {"used": used, "limit": size or None}
+            return _context_event(used, size or None, None, None)
         return []
 
     def _tool(self, update: dict, new: bool) -> list[dict]:
@@ -1104,6 +1225,12 @@ class Text(Adapter):
 
     def _json_line(self, obj: dict) -> list[dict]:
         events: list[dict] = []
+        raw_usage = obj.get("usage") if isinstance(obj.get("usage"), dict) else None
+        if raw_usage is not None:  # headless --json style token counts: only the turn's, no context figures
+            turn = _usage(raw_usage)
+            if _turn_has_tokens(turn):
+                model = obj.get("model") if isinstance(obj.get("model"), str) else None
+                events += _context_event(None, None, model, turn)
         for key in _SESSION_KEYS:
             value = obj.get(key)
             if isinstance(value, str) and value and value != self.session_id:
@@ -1146,6 +1273,9 @@ def make(d: AgentDef, opts: AdapterOptions, *, adapter: str | None = None) -> Ad
         return CodexExec(d, opts)
     if name == "acp":
         return Acp(d, opts)
+    if name == "api":  # an API model (§16.4): the agent loop runs in process, no CLI
+        from .api.loop import ApiAdapter
+        return ApiAdapter(d, opts)
     return Text(d, opts)
 
 

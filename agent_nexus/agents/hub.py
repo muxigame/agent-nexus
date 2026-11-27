@@ -24,6 +24,8 @@ from typing import Any
 
 from . import prompts as prompts_mod
 from . import registry, sessions, workdirs
+from .api import config as api_config
+from .api import service as api_service
 from .installs import InstallError, Installs
 from .prompts import Prompts
 from .runner import RunError, Runs, _within
@@ -41,11 +43,12 @@ OPS: tuple[str, ...] = (
     "agent_run_list",
     "agent_dirs", "agent_prompts", "agent_prompt_save", "agent_prompt_preview",
     "agent_tmp_list", "agent_tmp_clean",
+    *api_service.OPS,
 )
 READ_WAIT_S = 20.0
 #: How long a forwarded call may take before the caller gives up waiting (it is never cancelled).
 CALL_TIMEOUT_S = {"agent_info": 45.0, "agent_install": 45.0, "agent_sessions": 45.0, "agent_session_read": 45.0,
-                  "agent_run_open": 60.0}
+                  "agent_run_open": 60.0, "agent_api_test": 45.0, "agent_api_models": 45.0}
 DEFAULT_TIMEOUT_S = 30.0
 SWEEP_EVERY_S = 6 * 3600.0
 NO_GATEWAY_NOTE = "无网关：ask_user / 邮件暂不可用，对话本身不受影响"
@@ -120,12 +123,19 @@ class AgentHub:
         self.runs.on_session = self._on_session
         self.runs.on_close = self._on_close
         self.tmp = TmpDirs(self.root, active=lambda: set(self.runs.runs))
+        #: API providers as agents (§16.4): kinds ``api:<provider>/<model>``, in-process runs
+        self.api = api_service.ApiAgents(self.root, config=self._config, gateway=self._gateway_call,
+                                         env=lambda: self._env(self._account()))
         self._sweeper: asyncio.Task | None = None
         self._last_sweep = 0.0
         self._releases: set[asyncio.Task] = set()
 
     # -- context -------------------------------------------------------------------------------------------
     def definitions(self) -> dict[str, registry.AgentDef]:
+        """The CLIs and the enabled API models (``api:<provider>/<model>``)."""
+        return {**self.cli_definitions(), **self.api.defs()}
+
+    def cli_definitions(self) -> dict[str, registry.AgentDef]:
         try:
             return registry.definitions(self._config())
         except Exception:
@@ -266,17 +276,21 @@ class AgentHub:
 
     # -- CLIs ------------------------------------------------------------------------------------------------
     async def agent_info(self, params: dict) -> dict:
-        defs = self.definitions()
+        await self.api.pull(force=bool(params.get("fresh")))
+        defs = self.cli_definitions()
+        api_defs = self.api.defs()
         account = self._account()
         env = self._env(account)
         kind = params.get("kind")
         if isinstance(kind, str) and kind:
-            if kind not in defs:
+            if kind not in defs and kind not in api_defs:
                 return _error(f"不认识的 Agent：{kind}", "unknown_kind")
-            defs = {kind: defs[kind]}
+            defs = {kind: defs[kind]} if kind in defs else {}
+            api_defs = {kind: api_defs[kind]} if kind in api_defs else {}
         fresh = bool(params.get("fresh"))
         probed = await asyncio.to_thread(registry.probe_all, defs, env, fresh=fresh, run_as=self._popen(account))
         agents = [registry.info(d, probed[k], self.installs.current(k)) for k, d in defs.items()]
+        api_agents = await asyncio.to_thread(self.api.info, set(api_defs))
         device = self._device()
         home = self._home(account, env)
         for item in agents:
@@ -284,6 +298,7 @@ class AgentHub:
                 item["gateway_mcp"] = registry.gateway_mcp(item["kind"], home, env, str(device.get("gateway") or ""))
             except Exception:  # noqa: BLE001 - a broken config file must not break agent_info
                 item["gateway_mcp"] = None
+        agents += api_agents
         return {"agents": agents, "device": {"id": device.get("id"), "name": device.get("name"),
                                              "os": prompts_mod.os_name()},
                 "account": getattr(account, "name", None), "home": str(self._home(account, env))}
@@ -328,10 +343,17 @@ class AgentHub:
         except (TypeError, ValueError):
             limit = 200
         known = [w["path"] for w in self._workspaces()] + [r["path"] for r in self.recent.list(limit=50)]
-        found = await asyncio.to_thread(
-            sessions.discover, defs, home, kind=kind, limit=limit, env=env, meta=self.meta,
+        query = params.get("query") if isinstance(params.get("query"), str) else None
+        cli_defs = {k: d for k, d in defs.items() if not api_config.is_api_kind(k)}
+        found = [] if kind and (kind == "api" or api_config.is_api_kind(kind)) else await asyncio.to_thread(
+            sessions.discover, cli_defs, home, kind=kind, limit=limit, env=env, meta=self.meta,
             include_hidden=bool(params.get("include_hidden")), include_blank=bool(params.get("include_blank")),
-            query=params.get("query") if isinstance(params.get("query"), str) else None, known_dirs=known)
+            query=query, known_dirs=known)
+        found += await asyncio.to_thread(
+            self.api.sessions, kind, meta=self.meta, include_hidden=bool(params.get("include_hidden")),
+            include_blank=bool(params.get("include_blank")), query=query, limit=limit)
+        if not kind:
+            found.sort(key=lambda s: (not s["pinned"], -(s["updated_at"] or 0)))
         running = {(run.kind, run.session_id): run for run in self.runs.runs.values() if run.session_id}
         cwd_ok: dict[str, bool] = {}
         items = []
@@ -362,8 +384,11 @@ class AgentHub:
         except (TypeError, ValueError):
             max_events = 2000
         try:
-            events = await asyncio.to_thread(sessions.read, defs, self._home(account, env), kind, session_id,
-                                             max_events=max_events, env=env)
+            if api_config.is_api_kind(kind):
+                events = await asyncio.to_thread(self.api.store.read_events, session_id, max_events=max_events)
+            else:
+                events = await asyncio.to_thread(sessions.read, defs, self._home(account, env), kind, session_id,
+                                                 max_events=max_events, env=env)
         except LookupError:
             return _error("找不到这个会话，它可能已经被删除", "not_found")
         entry = self.meta.get(kind, session_id)
@@ -376,6 +401,18 @@ class AgentHub:
         return result
 
     async def agent_session_meta(self, params: dict) -> dict:
+        if api_config.is_api_kind(params.get("kind")) and params.get("delete_file"):
+            session_id = str(params.get("id") or "")
+            if self._busy(str(params["kind"]), session_id):
+                return _error("这个会话正在运行，先停止再删除", "busy")
+            try:
+                deleted = await asyncio.to_thread(self.api.store.delete, session_id)
+            except LookupError:
+                deleted = False
+            if not deleted:
+                return _error("找不到这个会话的文件，可能已经被删除", "not_found")
+            self.meta.forget(str(params["kind"]), session_id)
+            return {"ok": True, "deleted": 1}
         account = self._account()
         env = self._env(account)
         return await asyncio.to_thread(sessions.meta_op, self.definitions(), self._home(account, env), self.meta,
@@ -435,7 +472,19 @@ class AgentHub:
         if not _within(workdir, self._roots()):
             return _error(f"工作目录不在允许的范围内：{workdir}", "workdir_not_allowed")
         run_env = self.runs._env(account, None)
-        binary = await asyncio.to_thread(registry.locate, d, run_env)
+        api_spec: dict | None = None
+        if d.adapter == "api":  # an API model (§16.4): no binary; its provider, model and key instead
+            try:
+                api_spec = self.api.run_spec(kind, run_env)
+            except LookupError as exc:
+                return _error(str(exc), "unknown_kind")
+            except PermissionError as exc:
+                return _error(str(exc), getattr(exc, "code", "no_key"))
+            if resume_id and not self.api.store.exists(resume_id) and self.meta.get(kind, resume_id) == {}:
+                return _error("找不到这个会话，它可能已经被删除", "not_found")
+            binary = "api"
+        else:
+            binary = await asyncio.to_thread(registry.locate, d, run_env)
         if not binary:
             return _error(f"这台设备上没有找到 {d.label}，可以先在 Agent 菜单里安装", "not_installed")
         rid = uuid.uuid4().hex[:12]
@@ -492,8 +541,11 @@ class AgentHub:
         console = {key: params[key] for key in ("kind", "workdir", "prompt", "resume_id", "permission", "title")
                    if key in params}
         console["workdir"] = workdir
-        extra: dict = {}
-        if mode == "gateway":
+        if api_spec is not None and handle:
+            # ask_user / mail_send of an API model (§16.4): through the gateway, as this run's mailbox address
+            api_spec.update(handle=handle, gateway=self._gateway_call)
+        extra: dict = {"api": api_spec} if api_spec is not None else {}
+        if mode == "gateway" and api_spec is None:
             try:
                 names = await asyncio.to_thread(registry.gateway_mcp_names, kind, self._home(account, run_env),
                                                 run_env, str(device.get("gateway") or ""))
@@ -631,6 +683,7 @@ class AgentHub:
             "agent_prompt_save": threaded(prompt_ops["agent_prompt_save"]),
             "agent_prompt_preview": threaded(prompt_ops["agent_prompt_preview"]),
             "agent_tmp_list": threaded(self.tmp.op_list), "agent_tmp_clean": threaded(self.tmp.op_clean),
+            **self.api.handlers(),
         }
         assert set(table) == set(OPS), set(table) ^ set(OPS)
         return {name: guard(name, table[name]) for name in OPS}

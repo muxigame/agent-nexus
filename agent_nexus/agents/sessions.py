@@ -1069,6 +1069,127 @@ def find(defs: Any, home: Path, kind: str, session_id: str, *, env: Mapping[str,
     return None
 
 
+# ============================================================================================ context usage (§16.3)
+
+#: Context windows by model-name prefix (longest prefix wins) when the CLI does not report one.
+MODEL_WINDOWS: dict[str, int] = {
+    "claude": 200_000,
+    "gpt-5": 272_000,
+    "gpt-4.1": 1_047_576,
+    "gpt-4o": 128_000,
+    "o3": 200_000,
+    "o4-mini": 200_000,
+    "codex-mini": 200_000,
+}
+#: A Codex rollout is read only this far from its end for its latest ``token_count``.
+ROLLOUT_TAIL_BYTES = 256 * 1024
+
+
+def _int(value: Any) -> int:
+    return int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0
+
+
+def context_window(model: Any, used: int | None = None) -> int | None:
+    """The built-in context window of ``model`` (None when unknown). A ``[1m]`` model, or a Claude context that
+    already holds more than 200K tokens, has the 1M window."""
+    if not isinstance(model, str) or not model.strip():
+        return None
+    name = model.strip().lower()
+    if name.endswith("[1m]"):
+        return 1_000_000
+    name = name.split("/")[-1]
+    best = max((prefix for prefix in MODEL_WINDOWS if name.startswith(prefix)), key=len, default=None)
+    if best is None:
+        return None
+    window = MODEL_WINDOWS[best]
+    if best == "claude" and used and used > window:
+        return 1_000_000
+    return window
+
+
+def usage_event(used: int | None, limit: int | None, model: Any = None, turn: dict | None = None) -> dict:
+    """The §16.3 ``usage`` event."""
+    event: dict[str, Any] = {"type": "usage", "context": {
+        "used": int(used) if used is not None else None, "limit": int(limit) if limit else None,
+        "model": str(model) if isinstance(model, str) and model else None}}
+    if turn:
+        event["turn"] = dict(turn)
+    return event
+
+
+def claude_context_used(usage: Any) -> int:
+    """What an assistant message's ``usage`` says the context holds: input + cache read + cache creation + output."""
+    usage = usage if isinstance(usage, dict) else {}
+    return sum(_int(usage.get(key)) for key in ("input_tokens", "cache_read_input_tokens",
+                                                "cache_creation_input_tokens", "output_tokens"))
+
+
+def codex_token_info(info: Any) -> dict | None:
+    """``{used, limit, turn}`` from a Codex ``token_count`` ``info`` (None when it carries nothing)."""
+    if not isinstance(info, dict):
+        return None
+    last = info.get("last_token_usage") if isinstance(info.get("last_token_usage"), dict) else None
+    limit = _int(info.get("model_context_window")) or None
+    out: dict[str, Any] = {"limit": limit, "used": None, "turn": None}
+    if last is not None:
+        out["used"] = _int(last.get("input_tokens")) + _int(last.get("output_tokens"))
+        turn = {"input": _int(last.get("input_tokens")), "output": _int(last.get("output_tokens"))}
+        if _int(last.get("cached_input_tokens")):
+            turn["cached"] = _int(last.get("cached_input_tokens"))
+        out["turn"] = turn
+    if out["used"] is None and limit is None:
+        return None
+    return out
+
+
+def codex_rollout(home: Path, env: Mapping[str, str] | None, session_id: str) -> Path | None:
+    """The rollout file of Codex thread ``session_id`` (the newest when several match), or None."""
+    if not isinstance(session_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{7,127}", session_id):
+        return None
+    env = _env(env)
+    globs = [g.replace("rollout-*.jsonl", f"rollout-*{session_id}.jsonl") for g in kind_globs(None)["codex"]]
+    found = _scan(globs, Path(home), env)
+    if not found:
+        return None
+    return max(found.values(), key=lambda item: item[1].st_mtime)[0]
+
+
+def codex_context(home: Path, env: Mapping[str, str] | None, session_id: str) -> dict | None:
+    """The latest context figures in a Codex thread's rollout, read from its tail only:
+    ``{used, limit, model, turn}`` (fields None when unknown), or None when there is no rollout / no figures."""
+    path = codex_rollout(home, env, session_id)
+    return codex_context_file(path) if path is not None else None
+
+
+def codex_context_file(path: Path) -> dict | None:
+    """:func:`codex_context` for a known rollout file."""
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as handle:
+            if size > ROLLOUT_TAIL_BYTES:
+                handle.seek(size - ROLLOUT_TAIL_BYTES)
+            data = handle.read(ROLLOUT_TAIL_BYTES)
+    except OSError:
+        return None
+    return _codex_context_of(_records(data, skip_first=size > ROLLOUT_TAIL_BYTES))
+
+
+def _codex_context_of(records: list[dict]) -> dict | None:
+    info: dict | None = None
+    model = None
+    for record in records:
+        kind, payload = _codex_payload(record)
+        if kind == "turn_context" and isinstance(payload.get("model"), str):
+            model = payload["model"]
+        elif kind == "event_msg" and payload.get("type") == "token_count":
+            found = codex_token_info(payload.get("info"))
+            if found is not None:
+                info = found
+    if info is None:
+        return None
+    return {**info, "model": model}
+
+
 # ============================================================================================ unified events (read)
 
 class _Builder:
@@ -1078,6 +1199,8 @@ class _Builder:
         self.events: list[dict] = []
         self.tools: dict[str, dict] = {}
         self.usage: dict[str, int] = {}
+        #: the latest context figures (§16.3): ``{used, limit, model, turn}``; one ``usage`` event at the end
+        self.context: dict | None = None
 
     def add(self, event: dict, t: float | None = None, *, join: bool = False) -> dict | None:
         if event.get("type") in ("user", "message", "thinking") and not str(event.get("text") or "").strip() \
@@ -1132,9 +1255,18 @@ class _Builder:
                     event["output"] = _clip(event["output"], OUTPUT_MAX)
             events.append(event)
         max_events = max(1, int(max_events or 2000))
-        if len(events) > max_events - 1:
-            dropped += len(events) - (max_events - 1)
-            events = events[-(max_events - 1):]
+        tail: list[dict] = []
+        if self.context and (self.context.get("used") is not None or self.context.get("limit")) and max_events > 1:
+            tail.append(usage_event(self.context.get("used"), self.context.get("limit"), self.context.get("model"),
+                                    self.context.get("turn")))
+        keep = max_events - 1 - len(tail)
+        if len(events) > keep:
+            dropped += len(events) - keep
+            events = events[-keep:] if keep else []
+        stamps = [e["t"] for e in events if e.get("t")]
+        if tail and stamps:
+            tail[0]["t"] = max(stamps)
+        events += tail
         status: dict[str, Any] = {"type": "status", "state": "idle", "session_id": session_id}
         usage = usage if usage is not None else self.usage
         if usage:
@@ -1142,7 +1274,6 @@ class _Builder:
                                "cost_usd": usage.get("cost_usd", 0)}
         if dropped:
             status["dropped"] = dropped
-        stamps = [e["t"] for e in events if e.get("t")]
         if stamps:
             status["t"] = max(stamps)
         events.append(status)
@@ -1224,6 +1355,16 @@ def _claude_feed(builder: _Builder, records: list[dict]) -> None:
             continue
         usage = message.get("usage") if isinstance(message.get("usage"), dict) else None
         key = message.get("id") or record.get("uuid")
+        if usage and claude_context_used(usage) and message.get("model") != "<synthetic>":
+            used = claude_context_used(usage)
+            model = message.get("model") if isinstance(message.get("model"), str) and message["model"] else \
+                (builder.context or {}).get("model")
+            turn = {"input": sum(_int(usage.get(k)) for k in (
+                "input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")),
+                "output": _int(usage.get("output_tokens"))}
+            if _int(usage.get("cache_read_input_tokens")):
+                turn["cached"] = _int(usage.get("cache_read_input_tokens"))
+            builder.context = {"used": used, "limit": context_window(model, used), "model": model, "turn": turn}
         if usage and key not in seen_usage:
             seen_usage.add(key)
             builder.count(input=sum(int(usage.get(k) or 0) for k in (
@@ -1321,14 +1462,24 @@ def _codex_output(raw: Any) -> tuple[str, bool]:
 
 def _codex_feed(builder: _Builder, records: list[dict]) -> dict:
     usage: dict = {}
+    model = None
     for record in records:
         kind, payload = _codex_payload(record)
         t = _ts(record.get("timestamp"))
+        if kind == "turn_context" and isinstance(payload.get("model"), str):
+            model = payload["model"]
+            if builder.context is not None:
+                builder.context["model"] = model
+            continue
         if kind == "event_msg":
             if payload.get("type") == "token_count" and isinstance(payload.get("info"), dict):
                 total = payload["info"].get("total_token_usage")
                 if isinstance(total, dict):
                     usage = {"input": int(total.get("input_tokens") or 0), "output": int(total.get("output_tokens") or 0)}
+                found = codex_token_info(payload["info"])
+                if found is not None:
+                    limit = found["limit"] or (builder.context or {}).get("limit") or context_window(model)
+                    builder.context = {**found, "limit": limit, "model": model}
             elif payload.get("type") == "error" and payload.get("message"):
                 builder.add({"type": "error", "text": str(payload["message"])}, t)
             continue
@@ -1377,6 +1528,8 @@ def _codex_feed(builder: _Builder, records: list[dict]) -> dict:
             action = payload.get("action") if isinstance(payload.get("action"), dict) else {}
             builder.tool(payload.get("id"), t, name="web_search", title=_title(str(action.get("query") or "")),
                          input=_shrink(action), status="error" if payload.get("status") == "failed" else "ok")
+    if builder.context is not None and not builder.context.get("limit"):
+        builder.context["limit"] = context_window(builder.context.get("model"))
     return usage
 
 

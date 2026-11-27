@@ -1,6 +1,7 @@
 // In-memory stand-in for the AgentHub ops (docs/agent-chat.md §2–§10), for the agent-chat / agent-prompts
 // mockups. Same adapter shape chat.js takes: {call(op, params, device), devices(), conversation(address), answerAsk(id, answer)}.
 // ?state=first → a device with no sessions yet; ?slow=1 → slower streaming.
+// Phase 2 (§16): `usage` events (context ring), `error` level notice / warn (§16.6), API models in agent_info (§16.4).
 
 const params = new URLSearchParams(location.search);
 const NOW = Date.now() / 1000;
@@ -21,6 +22,9 @@ function agentsFor(device) {
     { kind: "codex", label: "Codex", installed: true, path: device === "dev-win" ? "C:\\Users\\you\\AppData\\Roaming\\npm\\codex.cmd" : "/opt/homebrew/bin/codex", version: "codex-cli 0.172.0", login: "ok", gateway_mcp: false, supports: { resume: true, approvals: false, stream: true } },
     { kind: "dsh", label: "DeepSeek Harness", installed: false, path: null, version: null, login: "unknown", install: null, supports: { resume: true, approvals: true, stream: true } },
     { kind: "gemini", label: "Gemini CLI", installed: true, path: "/opt/homebrew/bin/gemini", version: "0.9.1", login: "missing", supports: { resume: true, approvals: true, stream: true } },
+    // §16.4: every enabled model of a provider is an Agent (adapter "api"); the picker lists them as 「API 模型」
+    { kind: "api:deepseek/deepseek-chat", label: "DeepSeek V3", adapter: "api", provider_label: "DeepSeek", installed: true, login: "ok", supports: { resume: true, approvals: true, stream: true } },
+    { kind: "api:openai/gpt-4.1", label: "GPT-4.1", adapter: "api", provider_label: "OpenAI", installed: true, login: "missing", supports: { resume: true, approvals: true, stream: true } },
   ];
 }
 
@@ -34,6 +38,7 @@ const SESSIONS = params.get("state") === "first" ? [] : [
   { kind: "gemini", id: "g-5521", title: "总结这周的会议记录", cwd: `${HOME}/notes`, updated_at: NOW - 86400 * 4, messages: 6 },
   { kind: "claude", id: "c-77aa", title: "重构 mailbox 的存储层", cwd: `${P}/agent-nexus`, updated_at: NOW - 86400 * 12, messages: 88, archived: true },
   { kind: "codex", id: "x-3b3b", title: "试验：用 uv 管理依赖", cwd: `${P}/sandbox`, updated_at: NOW - 86400 * 20, messages: 4, archived: true },
+  { kind: "api:deepseek/deepseek-chat", id: "a-0c11", title: "解释一下 SSE 和 WebSocket 的取舍", cwd: `${P}/agent-nexus`, updated_at: NOW - 86400 * 1.6, messages: 4 },
 ];
 
 const DIFF = `@@ -41,9 +41,12 @@ async def oauth_callback(request):
@@ -58,7 +63,19 @@ const HISTORY = {
     { type: "tool", id: "t2", name: "Grep", title: "SameSite|session_cookie", status: "ok", input: { pattern: "SameSite|session_cookie", path: "agent_nexus" }, output: "agent_nexus/web.py:88:    same_site=\"strict\",\nagent_nexus/web.py:89:    https_only=True,", t: NOW - 1385 },
     { type: "message", role: "assistant", text: "找到原因了：会话 cookie 用的是 `SameSite=Strict`。从 GitHub 授权页跳回来属于**跨站导航**，浏览器不会带上这个 cookie，于是回调里读不到 `oauth_state`，直接跳回了登录页。\n\n只有在你之前没有打开过控制台的情况下才会发生，所以看起来是“偶尔”。我先把回调的校验改得更严谨，并在失败时记录日志：", t: NOW - 1380 },
     { type: "file_change", path: "agent_nexus/auth.py", kind: "edit", diff: DIFF, t: NOW - 1370 },
+    { type: "usage", context: { used: 612400, limit: 1000000, model: "claude-opus-4-5" }, turn: { input: 18240, output: 2130, cached: 410000, cost_usd: 0.083 }, t: NOW - 1361 },
     { type: "status", state: "done", usage: { input: 18240, output: 2130, cost_usd: 0.083 }, t: NOW - 1360 },
+  ],
+  // Codex: its own config hints arrive as level "notice" (grey, once per session); a warn stays yellow (§16.6)
+  "x-9e01": [
+    { type: "user", text: "整理 CHANGELOG 并准备 0.3.0 发布说明", t: NOW - 9000 },
+    { type: "error", level: "notice", text: "Codex is ignoring `model_reasoning_summary_format` in ~/.codex/config.toml: unrecognized configuration setting\nRemove it, or upgrade Codex to a version that knows it.", t: NOW - 8999 },
+    { type: "error", level: "notice", text: "Codex is ignoring `model_reasoning_summary_format` in ~/.codex/config.toml: unrecognized configuration setting\nRemove it, or upgrade Codex to a version that knows it.", t: NOW - 8998 },
+    { type: "error", level: "warn", text: "经网关模式下没有检测到 Agent Nexus 连接器：ask_user / mail_send 不可用", t: NOW - 8997 },
+    { type: "message", role: "assistant", text: "CHANGELOG 已按版本整理好，0.3.0 的发布说明草稿放在 `docs/release-0.3.0.md`。", t: NOW - 8900 },
+    { type: "error", level: "notice", text: "Codex is ignoring `model_reasoning_summary_format` in ~/.codex/config.toml: unrecognized configuration setting\nRemove it, or upgrade Codex to a version that knows it.", t: NOW - 8899 },
+    { type: "usage", context: { used: 48200, limit: null, model: "gpt-5.1-codex" }, turn: { input: 46100, output: 2100 }, t: NOW - 8890 },
+    { type: "status", state: "done", t: NOW - 8889 },
   ],
 };
 
@@ -73,6 +90,7 @@ const RUN_EVENTS = [
   { type: "message", role: "assistant", text: "测试全部通过（412 个通过，3 个跳过）。", delta: false },
   { type: "message", role: "assistant", text: "改动摘要：\n\n1. 回调里用 `secrets.compare_digest` 校验 state，", delta: true },
   { type: "message", role: "assistant", text: "取出后立即作废，防止重放\n2. 校验失败时记录日志，并带上 `?error=state` 让登录页给出提示\n3. 登录成功后先 `session.clear()` 再写入用户，避免会话固定\n\n接下来推送分支：\n\n```bash\ngit push -u origin fix/oauth-callback\n```", delta: true },
+  { type: "usage", context: { used: 872100, limit: 1000000, model: "claude-opus-4-5" } },
   { type: "approval", id: "ap-1", tool: "Bash", summary: "git push -u origin fix/oauth-callback", state: "pending", remember: true },
 ];
 
@@ -210,7 +228,8 @@ export function createFakeApi({ activeRun = true } = {}) {
       script(run, allow ? [
         { type: "tool", id: "t9", name: "Bash", title: "git push -u origin fix/oauth-callback", status: "ok", input: { command: "git push -u origin fix/oauth-callback" }, output: "To github.com:lin/agent-nexus.git\n * [new branch]      fix/oauth-callback -> fix/oauth-callback" },
         { type: "message", role: "assistant", text: "已推送到 `fix/oauth-callback`。要开 PR 的话告诉我。" },
-        { type: "status", state: "done", usage: { input: 9620, output: 840, cost_usd: 0.031 } },
+        { type: "usage", context: { used: 961300, limit: 1000000, model: "claude-opus-4-5" }, turn: { input: 9620, output: 840, cached: 880000, cost_usd: 0.031 } },
+        { type: "status", state: "done" },
       ] : [{ type: "message", role: "assistant", text: "好的，没有推送。改动还在工作区里。" }, { type: "status", state: "done", usage: { input: 2100, output: 60, cost_usd: 0.006 } }]);
       return { ok: true };
     },
@@ -254,8 +273,10 @@ export function createFakeApi({ activeRun = true } = {}) {
     },
   };
 
+  let demoUsed = 21000;
   function demoReply(prompt) {
     const short = String(prompt || "").slice(0, 40);
+    demoUsed += 3420;
     return [
       { type: "status", state: "running" },
       { type: "thinking", text: `理解任务：${short}` },
@@ -263,7 +284,8 @@ export function createFakeApi({ activeRun = true } = {}) {
       { type: "message", role: "assistant", text: "（演示）我看了一下工作区：", delta: false },
       { type: "message", role: "assistant", text: "有 1 个修改、1 个新文件，", delta: true },
       { type: "message", role: "assistant", text: "都和这次修复有关。", delta: true },
-      { type: "status", state: "done", usage: { input: 3200, output: 220, cost_usd: 0.012 } },
+      { type: "usage", context: { used: demoUsed, limit: 200000, model: "demo-model" }, turn: { input: 3200, output: 220, cost_usd: 0.012 } },
+      { type: "status", state: "done" },
     ];
   }
 

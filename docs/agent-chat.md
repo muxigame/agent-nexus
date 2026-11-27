@@ -378,10 +378,10 @@ FEATURE = "agents/1"
   - `anthropic`：Messages（`POST {base_url}/v1/messages`，SSE），tool_use / tool_result。
   - `gemini`：`POST {base_url}/v1beta/models/{model}:streamGenerateContent?alt=sse`，functionDeclarations / functionResponse。
 - **配置**：`agent-nexus.json` → `agents.api.providers[]`：`{id, label, protocol, base_url, headers?: {…非机密}, models: [{id, label?, context_window?, max_output?, tools?: true}], enabled}`；网关同步的同名结构存在网关，设备拉取后合并（本机配置优先）。
-- **密钥**：本机 `<root>/.anx/agents/api-keys.json`（0600 / 仅当前账户 ACL），`{provider_id: {key, updated}}`；接口只能写和删，读时只返回 `{set: true, last4}`。也支持 `env:VARNAME` 引用环境变量。
+- **密钥**：本机 `<root>/.anx/agents/api-keys.json`（0600 / 仅当前账户 ACL），`{provider_id: {key, updated}}`；接口只能写和删，读时只返回 `{set: true, last4}`。也支持 `env:VARNAME` 引用环境变量。密钥设置时绑定服务商地址的 origin（scheme://host:port）；地址改了（本机编辑或网关同步）密钥不会发往新地址，状态为 `origin_changed`，`agent_run_open` / `agent_api_test` 返回 `code: key_origin_changed`（「服务商地址变了，请重新输入密钥」）。`base_url` 不能带账号密码。
 - **作为 Agent**：每个启用的模型是一个 Agent，kind = `api:<provider>/<model>`，label = 模型 label，在 Agent 选择器里单列「API 模型」一组；`supports`: resume ✓、approvals ✓、tools 按模型配置。
 - **对话循环**（`agents/api/loop.py`）：消息 → 服务商流式 → 文本/思考增量转统一事件；遇到工具调用 → 按权限模式审批（复用 approval 事件与 `agent_run_answer`）→ 在本机执行 → 结果回填 → 继续，直到无工具调用（上限 50 步）。
-- **工具**（首期）：`read_file`、`write_file`、`edit_file`（精确替换）、`list_dir`、`glob`、`grep`、`run_command`（工作目录内，超时 120s，输出截断）、以及经网关的 `ask_user` / `mail_send`（有 handle 时）。权限：readonly 只给读类工具；ask 时写/执行需审批；edits 时写自动、执行需审批；full 全自动。路径限制在工作目录 + 临时目录内（符号链接解析后校验）。
+- **工具**（首期）：`read_file`、`write_file`、`edit_file`（精确替换）、`list_dir`、`glob`、`grep`、`run_command`（工作目录内，超时 120s，输出截断）、以及经网关的 `ask_user` / `mail_send`（有 handle 时）。权限：readonly 只给读类工具；ask 时写/执行需审批；edits 时写自动、执行需审批；full 全自动。路径限制在工作目录 + 临时目录内（符号链接解析后校验）。anx 自己的状态目录（`<root>/.anx`、`.mcp-manager`，含密钥和设备凭据）即使在工作目录内也拒绝访问；服务以 root / SYSTEM 运行、执行账户是别的用户时，文件工具在以执行账户启动的辅助进程里执行（`agents/api/fileops.py`）。`ask_user` / `mail_send` 走网关 `hub_call agent_ask` / `agent_mail_send`（带 run 的 workspace handle，只接受申请它的设备），`ask_user` 轮询 `ask_get` 等主人回答（最多 10 分钟）；readonly 只给 `ask_user`，`mail_send` 按写操作审批。
 - **会话存储**：`<root>/.anx/agents/api-sessions/<id>.jsonl`（每行一条统一事件 + 用于续接的原始消息），会话发现里作为 kind `api:*` 列出，按 provider 分组显示为「API」标签页。
 - **系统提示词**：直接作为各协议的 system 字段（openai: system 消息；anthropic: `system`；gemini: `systemInstruction`）。
 - **错误**：401/403 → 「密钥无效或无权限」；429 → 显示并按 `retry-after` 自动重试一次；网络错误 → 显示服务商 host。

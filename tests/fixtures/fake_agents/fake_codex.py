@@ -3,7 +3,10 @@
 
 ``exec ... [resume <id>] <prompt|->``; the prompt decides: "slow" (sleeps until killed), "fail" (turn.failed),
 "crash" (stderr + exit 2), otherwise a reasoning item, a command, a file change, a todo list and the answer.
-FAKE_ARGV_LOG: append argv (and the stdin prompt) as JSON.
+FAKE_ARGV_LOG: append argv (and the stdin prompt) as JSON. With CODEX_HOME set, a finished turn also appends
+to the thread's rollout (turn_context + token_count) unless the prompt says "norollout".
+FAKE_CODEX_NOTICE=1 (or "notice" in the prompt): every turn opens with the CLI's config notice, sent twice (as an
+``error`` event and an ``error`` item), the way Codex reports an unrecognized config.toml setting (§16.6).
 """
 import json
 import os
@@ -27,6 +30,10 @@ def emit(obj):
 
 emit({"type": "thread.started", "thread_id": thread})
 emit({"type": "turn.started"})
+if os.environ.get("FAKE_CODEX_NOTICE") == "1" or "notice" in prompt:
+    note = "Codex is ignoring 1 unrecognized configuration setting: model_reasoning_summary_format"
+    emit({"type": "error", "message": note})
+    emit({"type": "item.completed", "item": {"id": "item_n", "type": "error", "message": note}})
 if "crash" in prompt:
     print("fatal: codex crashed", file=sys.stderr, flush=True)
     sys.exit(2)
@@ -49,4 +56,17 @@ emit({"type": "item.updated", "item": {"id": "item_3", "type": "todo_list",
                                        "items": [{"text": "look", "completed": True}, {"text": "fix", "completed": False}]}})
 emit({"type": "item.completed", "item": {"id": "item_4", "type": "something_new", "x": 1}})
 emit({"type": "item.completed", "item": {"id": "item_5", "type": "agent_message", "text": f"codex: {prompt}"}})
+if os.environ.get("CODEX_HOME") and "norollout" not in prompt:
+    # what the real CLI writes next to its output: the rollout, with the context window (§16.3)
+    folder = os.path.join(os.environ["CODEX_HOME"], "sessions", "2026", "11", "27")
+    os.makedirs(folder, exist_ok=True)
+    path = os.path.join(folder, f"rollout-2026-11-27T10-00-00-{thread}.jsonl")
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.writelines(json.dumps(record) + "\n" for record in (
+                {"type": "session_meta", "payload": {"id": thread, "cwd": os.getcwd()}},
+                {"type": "turn_context", "payload": {"model": "gpt-5-codex", "cwd": os.getcwd()}},
+                {"type": "event_msg", "payload": {"type": "token_count", "info": {
+                    "total_token_usage": {"input_tokens": 5000, "output_tokens": 70},
+                    "last_token_usage": {"input_tokens": 1200, "cached_input_tokens": 1000, "output_tokens": 30},
+                    "model_context_window": 258400}}}))
 emit({"type": "turn.completed", "usage": {"input_tokens": 100, "cached_input_tokens": 40, "output_tokens": 7}})

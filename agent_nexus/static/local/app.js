@@ -11,7 +11,8 @@ import { desktopPage, loadNoVNC } from "/local/desktop.js";
 import { localConnectorsPage } from "/local/connectors.js";
 import { terminalPage, loadVendor } from "/ui/terminal.js";
 import { CLIENT_TERMINAL_API } from "/ui/terminal-config.js";
-import { agentPage, localAgentApi } from "/ui/agent-wire.js";
+import { agentPage, localAgentApi, loginHandler } from "/ui/agent-wire.js";
+import { chatPage } from "/ui/chat-page.js";
 
 restoreTheme();
 // What the gateway answers (devices, inbox, 插件库): pages show the last answer at once.
@@ -27,11 +28,12 @@ if (location.pathname === "/cloud") {
 
 const NAV = [
   { path: "/", label: "概览", icon: "layout-dashboard", primary: true },
+  { path: "/chat", label: "对话", icon: "message-square", primary: true },
   { path: "/plugins", label: "插件", icon: "puzzle", primary: true },
   { path: "/devices", label: "设备", icon: "monitor", primary: true },
   { path: "/agent", label: "Agent", icon: "bot" },
   { path: "/connectors", label: "连接器", icon: "plug" },
-  { path: "/cloud", label: "连接云端", icon: "cloud", primary: true, short: "云端" },
+  { path: "/cloud", label: "连接云端", icon: "cloud", short: "云端" },
   { path: "/inbox", label: "收件箱", icon: "inbox", primary: true },
   { section: "其他" },
   { path: "/settings", label: "设置", icon: "settings" },
@@ -119,9 +121,12 @@ function inboxPage({ params }) {
   ctx.every(10000, () => inbox.refresh());
 }
 
+// One transport for the 对话 page: its chat instance outlives the page (docs/agent-chat.md §16.2).
+const agentApi = localAgentApi();
 const router = createRouter({
   "/": (route) => overviewPage(context("概览", { wide: true }), route),
-  "/agent": (route) => agentPage(context("Agent", { wide: true }), route, { api: localAgentApi(), local: true }),
+  "/chat": (route) => chatPage(context("对话", { wide: true }), route, { api: agentApi, local: true, onLogin: loginHandler({ local: true }) }),
+  "/agent": (route) => agentPage(context("Agent", { wide: true }), route, { api: agentApi, local: true }),
   "/plugins/:name?": (route) => pluginsPage(context("插件"), route),
   "/cloud": (route) => cloudPage(context("连接云端"), route),
   "/devices": (route) => devicesPage(context("设备"), route),

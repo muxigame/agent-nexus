@@ -1,0 +1,100 @@
+/* Agent 设置 → API (ui/api-admin.js, docs/agent-chat.md §16.5). Tokens only: follows light / dark and both skins. */
+
+.aapi { display: flex; flex-direction: column; gap: var(--sp-3); min-width: 0; }
+.aapi-head { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3); flex-wrap: wrap; }
+.aapi-head-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.aapi-head .row { gap: 6px; flex-wrap: wrap; }
+.aapi-note { display: flex; align-items: flex-start; gap: 6px; margin: 0; }
+.aapi-note .icon { flex: none; margin-top: 2px; }
+
+.aapi-mark { flex: none; display: inline-grid; place-items: center; width: 32px; height: 32px; border-radius: 8px;
+  background: var(--neutral-bg); color: var(--neutral); font: 600 11px/1 var(--font); letter-spacing: -.02em; }
+.aapi-mark.sm { width: 22px; height: 22px; border-radius: 6px; font-size: 9.5px; }
+.aapi-mark[data-protocol="openai"] { background: var(--ok-bg); color: var(--ok); }
+.aapi-mark[data-protocol="anthropic"] { background: var(--warn-bg); color: var(--warn); }
+.aapi-mark[data-protocol="gemini"] { background: var(--info-bg); color: var(--info); }
+
+.aapi-list { min-width: 0; }
+.aapi-row { display: flex; align-items: center; gap: var(--sp-3); padding: 12px 14px; border-top: 1px solid var(--border); min-width: 0; }
+.aapi-row:first-child { border-top: 0; }
+.aapi-row.off .aapi-main, .aapi-row.off .aapi-mark { opacity: .55; }
+.aapi-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.aapi-title { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.aapi-title .strong { min-width: 0; }
+.aapi-tag { flex: none; display: inline-flex; align-items: center; height: 18px; padding: 0 6px; border-radius: var(--radius-pill);
+  background: var(--surface-2); border: 1px solid var(--border); color: var(--text-2); font-size: 11px; white-space: nowrap; }
+.aapi-tag.faint { color: var(--text-3); }
+.aapi-url { color: var(--text-3); font-size: 11.5px; }
+.aapi-facts { display: flex; align-items: center; gap: 4px var(--sp-3); flex-wrap: wrap; font-size: var(--fs-xs); margin-top: 2px; }
+.aapi-key { color: var(--text-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.aapi-key.set { color: var(--ok); }
+.aapi-key.warn { color: var(--warn); }
+.aapi-key.ok { color: var(--accent-text); }
+.aapi-key.keyless { color: var(--text-2); }
+.aapi-test { display: inline-flex; align-items: center; gap: 5px; min-width: 0; color: var(--text-2); font-size: var(--fs-xs); }
+.aapi-test.ok { color: var(--ok); }
+.aapi-test.bad { color: var(--bad); }
+.aapi-test .spinner { width: 12px; height: 12px; }
+.aapi-test:empty { display: none; }
+.aapi-actions { flex: none; display: flex; align-items: center; gap: 6px; }
+.aapi-actions .switch { margin-right: 4px; }
+
+/* dialog */
+.aapi-modal .modal-foot { flex-wrap: wrap; }
+.aapi-modal .modal-foot .left { flex: 1 1 auto; min-width: 0; }
+.aapi-editor { gap: var(--sp-4); }
+.aapi-presets { display: grid; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); gap: 6px; }
+.aapi-preset { display: flex; align-items: center; gap: 8px; min-width: 0; height: 36px; padding: 0 10px; border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md); background: var(--surface); color: var(--text); font: inherit; font-size: var(--fs-sm); cursor: pointer; text-align: left; }
+.aapi-preset:hover { background: var(--surface-2); }
+.aapi-preset:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.aapi-preset.on { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); background: var(--accent-subtle); }
+.aapi-preset-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.aapi-preset:last-child { grid-column: span 2; }
+.aapi-row2 { display: grid; grid-template-columns: minmax(150px, 1fr) minmax(0, 2.2fr); gap: var(--sp-4); }
+.aapi-keybox { gap: 6px; }
+.aapi-keystate { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); min-height: 28px; font-size: var(--fs-xs); }
+.aapi-models-bar .row { gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+.aapi-models { display: flex; flex-direction: column; border: 1px solid var(--border); border-radius: var(--radius-md); overflow: hidden; }
+.aapi-models-empty { padding: 14px; text-align: center; }
+.aapi-model { display: grid; grid-template-columns: 44px minmax(0, 1.6fr) minmax(0, 1.2fr) 92px 40px 32px; align-items: center; gap: var(--sp-2);
+  padding: 6px 8px 6px 10px; border-top: 1px solid var(--border); min-width: 0; }
+.aapi-model:first-child { border-top: 0; }
+.aapi-model .input { height: 30px; font-size: var(--fs-sm); }
+.aapi-model.off .aapi-cell-id, .aapi-model.off .aapi-cell-label, .aapi-model.off .aapi-cell-ctx { opacity: .55; }
+.aapi-model-head { background: var(--surface-2); color: var(--text-3); font-size: 11px; font-weight: var(--fw-medium); padding-top: 5px; padding-bottom: 5px; }
+.aapi-model-id { display: block; font-size: var(--fs-sm); }
+.aapi-cell-tools { justify-content: center; }
+.aapi-cell-label, .aapi-cell-ctx { display: block; min-width: 0; }
+.aapi-cell-label .input, .aapi-cell-ctx .input { width: 100%; }
+.aapi-cap { display: block; margin-bottom: 2px; font-size: 11px; color: var(--text-3); }
+.aapi-ctx[aria-invalid="true"] { border-color: var(--bad); }
+.aapi-testbar { display: flex; align-items: center; gap: var(--sp-2); min-width: 0; flex-wrap: wrap; }
+.aapi-test-model { width: auto; max-width: 200px; height: var(--control-h-sm); font-size: var(--fs-sm); }
+.aapi-headers .header-row .input { height: 30px; font-size: var(--fs-sm); }
+
+/* model picker */
+.aapi-pick { display: flex; flex-direction: column; max-height: min(50vh, 380px); overflow-y: auto; border: 1px solid var(--border); border-radius: var(--radius-md); }
+.aapi-pick-item { display: flex; gap: var(--sp-2); padding: 7px 10px; border-top: 1px solid var(--border); min-width: 0; font-size: var(--fs-sm); }
+.aapi-pick-item:first-child { border-top: 0; }
+.aapi-pick-item:hover { background: var(--surface-2); }
+.aapi-pick-item.have { color: var(--text-3); cursor: default; }
+
+@media (max-width: 768px) {
+  .aapi-row { flex-wrap: wrap; align-items: flex-start; row-gap: 8px; }
+  .aapi-main { flex: 1 1 calc(100% - 48px); }
+  .aapi-actions { flex-basis: 100%; padding-left: 44px; flex-wrap: wrap; }
+  .aapi-actions .switch { margin-right: auto; }
+  .aapi-row2 { grid-template-columns: minmax(0, 1fr); }
+  .aapi-presets { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .aapi-model-head { display: none; }
+  .aapi-model { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 32px; grid-template-areas: "id id del" "label ctx ctx" "enable tools tools"; row-gap: 6px; padding: 10px; }
+  .aapi-cell-id { grid-area: id; min-width: 0; }
+  .aapi-cell-label { grid-area: label; }
+  .aapi-cell-ctx { grid-area: ctx; }
+  .aapi-cell-enable { grid-area: enable; gap: 8px; }
+  .aapi-cell-tools { grid-area: tools; justify-content: flex-start; }
+  .aapi-cell-del { grid-area: del; justify-self: end; }
+  .aapi-modal .modal-foot .left { flex-basis: 100%; }
+  .aapi-test-model { max-width: 150px; }
+}

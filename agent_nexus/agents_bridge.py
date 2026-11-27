@@ -3,6 +3,7 @@
 ``POST /api/devices/{id}/agents/{op}``  JSON params -> the device's ``agent_*`` reverse RPC, answered as is
 ``POST /api/agents/handle``             ``{device_id, workdir, kind, name?}`` -> a workspace handle and mailbox
                                         address for a run (the same as ``hub_call agent_handle``)
+``/api/agents/api_config_get|put``      the synced API provider config (§16.4; ``hub_call api_config_*``)
 
 Who may: the same callers as the remote terminal (``terminal_bridge.py``): the owner (console cookie with
 ``X-ANX: 1``, or an owner bearer token), or a joined device of the network with its own credential while it is
@@ -129,6 +130,28 @@ class AgentsBridge(TerminalBridge):
             return JSONResponse({"error": message, "code": "unavailable"}, status_code=409, headers=NO_STORE)
         return JSONResponse(result, headers=NO_STORE)
 
+    async def api_config(self, request: Request) -> Response:
+        """``GET|POST /api/agents/api_config_get`` and ``POST /api/agents/api_config_put``: the API providers the
+        devices merge in (docs/agent-chat.md §16.4), non-secret fields only -- a body with a key-like field is
+        refused (400) and nothing is stored. The owner, or a joined device that is not locked."""
+        _device, refused = await self._caller(request)  # a locked device is refused there (423)
+        if refused is not None:
+            return refused
+        facade = self.console.facade
+        if request.url.path.endswith("_get"):
+            return JSONResponse(facade.api_config_get(), headers=NO_STORE)
+        params = await self._params(request)
+        if params is None:
+            return JSONResponse({"error": "请求内容必须是 JSON 对象", "code": "bad_request"}, status_code=400,
+                                headers=NO_STORE)
+        try:
+            result = facade.api_config_put(params)
+        except RoutingError as exc:
+            return JSONResponse({"error": str(exc), "code": "bad_request"}, status_code=400, headers=NO_STORE)
+        return JSONResponse(result, headers=NO_STORE)
+
     def routes(self) -> list:
         return [Route("/api/devices/{device_id}/agents/{op}", self.call, methods=["POST"]),
-                Route("/api/agents/handle", self.handle, methods=["POST"])]
+                Route("/api/agents/handle", self.handle, methods=["POST"]),
+                Route("/api/agents/api_config_get", self.api_config, methods=["GET", "POST"]),
+                Route("/api/agents/api_config_put", self.api_config, methods=["POST", "PUT"])]

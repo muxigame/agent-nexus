@@ -6,8 +6,8 @@ import {
 import { qrSVG } from "/ui/qr.js";
 import { osMark } from "/ui/os-icons.js";
 import { ubuntuServerJoinCommand } from "/console/install-commands.js";
-import { mountChat } from "/ui/chat.js";
-import { cloudAgentApi, loginHandler } from "/ui/agent-wire.js";
+import { chatCard } from "/ui/chat-page.js";
+import { cloudAgentApi } from "/ui/agent-wire.js";
 
 // ---------------------------------------------------------------- shared bits
 
@@ -33,7 +33,7 @@ function deviceState(device) {
   return device.online ? "online" : "offline";
 }
 
-/** The Overview's head: on a phone only its primary action stays, so the chat starts higher up. */
+/** The Overview's head: on a phone only its primary action stays. */
 function overviewHead(node) { node.classList.add("overview-head"); return node; }
 
 function head(title, text, actions = []) {
@@ -64,17 +64,15 @@ function openMenu(anchor, items) {
 
 // ---------------------------------------------------------------- overview
 
-/** The agent chat on top (docs/agent-chat.md §11), the gateway summary below. Regions refresh on their own:
- *  the 10 s poll redraws the head and the summary, never the chat (a re-mount would drop a running turn). */
+/** The gateway summary with a 对话 card (docs/agent-chat.md §16.1: recent sessions → #/chat, 新对话). The 10 s
+ *  poll redraws the head and the summary; the card is created once, re-placed by each redraw, read every 30 s. */
 export async function overviewPage(ctx) {
   const { page } = ctx;
   const headHolder = el("div", { style: { display: "contents" } }, overviewHead(head(greeting(), "正在读取网关状态…")));
-  const chatHolder = el("div", { class: "overview-chat" });
   const summaryHolder = el("div", { style: { display: "contents" } }, el("div", { class: "grid cols-4" },
     Array.from({ length: 4 }, () => el("div", { class: "card stat" }, el("span", { class: "skeleton w-40" }), el("span", { class: "skeleton title w-60" })))));
-  mount(page, headHolder, chatHolder, summaryHolder);
-  const chat = mountChat(chatHolder, cloudAgentApi(), { localDevice: false, onLogin: loginHandler() });
-  ctx.onLeave(() => chat.destroy());
+  mount(page, headHolder, summaryHolder);
+  const chat = chatCard({ api: cloudAgentApi(), local: false });
   let data;
   const load = async () => {
     try {
@@ -85,6 +83,7 @@ export async function overviewPage(ctx) {
       return;
     }
     render(data);
+    chat.refresh();
   };
   function render(summary) {
     const { devices, inbox, gateway, setup } = summary;
@@ -106,6 +105,7 @@ export async function overviewPage(ctx) {
     const current = steps.findIndex((item) => !item[0]);
     mount(headHolder, overviewHead(
       head(greeting(), sentence, [
+        el("a", { class: "btn", href: "#/chat" }, icon("message-square", { size: 16 }), "对话"),
         el("a", { class: "btn", href: "#/agent" }, icon("sliders-horizontal", { size: 16 }), "Agent 设置"),
         el("a", { class: "btn", href: "#/downloads" }, icon("download", { size: 16 }), "下载客户端"),
         el("a", { class: "btn", href: "#/connectors?open=add-connector" }, icon("plug", { size: 16 }), "添加连接器"),
@@ -127,6 +127,7 @@ export async function overviewPage(ctx) {
         stat("#/inbox", "circle-help", "待回答", inbox.open_asks, "", inbox.open_asks ? "Agent 在等你的回答" : "没有待回答的问题")),
       el("div", { class: "grid side" },
         el("div", { class: "stack lg" },
+          chat.node,
           done < steps.length ? el("section", { class: "card" },
             el("div", { class: "card-head" }, el("h2", {}, "开始使用"), el("span", { class: "pill accent plain" }, `${done} / ${steps.length} 已完成`)),
             el("div", { class: "card-body" }, el("div", { class: "steps" }, steps.map(([ok, title, desc, action], index) =>

@@ -6,11 +6,13 @@ import { renderDownloads } from "/console/downloads.js";
 import { connectorsPage } from "/console/connectors.js";
 import { terminalPage, loadVendor } from "/ui/terminal.js";
 import { topologyPage } from "/console/topology.js";
-import { agentPage, cloudAgentApi } from "/ui/agent-wire.js";
+import { agentPage, cloudAgentApi, loginHandler } from "/ui/agent-wire.js";
+import { chatPage } from "/ui/chat-page.js";
 
 restoreTheme();
 const NAV = [
   { path: "/", label: "概览", icon: "layout-dashboard", primary: true },
+  { path: "/chat", label: "对话", icon: "message-square", primary: true },
   { path: "/devices", label: "设备", icon: "monitor", primary: true },
   { path: "/agent", label: "Agent", icon: "bot" },
   { path: "/topology", label: "拓扑", icon: "network" },
@@ -97,9 +99,12 @@ async function downloadsPage() {
   await renderDownloads(holder, { inviteHref: "#/devices?invite=1" });
 }
 
+// One transport for the 对话 page: its chat instance outlives the page (docs/agent-chat.md §16.2).
+const agentApi = cloudAgentApi();
 const router = createRouter({
   "/": (route) => overviewPage(context("概览", { wide: true }), route),
-  "/agent": (route) => agentPage(context("Agent", { wide: true }), route, { api: cloudAgentApi() }),
+  "/chat": (route) => chatPage(context("对话", { wide: true }), route, { api: agentApi, local: false, onLogin: loginHandler() }),
+  "/agent": (route) => agentPage(context("Agent", { wide: true }), route, { api: agentApi }),
   "/devices": (route) => devicesPage(context("设备"), route),
   "/topology": (route) => topologyPage(context("拓扑", { wide: true }), route),
   "/connectors": (route) => connectorsPage(context("连接器"), route),

@@ -5,11 +5,12 @@
 //   localAgentApi()  — the local console: 本机 → /api/agents/local/{op} (in process, works with the cloud
 //                      disconnected); other devices → /api/agents/remote/{id}/{op} through the gateway.
 //   loginHandler({local}) → onLogin(kind, device, command, info) for mountChat / mountCliManager.
-//   agentPage(ctx, route, {api, local}) — tabs 提示词 / CLI / 临时目录 for one runner device.
+//   agentPage(ctx, route, {api, local}) — tabs 提示词 / CLI / 临时目录 (+ agent-admin.js AGENT_PAGE_TABS, e.g. API)
+//                      for one runner device. The chat itself is the 对话 page (ui/chat-page.js, §16.1).
 
 import { el, mount, icon, fetchJSON, modal, copy, emptyState } from "./ui.js";
 import { mountPromptEditor } from "./prompts.js";
-import { mountTmpManager, mountCliManager, kindLabel, xicon } from "./agent-admin.js";
+import * as admin from "./agent-admin.js";
 import { queueTerminalInput } from "./terminal.js";
 
 const enc = encodeURIComponent;
@@ -177,7 +178,11 @@ export function loginHandler({ local = false } = {}) {
 
 // ---------------------------------------------------------------- the 「Agent」 page
 
-const TABS = [["prompts", "提示词"], ["cli", "CLI"], ["tmp", "临时目录"]];
+const { mountTmpManager, mountCliManager, kindLabel, xicon } = admin;
+// Tabs other modules add ({id, label, mount(container, api, {device, local})}, e.g. API §16.5); read through the
+// namespace so a build without them still loads.
+const EXTRA_TABS = Array.isArray(admin.AGENT_PAGE_TABS) ? admin.AGENT_PAGE_TABS.filter((t) => t && t.id && typeof t.mount === "function") : [];
+const TABS = [["prompts", "提示词"], ["cli", "CLI"], ["tmp", "临时目录"], ...EXTRA_TABS.map((t) => [t.id, t.label || t.id])];
 const PAGE_KEY = "anx.agentpage.";
 
 function remember(key, value) { try { localStorage.setItem(PAGE_KEY + key, JSON.stringify(value)); } catch { /* private mode */ } }
@@ -204,10 +209,10 @@ export async function agentPage(ctx, { query } = {}, { api, local = false } = {}
   mount(page,
     el("div", { class: "page-head" },
       el("div", { class: "titles" }, el("h1", {}, "Agent"),
-        el("p", {}, "系统提示词片段、各设备上的 CLI（安装与登录）、对话的临时目录。对话本身在概览页。"), note),
+        el("p", {}, `系统提示词片段、各设备上的 CLI（安装与登录）、对话的临时目录${EXTRA_TABS.some((t) => t.id === "api") ? "、API 模型" : ""}。对话本身在“对话”页。`), note),
       el("div", { class: "actions", style: { alignItems: "center" } },
         el("label", { class: "row", style: { gap: "8px", flexWrap: "nowrap" } }, el("span", { class: "muted small hide-sm", style: { whiteSpace: "nowrap" } }, "运行设备"), select),
-        el("a", { class: "btn", href: "#/" }, xicon("bot", { size: 16 }), "去对话"))),
+        el("a", { class: "btn", href: "#/chat" }, xicon("bot", { size: 16 }), "去对话"))),
     tabs, body);
 
   function renderTabs() {
@@ -242,6 +247,8 @@ export async function agentPage(ctx, { query } = {}, { api, local = false } = {}
       current = mountPromptEditor(inner, bound(), {});
     } else if (tab === "cli") {
       current = mountCliManager(inner, api, { device, onLogin: loginHandler({ local }) });
+    } else if (EXTRA_TABS.some((t) => t.id === tab)) {
+      current = EXTRA_TABS.find((t) => t.id === tab).mount(inner, api, { device, local }) || null;
     } else {
       current = mountTmpManager(inner, api, { device });
     }

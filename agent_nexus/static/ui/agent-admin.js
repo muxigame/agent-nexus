@@ -6,6 +6,10 @@
 // answer {"error": "…", "code": "…"} instead of failing; callOp() turns that into a thrown Error.
 
 import { el, icon, mount, toast, bytes, relTime, emptyState, skeletonRows, errorState, confirmDialog, copy } from "./ui.js";
+import { mountApiAdmin } from "./api-admin.js";
+
+/** Extra tabs of the 「Agent」 page (agent-wire.js agentPage): {id, label, mount(container, api, {device, local})}. */
+export const AGENT_PAGE_TABS = [{ id: "api", label: "API", mount: (container, api, options) => mountApiAdmin(container, api, options) }];
 
 // ---------------------------------------------------------------- icons not in the shared set (Lucide, ISC)
 

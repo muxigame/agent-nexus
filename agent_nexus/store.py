@@ -224,8 +224,34 @@ class GatewayStore:
             db = sqlite3.connect(":memory:", check_same_thread=False, isolation_level=None)
         db.row_factory = sqlite3.Row
         self._migrate(db)
+        # Small JSON settings (the agent chat's synced API provider config, docs/agent-chat.md §16.4). Outside the
+        # numbered migrations on purpose: an older gateway opening this database simply ignores the table.
+        db.execute("CREATE TABLE IF NOT EXISTS settings(name TEXT PRIMARY KEY, value_json TEXT NOT NULL, "
+                   "updated_at REAL NOT NULL)")
         self._db = db
         return db
+
+    # -- settings -------------------------------------------------------------
+    def setting(self, name: str) -> tuple[Any, float | None]:
+        """``(value, updated_at)`` of a JSON setting, ``(None, None)`` when unset."""
+        with self._lock:
+            row = self._connect().execute("SELECT value_json, updated_at FROM settings WHERE name = ?",
+                                          (name,)).fetchone()
+        if row is None:
+            return None, None
+        try:
+            return json.loads(row["value_json"]), row["updated_at"]
+        except ValueError:
+            return None, None
+
+    def set_setting(self, name: str, value: Any) -> float:
+        now = self.clock()
+        with self._lock:
+            self._connect().execute(
+                "INSERT INTO settings(name, value_json, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(name) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at",
+                (name, json.dumps(value, ensure_ascii=False), now))
+        return now
 
     @staticmethod
     def _migrate(db: sqlite3.Connection) -> None:

@@ -73,7 +73,7 @@ def test_style_sheets_are_scoped():
     """Every rule in the skins applies only under <html data-style=...>, so the two never mix."""
     import re
     for name in ("pure", "mica"):
-        css = re.sub(r"/\*.*?\*/", "", (UI_DIR / f"style-{name}.css").read_text(encoding="utf-8"), flags=re.S)
+        css = re.sub(r"/\*.*?\*/", "", (UI_DIR / f"style-{name}.css").read_text(encoding="utf-8"), flags=re.DOTALL)
         for prelude in re.findall(r"([^{}]+)\{", css):
             prelude = prelude.strip()
             if prelude.startswith("@"):
@@ -82,12 +82,12 @@ def test_style_sheets_are_scoped():
                 assert f'[data-style="{name}"]' in selector, (name, selector)
 
 
-AGENT_CHAT = ("chat.js", "prompts.js", "agent-admin.js", "agent-wire.js")
+AGENT_CHAT = ("chat.js", "chat-page.js", "prompts.js", "agent-admin.js", "agent-wire.js", "api-admin.js")
 
 
 @pytest.mark.parametrize("which", ["gateway", "local"])
 def test_agent_chat_modules_are_served(which, monkeypatch, tmp_path):
-    """The Overview chat and the Agent page (docs/agent-chat.md §11) load from /ui/ in both consoles."""
+    """The 对话 page, the Overview card and the Agent page (docs/agent-chat.md §11, §16) load from /ui/ in both consoles."""
     client = gateway_client(monkeypatch, tmp_path) if which == "gateway" else local_client(tmp_path)
     with client:
         for name in AGENT_CHAT:
@@ -103,13 +103,36 @@ def test_agent_chat_imports_resolve_and_both_consoles_wire_it():
         text = (UI_DIR / name).read_text(encoding="utf-8")
         for target in re.findall(r'from "(\.\/[^"]+|/ui/[^"]+)"', text):
             assert (UI_DIR / target.rsplit("/", 1)[-1]).is_file(), (name, target)
+    # §16.1: the Overviews show a 对话 card (recent sessions → #/chat); the chat itself is the 对话 page
     local_overview = (static / "local" / "overview.js").read_text(encoding="utf-8")
     console_pages = (static / "console" / "pages.js").read_text(encoding="utf-8")
-    assert "mountChat(" in local_overview and "localAgentApi()" in local_overview
-    assert "mountChat(" in console_pages and "cloudAgentApi()" in console_pages and "localDevice: false" in console_pages
-    for app in (static / "local" / "app.js", static / "console" / "app.js"):
+    assert "chatCard(" in local_overview and "localAgentApi()" in local_overview and "mountChat(" not in local_overview
+    assert "chatCard(" in console_pages and "cloudAgentApi()" in console_pages and "mountChat(" not in console_pages
+    for app, local in ((static / "local" / "app.js", "true"), (static / "console" / "app.js", "false")):
         text = app.read_text(encoding="utf-8")
         assert '"/agent"' in text and "agentPage(" in text, app
+        assert '"/chat"' in text and "chatPage(" in text and f"local: {local}" in text, app
+    page = (UI_DIR / "chat-page.js").read_text(encoding="utf-8")
+    assert "mountChat(" in page and "persistent: true" in page and "anx-chat:" in page
     wire = (UI_DIR / "agent-wire.js").read_text(encoding="utf-8")
     assert "/api/agents/local/" in wire and "/api/agents/remote/" in wire and "/agents/${enc(op)}" in wire
     assert "/api/inbox/conversation" in wire
+
+
+@pytest.mark.parametrize("which", ["gateway", "local"])
+def test_api_admin_tab_assets(which, monkeypatch, tmp_path):
+    """Agent 设置 → API (docs/agent-chat.md §16.5): its script and stylesheet are served and both consoles link the CSS."""
+    client = gateway_client(monkeypatch, tmp_path) if which == "gateway" else local_client(tmp_path)
+    with client:
+        response = client.get("/ui/api-admin.css")
+        assert response.status_code == 200 and response.headers["content-type"].startswith("text/css")
+    static = UI_DIR.parent
+    for page in ("console.html", "index.html"):
+        text = (static / page).read_text(encoding="utf-8")
+        assert text.index("/ui/ui.css") < text.index("/ui/api-admin.css") < text.index("/ui/style-pure.css"), page
+    admin = (UI_DIR / "agent-admin.js").read_text(encoding="utf-8")
+    assert 'from "./api-admin.js"' in admin and "AGENT_PAGE_TABS" in admin
+    script = (UI_DIR / "api-admin.js").read_text(encoding="utf-8")
+    for op in ("agent_api_providers", "agent_api_provider_save", "agent_api_provider_delete", "agent_api_key_set",
+               "agent_api_test", "agent_api_models"):
+        assert f'"{op}"' in script, op
