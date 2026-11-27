@@ -118,6 +118,9 @@ def builtin_definitions() -> dict[str, AgentDef]:
         resume_command=["{bin}", "-p", "--output-format", "stream-json", "--verbose", "--input-format", "stream-json",
                         "--resume", "{resume_id}", "{options...}"],
         system_prompt_args=["--append-system-prompt", "{system_prompt}"],
+        # the Claude desktop app keeps its own Claude Code here (seen: 2.1.331 on macOS); it is a full CLI, signed
+        # out until `claude auth login` -- found when no standalone claude is installed
+        extra_paths={"darwin": ["{HOME}/Library/Application Support/Claude/claude-code/*/*/claude.app/Contents/MacOS/claude"]},
         resume=True, approvals=True,
         # "ask": the runner adds --mcp-config with anx's approval server and fills {approval_tool} (§5).
         permission_flags={"ask": ["--permission-prompt-tool", "{approval_tool}"],
@@ -478,6 +481,16 @@ def prefix_bin(prefix: str) -> str:
     return prefix if WINDOWS else os.path.join(prefix, "bin")
 
 
+def _version_key(path: str) -> list:
+    return [(0, int(part), "") if part.isdigit() else (1, 0, part) for part in re.split(r"(\d+)", path)]
+
+
+def _newest_glob(pattern: str) -> list[str]:
+    """Paths matching ``pattern``, newest version first (``2.1.331`` before ``2.1.40``)."""
+    import glob
+    return sorted(glob.glob(pattern), key=_version_key, reverse=True)
+
+
 def locate(d: AgentDef, env: dict) -> str | None:
     """The binary of ``d`` for the user of ``env``, or None."""
     if d.path:
@@ -493,8 +506,9 @@ def locate(d: AgentDef, env: dict) -> str | None:
             return found_generic
     for template in d.extra_paths.get(os_key(), []):
         path = expand(template, env)
-        if path and _usable(path):
-            return path
+        for candidate in (_newest_glob(path) if path and "*" in path else [path]):
+            if candidate and _usable(candidate):
+                return candidate
     prefix = npm_prefix(env)
     if prefix:
         folder = prefix_bin(prefix)

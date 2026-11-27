@@ -142,6 +142,16 @@ def test_locate_desktop_app_and_explicit_path(box):
     assert registry.locate(defs["mine"], box["env"]) == str(custom)
 
 
+
+def test_locate_claude_bundled_with_the_desktop_app_newest_version(box, monkeypatch):
+    # macOS, as seen on a real Mac: the Claude desktop app keeps versioned Claude Code builds
+    monkeypatch.setattr(registry, "os_key", lambda platform=None: "darwin")
+    base = box["home"] / "Library" / "Application Support" / "Claude" / "claude-code"
+    old = shim(base / "2.1.40" / "aa" / "claude.app" / "Contents" / "MacOS", "claude", "registry_cli.py", "claude")
+    new = shim(base / "2.1.331" / "bb" / "claude.app" / "Contents" / "MacOS", "claude", "registry_cli.py", "claude")
+    assert old.exists()
+    assert registry.locate(registry.definitions()["claude"], box["env"]) == str(new)
+
 def test_expand_templates():
     env = {"HOME": "/h"}
     assert registry.expand("{DSH_HOME:.dsh}/.credentials.yaml", env) == os.path.join("/h", ".dsh") + "/.credentials.yaml"
