@@ -54,9 +54,10 @@ TRIPLET = "aarch64-linux-android"
 BUILD = ROOT / "build" / "android"
 WHEELS = BUILD / "wheels"
 ANDROID = ROOT / "android"
-#: Not part of the app: remote desktop video and capture, the desktop tray, platform-only packages.
+#: Not part of the app: remote desktop video and capture, the desktop tray, platform-only packages, and
+#: zstandard (no Android wheel; Python 3.14's own compression.zstd reads the CLIs' zstd transcripts instead).
 EXCLUDED = {"av", "mss", "pystray", "pillow", "pyobjc-core", "pyobjc-framework-cocoa", "pyobjc-framework-quartz",
-            "python-xlib", "pywinpty"}
+            "python-xlib", "pywinpty", "zstandard"}
 #: Compiled packages cross-compiled with cibuildwheel.
 NATIVE = {"pydantic-core", "rpds-py", "watchfiles", "cryptography", "psutil", "cffi"}
 #: cffi needs libffi, which CPython's Android build keeps inside _ctypes: built here, static.
