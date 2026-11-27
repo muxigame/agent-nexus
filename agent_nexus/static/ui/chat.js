@@ -1127,7 +1127,10 @@ export function mountChat(container, api, opts = {}) {
         S.session && !S.rid ? el("span", { class: "chat-note-resume" }, canResume(S.session.kind)
           ? "· 将续接这个会话" : `· ${kindShort(S.session.kind, agentInfo(S.session.kind))} 不支持续接，发消息会开一个新对话`) : null,
         S.permission === "ask" && noApprovals() ? el("span", { class: "chat-note-resume", title: `${name} ${NO_APPROVAL_ASK[1]}` }, `· ${NO_APPROVAL_ASK[0]}：不会逐项询问`) : null,
-        S.permission === "full" ? el("span", { class: "chat-note-danger" }, icon("triangle-alert", { size: 13 }), "完全信任") : null);
+        S.permission === "full" ? el("span", { class: "chat-note-danger" }, icon("triangle-alert", { size: 13 }), "完全信任") : null,
+        S.context.mode === "gateway" && agentInfo()?.gateway_mcp === false
+          ? el("span", { class: "chat-note-warn", title: `经网关模式需要 ${name} 配置 Agent Nexus MCP 连接器，否则它调用不了 use_device` },
+            icon("triangle-alert", { size: 13 }), `${name} 没有配置网关连接器`) : null);
     }
   }
 

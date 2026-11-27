@@ -278,6 +278,12 @@ class AgentHub:
         probed = await asyncio.to_thread(registry.probe_all, defs, env, fresh=fresh, run_as=self._popen(account))
         agents = [registry.info(d, probed[k], self.installs.current(k)) for k, d in defs.items()]
         device = self._device()
+        home = self._home(account, env)
+        for item in agents:
+            try:
+                item["gateway_mcp"] = registry.gateway_mcp(item["kind"], home, env, str(device.get("gateway") or ""))
+            except Exception:  # noqa: BLE001 - a broken config file must not break agent_info
+                item["gateway_mcp"] = None
         return {"agents": agents, "device": {"id": device.get("id"), "name": device.get("name"),
                                              "os": prompts_mod.os_name()},
                 "account": getattr(account, "name", None), "home": str(self._home(account, env))}

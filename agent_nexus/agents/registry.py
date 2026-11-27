@@ -739,6 +739,64 @@ def probe_all(defs: dict[str, AgentDef], env: dict, *, timeout: float = 6, fresh
     return results
 
 
+# -- the gateway MCP connector (gateway mode, docs/agent-chat.md §1) --------------------------------------------
+
+_NEXUS_MARKERS = ("agent-nexus", "agent_nexus", "agentnexus")
+
+
+def _mcp_entries(kind: str, home: Path, env: dict) -> list[tuple[str, Any]] | None:
+    """``[(name, server config)]`` of the MCP servers ``kind`` is configured with, or None when unknown."""
+    def read_json(path: Path) -> Any:
+        try:
+            if path.stat().st_size > 32 * 1024 * 1024:
+                return None
+            return json.loads(path.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, ValueError):
+            return None
+
+    def servers(block: Any) -> list[tuple[str, Any]]:
+        return [(str(k), v) for k, v in block.items()] if isinstance(block, dict) else []
+
+    if kind == "claude":
+        found: list[tuple[str, Any]] = []
+        config_dir = Path(env["CLAUDE_CONFIG_DIR"]) if env.get("CLAUDE_CONFIG_DIR") else None
+        for path in ([config_dir / ".claude.json"] if config_dir else []) + [home / ".claude.json"]:
+            data = read_json(path)
+            if isinstance(data, dict):
+                found += servers(data.get("mcpServers"))
+                for project in (data.get("projects") or {}).values() if isinstance(data.get("projects"), dict) else []:
+                    if isinstance(project, dict):
+                        found += servers(project.get("mcpServers"))
+        return found
+    if kind == "codex":
+        import tomllib
+        root = Path(env["CODEX_HOME"]) if env.get("CODEX_HOME") else home / ".codex"
+        try:
+            data = tomllib.loads((root / "config.toml").read_text(encoding="utf-8", errors="replace"))
+        except (OSError, ValueError):
+            return []
+        return servers(data.get("mcp_servers"))
+    if kind == "gemini":
+        data = read_json(home / ".gemini" / "settings.json")
+        return servers(data.get("mcpServers")) if isinstance(data, dict) else []
+    return None  # dsh and custom CLIs: where they keep MCP servers is not known
+
+
+def gateway_mcp(kind: str, home: Path, env: dict, gateway: str = "") -> bool | None:
+    """Whether ``kind`` has an Agent Nexus MCP connector (gateway mode needs one): a server named or pointing at
+    agent-nexus, or at this device's gateway host. None when the CLI's MCP config is not known."""
+    entries = _mcp_entries(kind, Path(home), env)
+    if entries is None:
+        return None
+    from urllib.parse import urlsplit
+    host = (urlsplit(gateway).hostname or "").lower() if gateway else ""
+    for name, config in entries:
+        text = (name + " " + json.dumps(config, ensure_ascii=False, default=str)).lower()
+        if any(marker in text for marker in _NEXUS_MARKERS) or (host and host in text):
+            return True
+    return False
+
+
 def info(d: AgentDef, probed: dict, install: dict | None = None) -> dict:
     """The ``agent_info`` entry of one CLI (§2)."""
     return {"kind": d.kind, "label": d.label, "installed": bool(probed.get("installed")),

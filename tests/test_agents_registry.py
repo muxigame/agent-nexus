@@ -474,3 +474,26 @@ def test_remote_agents_follow_the_terminal_setting(tmp_path, config, remote, ful
     (tmp_path / core_registry.CONFIG_NAME).write_text(_json.dumps(config), encoding="utf-8")
     cfg = core_registry.load_manager_config(tmp_path)
     assert (cfg.agents_remote, cfg.agents_allow_full_remote) == (remote, full)
+
+
+def test_gateway_mcp_connector_detection(tmp_path):
+    home = tmp_path / "home"
+    (home / ".codex").mkdir(parents=True)
+    (home / ".gemini").mkdir()
+    env = {"HOME": str(home)}
+    # codex: none of its servers is Agent Nexus (seen on a real device) -> False
+    (home / ".codex" / "config.toml").write_text('[mcp_servers.unityMCP]\nurl = "http://127.0.0.1:8401/mcp"\n')
+    assert registry.gateway_mcp("codex", home, env) is False
+    # ... one pointing at this device's gateway host -> True
+    (home / ".codex" / "config.toml").write_text('[mcp_servers.hub]\nurl = "https://gw.example.com/mcp"\n')
+    assert registry.gateway_mcp("codex", home, env, "https://gw.example.com") is True
+    # claude: user-scope and project-scope servers in ~/.claude.json
+    (home / ".claude.json").write_text(json.dumps({"projects": {"/p": {"mcpServers": {"agent-nexus": {"type": "http"}}}}}))
+    assert registry.gateway_mcp("claude", home, env) is True
+    # gemini: settings.json; no file -> False
+    assert registry.gateway_mcp("gemini", home, env) is False
+    # dsh: where it keeps MCP servers is not known -> None (the console then shows no warning)
+    assert registry.gateway_mcp("dsh", home, env) is None
+    # a broken file is not fatal
+    (home / ".codex" / "config.toml").write_text("not = [toml")
+    assert registry.gateway_mcp("codex", home, env) is False
