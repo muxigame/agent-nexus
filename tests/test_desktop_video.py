@@ -396,3 +396,78 @@ def test_a_new_quality_takes_effect_on_a_still_screen(monkeypatch):
         server.close()
 
     asyncio.run(scenario())
+
+
+def test_a_new_quality_of_the_same_size_resends_the_picture_at_its_rate(monkeypatch):
+    """Still screen, viewer without fences (an older one): 均衡 -> 极省 shows at once, at 极省's rate."""
+    encoders = []
+
+    class Recording(FakeEncoder):
+        def __init__(self, *args):
+            super().__init__(*args)
+            encoders.append(self)
+
+    vnc = _push_session(monkeypatch, FakeScreen)
+    monkeypatch.setattr(vnc, "H264Encoder", Recording)
+
+    async def scenario():
+        async def serve(reader, writer):
+            with pytest.raises((asyncio.IncompleteReadError, ConnectionError)):
+                await vnc.Session(reader, writer, "host").run()
+
+        server = await asyncio.start_server(serve, "127.0.0.1", 0)
+        reader, writer = await asyncio.open_connection("127.0.0.1", server.sockets[0].getsockname()[1])
+        await _handshake(reader, writer)
+        encodings = [vnc.H264, vnc.DESKTOP_SIZE, vnc.QUALITY_BASE + 6]
+        writer.write(struct.pack(">BxH", 2, len(encodings)) + struct.pack(f">{len(encodings)}i", *encodings))
+        writer.write(struct.pack(">BBHHHH", 3, 0, 0, 0, 64, 48))
+        await _frames(reader, 0.6)  # the picture, then a still screen
+        assert encoders[-1].bitrate == vnc.H264_BITRATE[6]
+        encodings[-1] = vnc.QUALITY_BASE + 1
+        writer.write(struct.pack(">BxH", 2, len(encodings)) + struct.pack(f">{len(encodings)}i", *encodings))
+        writer.write(struct.pack(">BBHHHH", 3, 1, 0, 0, 64, 48))
+        assert await _frames(reader, 1.0) >= 1, "the still picture comes again"
+        assert encoders[-1].bitrate == vnc.H264_BITRATE[1]
+        writer.close()
+        server.close()
+
+    asyncio.run(scenario())
+
+
+def test_a_fixed_rate_encoder_climbs_back_to_the_ceiling_after_a_dip(monkeypatch):
+    from agent_nexus import vnc
+
+    class Fixed(FakeEncoder):
+        def set_bitrate(self, bitrate):
+            return False  # like Media Foundation / Quick Sync: reopen for a new rate
+
+    clock = [1000.0]
+    monkeypatch.setattr(vnc.time, "monotonic", lambda: clock[0])
+    session = vnc.Session(None, None, "host")
+    session.quality = 8
+    session.flow.enabled = True
+    cap = vnc.H264_BITRATE[8]
+    session.encoder = Fixed(64, 48, vnc.START_BITRATE)
+
+    def second(congested=False, rate_bps=None):
+        clock[0] += 1.0
+        flow = session.flow
+        flow.rtts.clear()
+        flow.rtts.append((clock[0], 0.05))
+        flow.acked.clear()
+        if rate_bps:
+            for i in range(5):
+                flow.acked.append((clock[0] - 1 + i * 0.25, int(rate_bps / 8 / 4)))
+        flow.blocked = 0.6 if congested else 0.0
+        session._control()
+        if session.encoder is None:  # reopened on the next frame
+            session.encoder = Fixed(64, 48, session._bitrate())
+
+    for _ in range(40):
+        second()
+    assert session.encoder.bitrate == cap
+    second(congested=True, rate_bps=9_000_000)  # a hiccup
+    assert session.encoder.bitrate < cap * 0.6
+    for _ in range(40):
+        second()
+    assert session.encoder.bitrate == cap, "back at the ceiling once the link is clear"

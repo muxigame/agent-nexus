@@ -868,7 +868,12 @@ class Session:
         self._known_screen = (self.screen.width, self.screen.height)
         size = encoded_size(self.screen.width, self.screen.height, self.quality)
         if size == self.fb or DESKTOP_SIZE not in self.encodings:
-            return  # the same size, or a viewer that cannot resize: scaled into the old one
+            # the same size (or a viewer that cannot resize: scaled into the old one): the picture again,
+            # at the new quality's rate -- on a still screen nothing else would show the change
+            self.full = True
+            self.previous = None
+            self._apply_rate()
+            return
         self.fb = size
         self.cursor_key = None  # the pointer's shape is scaled with the picture
         self.full = True
@@ -877,6 +882,16 @@ class Session:
             self.encoder.close()
             self.encoder = None
         await self._send([struct.pack(">HHHHi", 0, 0, *size, DESKTOP_SIZE)])
+
+    def _apply_rate(self) -> None:
+        """The encoder at the rate _bitrate() says now (a fixed-rate encoder is reopened on the next frame)."""
+        encoder = self.encoder
+        if encoder is None or abs(self._bitrate() - encoder.bitrate) < encoder.bitrate * 0.15:
+            return
+        if not encoder.set_bitrate(self._bitrate()):
+            encoder.close()
+            self.encoder = None
+            self.reopened_at = time.monotonic()
 
     def _control(self) -> None:
         """Once a second: follow the link. Congested (the byte window full, or round trips growing):
@@ -894,7 +909,8 @@ class Session:
         congested = blocked > 0.3 or queued > max(0.1, self.flow.rtt_min())
         if congested and rate is not None:
             target = min(target, rate * 8 * 0.85)
-        elif blocked < 0.05 and queued < max(0.04, self.flow.rtt_min() * 0.5) and now - self.raised_at > 2.0:
+        elif self.flow.rtts and blocked < 0.05 and queued < max(0.04, self.flow.rtt_min() * 0.5) \
+                and now - self.raised_at > 2.0:  # (not before the first answer: nothing measured yet)
             target *= 1.5
             self.raised_at = now
         self.target = max(MIN_BITRATE, min(cap, target))
@@ -907,8 +923,9 @@ class Session:
         # key frame each time: promptly when the link got much thinner, rarely to climb.
         lower = self._bitrate() < encoder.bitrate
         change = max(self._bitrate(), encoder.bitrate) / max(1, min(self._bitrate(), encoder.bitrate))
+        at_cap = self._bitrate() >= cap
         if (lower and change >= 1.5 and now - self.reopened_at > 5.0) or (
-                not lower and change >= 2.0 and now - self.reopened_at > 15.0):
+                not lower and now - self.reopened_at > 15.0 and (change >= 2.0 or (at_cap and change >= 1.25))):
             encoder.close()
             self.encoder = None  # reopened at the new rate (with a key frame) on the next frame
             self.reopened_at = now
