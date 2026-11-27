@@ -15,6 +15,9 @@ from pathlib import Path
 PLATFORM_ONLY = {"winreg", "msvcrt", "_winapi", "winsound", "pywintypes", "win32api", "win32con",
                  "win32gui", "win32process", "win32job", "pythoncom", "fcntl", "termios", "pwd", "grp",
                  "resource", "gi", "AppKit", "Foundation", "Quartz", "objc"}
+# Standard-library modules of newer Pythons, imported only as a fallback inside try/except ImportError
+# (``compression.zstd`` is 3.14's; agent_nexus/agents/sessions.py prefers the ``zstandard`` package).
+PLATFORM_ONLY |= {"compression"}
 # Third-party packages installed only on Windows (sys_platform markers in pyproject.toml);
 # required there, skipped elsewhere.
 WINDOWS_PACKAGES = {"winpty"}

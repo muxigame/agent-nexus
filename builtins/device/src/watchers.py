@@ -483,10 +483,13 @@ class WatchManager:
                     id, watch_id, group_id, companion_project_id, event_type,
                     summary, path, created_at, delivered, delivery_error,
                     attempts, last_attempt_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, '', 0, 0)""",
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, '', 0, ?)""",
                 (
                     event_id, watch["id"], watch.get("group_id", ""),
                     watch["companion_project_id"], event_type, summary[:1000], path, now,
+                    # the delivery below is the first attempt: stamping it now keeps the background
+                    # _retry_pending (rows idle for 10 s) from POSTing the same event at the same time
+                    now,
                 ),
             )
         self._deliver_event_id(event_id)

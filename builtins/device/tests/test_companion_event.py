@@ -101,3 +101,29 @@ def test_companion_event_without_chatx_is_not_delivered_and_not_retried_by_the_p
         assert event["attempts"] >= 100
     finally:
         server.watch_manager.close()
+
+
+def test_a_new_event_is_not_redelivered_by_the_retry_loop_while_its_first_delivery_runs(tmp_path: Path) -> None:
+    # Seen on CI (Windows): the background _retry_pending picked up the row _emit had just inserted
+    # (last_attempt_at was 0) and chatx got the same event twice.
+    chatx = FakeChatx()
+    server = device_server(tmp_path, companion_url=chatx.url)
+    watches = server.watch_manager
+    try:
+        original = watches._deliver_event_id
+        attempts: list[str] = []
+
+        def deliver(event_id: str) -> None:
+            attempts.append(event_id)
+            if len(attempts) == 1:
+                watches._retry_pending()  # what the worker thread may do while this first POST runs
+                original(event_id)
+
+        watches._deliver_event_id = deliver
+        result = watches.emit_mail_event(project_id="bm-1", workdir=str(tmp_path), summary=PROMPT)
+        assert result["delivered"] is True
+        assert attempts == [result["event_id"]]  # the retry loop left the in-flight event alone
+        assert [e["id"] for e in chatx.events] == [result["event_id"]]
+    finally:
+        chatx.close()
+        server.watch_manager.close()

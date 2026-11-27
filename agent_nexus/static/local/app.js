@@ -1,5 +1,5 @@
 // The local console (docs/ui-spec.md §4): shell, routing, polling. Runs in the Tauri window and any local browser.
-import { renderShell, createRouter, fetchJSON, el, mount, setTheme, restoreTheme, icon, cacheGets, prefetch } from "/ui/ui.js";
+import { renderShell, createRouter, fetchJSON, el, mount, restoreTheme, icon, cacheGets, prefetch, appearanceButton } from "/ui/ui.js";
 import { mountInbox } from "/ui/inbox.js";
 import { hubHost } from "/ui/invite.js";
 import { overviewPage } from "/local/overview.js";
@@ -11,6 +11,7 @@ import { desktopPage, loadNoVNC } from "/local/desktop.js";
 import { localConnectorsPage } from "/local/connectors.js";
 import { terminalPage, loadVendor } from "/ui/terminal.js";
 import { CLIENT_TERMINAL_API } from "/ui/terminal-config.js";
+import { agentPage, localAgentApi } from "/ui/agent-wire.js";
 
 restoreTheme();
 // What the gateway answers (devices, inbox, 插件库): pages show the last answer at once.
@@ -28,6 +29,7 @@ const NAV = [
   { path: "/", label: "概览", icon: "layout-dashboard", primary: true },
   { path: "/plugins", label: "插件", icon: "puzzle", primary: true },
   { path: "/devices", label: "设备", icon: "monitor", primary: true },
+  { path: "/agent", label: "Agent", icon: "bot" },
   { path: "/connectors", label: "连接器", icon: "plug" },
   { path: "/cloud", label: "连接云端", icon: "cloud", primary: true, short: "云端" },
   { path: "/inbox", label: "收件箱", icon: "inbox", primary: true },
@@ -35,15 +37,9 @@ const NAV = [
   { path: "/settings", label: "设置", icon: "settings" },
 ];
 
-function toggleTheme() {
-  const root = document.documentElement;
-  const dark = root.dataset.theme === "dark" || (!root.dataset.theme && matchMedia("(prefers-color-scheme: dark)").matches);
-  setTheme(dark ? "light" : "dark");
-}
 
 const shell = renderShell(document.body, { sub: "本机", nav: NAV, status: { state: "connecting", label: "正在读取…" } });
-shell.setActions(lockButton(), el("button", { class: "btn btn-ghost btn-icon", type: "button", "aria-label": "切换主题", title: "切换主题", onclick: toggleTheme },
-  icon("sun", { size: 18 })));
+shell.setActions(lockButton(), appearanceButton());
 
 /** The Tauri shell hides the window without making the document hidden (WebView2); it tells us instead. */
 export function visible() {
@@ -124,7 +120,8 @@ function inboxPage({ params }) {
 }
 
 const router = createRouter({
-  "/": (route) => overviewPage(context("概览"), route),
+  "/": (route) => overviewPage(context("概览", { wide: true }), route),
+  "/agent": (route) => agentPage(context("Agent", { wide: true }), route, { api: localAgentApi(), local: true }),
   "/plugins/:name?": (route) => pluginsPage(context("插件"), route),
   "/cloud": (route) => cloudPage(context("连接云端"), route),
   "/devices": (route) => devicesPage(context("设备"), route),

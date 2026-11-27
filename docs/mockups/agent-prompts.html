@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Agent · Agent Nexus</title>
+<script src="../../agent_nexus/static/ui/appearance.js"></script>
+<link rel="stylesheet" href="../../agent_nexus/static/ui/tokens.css">
+<link rel="stylesheet" href="../../agent_nexus/static/ui/ui.css">
+<link rel="stylesheet" href="../../agent_nexus/static/ui/style-pure.css">
+<link rel="stylesheet" href="../../agent_nexus/static/ui/style-mica.css">
+<script type="module" src="mock.js"></script>
+</head>
+<!-- ?tab=prompts|cli|tmp picks the section; ?edit=<fragment id> opens that fragment's editor. -->
+<body data-shell="local" data-active="/" data-title="Agent" data-wide="1">
+<template id="content">
+  <div class="page-head">
+    <div class="titles">
+      <h1>Agent</h1>
+      <p>对话时注入的系统提示词、各台设备上的 CLI，以及每次对话的临时目录。</p>
+    </div>
+  </div>
+  <div class="tabs" role="tablist" id="agent-tabs">
+    <button class="tab" role="tab" data-tab="prompts">提示词片段</button>
+    <button class="tab" role="tab" data-tab="cli">CLI 管理</button>
+    <button class="tab" role="tab" data-tab="tmp">临时目录</button>
+  </div>
+  <div id="agent-pane"></div>
+</template>
+<script type="module">
+import { mountPromptEditor } from "../../agent_nexus/static/ui/prompts.js";
+import { mountCliManager, mountTmpManager } from "../../agent_nexus/static/ui/agent-admin.js";
+import { toast } from "../../agent_nexus/static/ui/ui.js";
+import { createFakeApi } from "./agent-fake-api.js";
+
+const q = new URLSearchParams(location.search);
+const api = createFakeApi({ activeRun: false });
+const local = { ...api, call: (op, p) => api.call(op, p, "dev-mbp") };
+const pane = document.getElementById("agent-pane");
+let current = null;
+function show(tab) {
+  current?.destroy?.();
+  for (const b of document.querySelectorAll("#agent-tabs .tab")) b.setAttribute("aria-selected", String(b.dataset.tab === tab));
+  if (tab === "cli") current = mountCliManager(pane, api, { device: "dev-mbp", onLogin: (kind, d, cmd) => toast(`将在本机终端输入：${cmd}`) });
+  else if (tab === "tmp") current = mountTmpManager(pane, api, { device: "dev-mbp" });
+  else current = mountPromptEditor(pane, local, { kind: "claude", mode: q.get("mode") || "direct" });
+}
+document.getElementById("agent-tabs").addEventListener("click", (e) => { const b = e.target.closest("[data-tab]"); if (b) show(b.dataset.tab); });
+show(q.get("tab") || "prompts");
+if (q.get("edit")) setTimeout(() => {
+  const row = document.querySelector(`.pe-item[data-id="${q.get("edit")}"]`);
+  [...(row?.querySelectorAll("button") || [])].find((b) => b.textContent === "编辑")?.click();
+}, 900);
+</script>
+</body>
+</html>

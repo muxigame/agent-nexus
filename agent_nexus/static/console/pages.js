@@ -1,11 +1,13 @@
 // Console pages: overview, devices (with invites), settings (docs/ui-spec.md §3.1, §3.2, §3.6).
 import {
   el, mount, icon, iconHTML, fetchJSON, toast, modal, confirmDialog, copy, tokenField, emptyState, errorState,
-  skeletonRows, pill, relTime, setTheme, bytes,
+  skeletonRows, pill, relTime, appearanceControls, bytes,
 } from "/ui/ui.js";
 import { qrSVG } from "/ui/qr.js";
 import { osMark } from "/ui/os-icons.js";
 import { ubuntuServerJoinCommand } from "/console/install-commands.js";
+import { mountChat } from "/ui/chat.js";
+import { cloudAgentApi, loginHandler } from "/ui/agent-wire.js";
 
 // ---------------------------------------------------------------- shared bits
 
@@ -30,6 +32,9 @@ function deviceState(device) {
   if (device.revoked) return "revoked";
   return device.online ? "online" : "offline";
 }
+
+/** The Overview's head: on a phone only its primary action stays, so the chat starts higher up. */
+function overviewHead(node) { node.classList.add("overview-head"); return node; }
 
 function head(title, text, actions = []) {
   return el("div", { class: "page-head" }, el("div", { class: "titles" }, el("h1", {}, title), text ? el("p", {}, text) : null),
@@ -59,16 +64,24 @@ function openMenu(anchor, items) {
 
 // ---------------------------------------------------------------- overview
 
+/** The agent chat on top (docs/agent-chat.md §11), the gateway summary below. Regions refresh on their own:
+ *  the 10 s poll redraws the head and the summary, never the chat (a re-mount would drop a running turn). */
 export async function overviewPage(ctx) {
   const { page } = ctx;
-  mount(page, head(greeting(), "正在读取网关状态…"), el("div", { class: "grid cols-4" },
+  const headHolder = el("div", { style: { display: "contents" } }, overviewHead(head(greeting(), "正在读取网关状态…")));
+  const chatHolder = el("div", { class: "overview-chat" });
+  const summaryHolder = el("div", { style: { display: "contents" } }, el("div", { class: "grid cols-4" },
     Array.from({ length: 4 }, () => el("div", { class: "card stat" }, el("span", { class: "skeleton w-40" }), el("span", { class: "skeleton title w-60" })))));
+  mount(page, headHolder, chatHolder, summaryHolder);
+  const chat = mountChat(chatHolder, cloudAgentApi(), { localDevice: false, onLogin: loginHandler() });
+  ctx.onLeave(() => chat.destroy());
   let data;
   const load = async () => {
     try {
       data = await fetchJSON("/api/console/summary", { quiet: true });
     } catch (error) {
-      mount(page, head(greeting(), ""), errorState(error, () => overviewPage(ctx)));
+      mount(headHolder, overviewHead(head(greeting(), "")));
+      mount(summaryHolder, errorState(error, load));
       return;
     }
     render(data);
@@ -91,12 +104,14 @@ export async function overviewPage(ctx) {
     ];
     const done = steps.filter((item) => item[0]).length;
     const current = steps.findIndex((item) => !item[0]);
-    mount(page,
+    mount(headHolder, overviewHead(
       head(greeting(), sentence, [
+        el("a", { class: "btn", href: "#/agent" }, icon("sliders-horizontal", { size: 16 }), "Agent 设置"),
         el("a", { class: "btn", href: "#/downloads" }, icon("download", { size: 16 }), "下载客户端"),
         el("a", { class: "btn", href: "#/connectors?open=add-connector" }, icon("plug", { size: 16 }), "添加连接器"),
         el("a", { class: "btn btn-primary", href: "#/devices?invite=1" }, icon("ticket", { size: 16 }), "邀请新设备"),
-      ]),
+      ])));
+    mount(summaryHolder,
       alert ? el("div", { class: `banner ${alert.level || "warn"}` }, icon("triangle-alert", { size: 18 }),
         el("div", { class: "banner-body" }, el("div", { class: "banner-title" }, alert.title), alert.text ? el("div", { class: "muted" }, alert.text) : null,
           summary.alerts.length > 1 ? el("div", { class: "faint xs" }, `另有 ${summary.alerts.length - 1} 项`) : null),
@@ -393,12 +408,7 @@ export async function settingsPage(ctx) {
       el("div", { class: "step" }, el("div", { class: "step-body" }, el("span", { class: "step-title" }, title), el("span", { class: "step-desc" }, desc))))));
   }
   showGuide("chatgpt");
-  const themeNow = (() => { try { return localStorage.getItem("anx-theme") || "system"; } catch { return "system"; } })();
-  const theme = el("div", { class: "segmented" }, [["system", "跟随系统"], ["light", "浅色"], ["dark", "深色"]].map(([value, text]) =>
-    el("button", { type: "button", "aria-pressed": String(themeNow === value), onclick: (event) => {
-      setTheme(value);
-      for (const button of event.currentTarget.parentElement.children) button.setAttribute("aria-pressed", String(button === event.currentTarget));
-    } }, text)));
+  const looks = appearanceControls();
   const hours = (s) => (s % 86400 === 0 ? `${s / 86400} 天` : `${Math.round(s / 3600)} 小时`);
   mount(page,
     head("设置", "网关信息、AI 客户端的接入方法和本浏览器的外观。"),
@@ -430,7 +440,11 @@ export async function settingsPage(ctx) {
           el("dt", {}, "最长有效期"), el("dd", {}, hours(data.invites.max_ttl_s))),
           el("p", { class: "hint", style: { marginTop: "8px" } }, "在 gateway.json 的 invites.default_ttl_s / max_ttl_s 修改。"))),
       el("section", { class: "card" }, el("div", { class: "card-head" }, el("h2", {}, "外观")),
-        el("div", { class: "card-body stack" }, theme, el("span", { class: "hint" }, "只影响这个浏览器。")))));
+        el("div", { class: "card-body stack" },
+          el("div", { class: "field" }, el("span", { class: "field-label" }, "外观风格"), el("div", {}, looks.style),
+            el("span", { class: "hint" }, "自动：Windows 上用 Win11 云母，其他系统用纯净白。")),
+          el("div", { class: "field" }, el("span", { class: "field-label" }, "明暗"), el("div", {}, looks.theme),
+            el("span", { class: "hint" }, "只影响这个浏览器。"))))));
 }
 
 // ---------------------------------------------------------------- plugins: 插件库 + per device

@@ -1,0 +1,3 @@
+# Fixture transcripts are JSONL on purpose (the root .gitignore ignores *.jsonl).
+!*.jsonl
+!*.zstd

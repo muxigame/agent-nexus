@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>概览 · Agent 对话 · Agent Nexus</title>
+<script src="../../agent_nexus/static/ui/appearance.js"></script>
+<link rel="stylesheet" href="../../agent_nexus/static/ui/tokens.css">
+<link rel="stylesheet" href="../../agent_nexus/static/ui/ui.css">
+<link rel="stylesheet" href="../../agent_nexus/static/ui/style-pure.css">
+<link rel="stylesheet" href="../../agent_nexus/static/ui/style-mica.css">
+<script type="module" src="mock.js"></script>
+</head>
+<!-- Query flags (besides mock.js's ?theme= / ?style=):
+     ?state=new     start on an empty conversation (first-run panel) instead of the active session
+     ?state=first   a device with no sessions at all
+     ?side=open     open the session drawer (narrow widths)
+     ?menu=agent|dir|more|perm|device   open that popover once loaded
+     ?answer=1      answer the pending approval (shows the resolved state) -->
+<body data-shell="local" data-active="/" data-title="概览" data-wide="1">
+<template id="content">
+  <div id="chat-root"></div>
+  <div class="grid cols-3">
+    <div class="card stat"><div class="stat-label">云端连接</div><div class="stat-value">在线</div><div class="stat-meta">hub.example.com · 延迟 38 ms</div></div>
+    <div class="card stat"><div class="stat-label">本机 MCP</div><div class="stat-value">6<span class="unit">个运行中</span></div><div class="stat-meta">1 个需要配置</div></div>
+    <div class="card stat"><div class="stat-label">未读邮件</div><div class="stat-value">3</div><div class="stat-meta">1 个问题等你回答</div></div>
+  </div>
+</template>
+<script type="module">
+import { mountChat } from "../../agent_nexus/static/ui/chat.js";
+import { toast } from "../../agent_nexus/static/ui/ui.js";
+import { createFakeApi } from "./agent-fake-api.js";
+
+const q = new URLSearchParams(location.search);
+try { localStorage.removeItem("anx.chat.prefs.dev-mbp"); localStorage.removeItem("anx.chat.device"); } catch {}
+const api = createFakeApi({ activeRun: q.get("state") !== "first" });
+const chat = mountChat(document.getElementById("chat-root"), api, {
+  session: q.get("state") ? null : { kind: "claude", id: "c-7f3a" },
+  onLogin: (kind, device, command) => toast(`将打开 ${device === "dev-mbp" ? "本机" : device} 的终端并输入：${command}`, { title: "在终端登录" }),
+});
+window.chat = chat;
+const later = (ms) => new Promise((r) => setTimeout(r, ms));
+(async () => {
+  await later(2600);
+  if (q.get("side") === "open") document.querySelector(".chat-side-toggle")?.click();
+  if (q.get("answer")) document.querySelector(".chat-approval .btn-primary")?.click();
+  const menu = q.get("menu");
+  const sel = { agent: ".chat-pick-agent", dir: ".chat-pick-dir", more: ".chat-more", perm: ".chat-pick:nth-of-type(4)", device: ".chat-bar .chat-pick" }[menu];
+  if (sel) document.querySelector(sel)?.click();
+})();
+</script>
+</body>
+</html>

@@ -284,6 +284,30 @@ class GatewayStore:
             return {"handle": row["handle"], "agent_id": row["agent_id"], "workspace": row["workspace"],
                     "client_id": row["client_id"], "meta": json.loads(row["meta"]) if row["meta"] else {}}
 
+    def handle_record(self, handle: str) -> dict | None:
+        """A handle as stored (expired ones included), or None."""
+        with self._lock:
+            row = self._connect().execute("SELECT * FROM handles WHERE handle = ?", (handle,)).fetchone()
+        if row is None:
+            return None
+        record = dict(row)
+        try:
+            record["meta"] = json.loads(row["meta"]) if row["meta"] else {}
+        except ValueError:
+            record["meta"] = {}
+        return record
+
+    def expire_handle(self, handle: str) -> str | None:
+        """End ``handle`` now (kept as a row, so its address history stays); returns its address."""
+        now = self.clock()
+        with self._lock:
+            db = self._connect()
+            row = db.execute("SELECT address FROM handles WHERE handle = ?", (handle,)).fetchone()
+            if row is None:
+                return None
+            db.execute("UPDATE handles SET expires_at = ? WHERE handle = ? AND expires_at > ?", (now - 1, handle, now - 1))
+            return row["address"]
+
     def drop_handle(self, handle: str) -> None:
         with self._lock:
             self._connect().execute("DELETE FROM handles WHERE handle = ?", (handle,))

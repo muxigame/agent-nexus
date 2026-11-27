@@ -45,7 +45,7 @@ ME = "me"
 #: Pseudo senders: not addresses, they cannot receive mail.
 ANON_SENDER = "anon"
 SYSTEM_SENDER = "system"
-KINDS = ("claude", "codex", "gpt", "human", "other")
+KINDS = ("claude", "codex", "gpt", "dsh", "gemini", "human", "other")
 MESSAGE_KINDS = ("message", "task", "result", "system", "question", "answer")
 SEND_KINDS = ("message", "task", "result")
 PRIORITIES = ("normal", "urgent")
@@ -72,7 +72,7 @@ def _is_device_ask(address: str) -> bool:
 
 # -- automatic names (design §8.2 layer 1) -------------------------------------
 #: Client kinds that name an automatic address as they are.
-AUTO_KIND_LABELS = ("claude", "codex", "gpt")
+AUTO_KIND_LABELS = ("claude", "codex", "gpt", "dsh", "gemini")
 #: Room left for a "-NN" collision suffix inside the 64-character name rule.
 AUTO_BASE_CHARS = 61
 AUTO_LABEL_CHARS = 20
@@ -345,8 +345,12 @@ class Mailbox:
 
     def bind(self, handle: str, agent_id: str, *, workdir: str | None, meta: dict | None,
              client_id: str | None, kind_hint: str | None = None, client_name: str | None = None,
-             previous: str | None = None, legacy_anon: bool = False) -> dict:
+             previous: str | None = None, legacy_anon: bool = False, exclusive: bool = False) -> dict:
         """Bind a new context handle to its address (design §8.2).
+
+        ``exclusive``: a new conversation that must never take over an automatic address another live
+        handle holds, however idle (console agent runs, docs/agent-chat.md §10: two open chats in one
+        folder would otherwise share one mailbox).
 
         Without ``session_name`` the address gets an automatic, stable name
         (layer 1); ``legacy_anon`` keeps the old ``anon-<handle>`` address
@@ -382,7 +386,7 @@ class Mailbox:
                 with self._transaction(db):
                     address = self._bind_auto(db, handle, agent_id, workdir=workdir, meta=meta,
                                               client_id=client_id, kind_hint=kind_hint, client_name=client_name,
-                                              previous=previous, now=now)
+                                              previous=previous, now=now, exclusive=exclusive)
                     if legacy is not None and self._legacy_anon(legacy) and legacy["address"] != address:
                         # A conversation from before migration 7 passes its anon-... handle: its mail
                         # follows into the automatic address instead of staying behind.
@@ -570,7 +574,8 @@ class Mailbox:
                 and norm_workdir(row["workdir"]) == norm_workdir(workdir))
 
     def _bind_auto(self, db, handle: str, agent_id: str, *, workdir: str | None, meta: dict, client_id: str | None,
-                   kind_hint: str | None, client_name: str | None, previous: str | None, now: float) -> str:
+                   kind_hint: str | None, client_name: str | None, previous: str | None, now: float,
+                   exclusive: bool = False) -> str:
         """Layer 1: ``<kind>-<workdir>`` for (device, OAuth client, workdir); ``-2``… while another holds it."""
         kind = meta.get("kind") or kind_hint or "other"
         base = auto_base(auto_label(kind, client_name), workdir)
@@ -583,7 +588,7 @@ class Mailbox:
         # restarted one: it may reuse an idle address only once no live handle holds it (the
         # holder expired, ended or rebound elsewhere). Taking an idle holder's address (and its
         # unread mail) over is for a fresh bind only, the restart that layer 1 exists for.
-        running = isinstance(previous, str) and bool(previous)
+        running = (isinstance(previous, str) and bool(previous)) or exclusive
         previous = held["last_handle"] if held is not None else None  # only the current holder counts
         if held is not None and self._same_auto_key(held, kind, client_id, workdir):
             chosen = held  # the same conversation binding again keeps its address
@@ -976,6 +981,10 @@ class Mailbox:
                 (session_id, session_id, int(active), now, title, row["address"]))
         return {"matched": row["address"], "resume_source": "hook" if session_id else row.get("resume_source"),
                 "title": title}
+
+    def has_live_handle(self, address: str) -> bool:
+        with self.store._lock:
+            return self._has_live_handle(self._db(), address, self.clock())
 
     def bye(self, address: str) -> dict:
         with self.store._lock:
@@ -1606,6 +1615,53 @@ class Mailbox:
                                "unread": unread, "open_asks": open_asks, "last_at": last["created_at"],
                                "last_from": self.display(last["from_addr"]), "last_snippet": _clip(last["body"], 100)})
         return result
+
+    def resolve_address(self, address: Any) -> str | None:
+        """An address as stored (``name@<agent id>``) from that or its display form (``name@<device name>``)."""
+        if not isinstance(address, str) or not address or len(address) > 300:
+            return None
+        if address == ME or self.address_row(address) is not None:
+            return address
+        with self.store._lock:
+            found, _unknown = self._expand_plain(self._db(), [address])
+        return found[0] if found else None
+
+    def conversation(self, address: str, *, limit: int = 200, mark_read: bool = False) -> dict:
+        """``me`` and one address (docs/agent-chat.md §10): the mail between them both ways and that address's
+        asks, oldest first. ``mark_read``: file the address's mail to ``me`` as read (the chat shows it)."""
+        resolved = self.resolve_address(address)
+        if resolved is None or resolved == ME:
+            raise RoutingError(f"unknown address {address!r}")
+        limit = max(1, min(int(limit or 200), 500))
+        with self.store._lock:
+            db = self._db()
+            rows = db.execute(
+                "SELECT m.*, d.state AS state, d.to_addr AS delivered_to FROM messages m JOIN deliveries d "
+                "ON d.message_id = m.id WHERE d.state != 'recalled' AND ((m.from_addr = ? AND d.to_addr = ?) "
+                "OR (m.from_addr = ? AND d.to_addr = ?)) ORDER BY m.created_at DESC, m.id DESC LIMIT ?",
+                (resolved, ME, ME, resolved, limit)).fetchall()
+            ask_rows = db.execute("SELECT * FROM asks WHERE from_addr = ? ORDER BY created_at DESC, id DESC LIMIT ?",
+                                  (resolved, limit)).fetchall()
+            unread = [row["id"] for row in rows if row["from_addr"] == resolved and row["state"] == "unread"]
+            if mark_read and unread:
+                now = self.clock()
+                db.executemany("UPDATE deliveries SET state = 'read', read_at = ? WHERE message_id = ? "
+                               "AND to_addr = ? AND state = 'unread'", [(now, mid, ME) for mid in unread])
+        messages = []
+        for row in reversed(rows):
+            item = self._full(row, viewer=ME)
+            item["direction"] = "out" if row["from_addr"] == ME else "in"
+            if mark_read and row["id"] in unread:
+                item["state"] = "read"
+            ask_id = item["meta"].get("ask_id") if isinstance(item.get("meta"), dict) else None
+            if ask_id and row["kind"] == "question":
+                item["ask_id"] = ask_id
+            messages.append(item)
+        asks = [self.ask_view(row) for row in reversed(ask_rows)]
+        row = self.address_row(resolved) or {}
+        return {"address": resolved, "address_display": self.display(resolved), "kind": row.get("kind"),
+                "presence": self.presence(row) if row else None, "messages": messages, "asks": asks,
+                "unread": sum(1 for item in messages if item["direction"] == "in" and item.get("state") == "unread")}
 
     def thread(self, viewer: str, thread_id: str, *, mark_read: bool = True) -> dict:
         view = self.read(viewer, thread_id=thread_id, mark_read=mark_read)

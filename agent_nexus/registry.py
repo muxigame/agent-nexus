@@ -182,6 +182,16 @@ class ManagerConfig:
     terminal: bool = True
     #: ``desktop.enabled``: whether other devices may view and control this desktop (default on).
     desktop: bool = True
+    #: ``agents.enabled``: the agent chat (docs/agent-chat.md): CLIs, sessions and runs (default on). The local
+    #: console always reaches it in process; whether other devices / the cloud console may is ``agents_remote``.
+    agents: bool = True
+    #: ``agents.remote``: announce ``agents/1`` to the gateway, so the cloud console and other devices can run
+    #: agents here. An agent runs commands as the run-as account, as a terminal does, so the default follows
+    #: ``terminal.enabled``: turning remote terminals off turns this off too unless it is set explicitly.
+    agents_remote: bool = True
+    #: ``agents.allow_full_remote``: whether remote callers may open a run with permission ``full`` (no
+    #: approvals at all). Default: on when remote terminals are on.
+    agents_allow_full_remote: bool = True
     #: ``relay.mode``: forward other devices' streams (docs/relay-mesh.md): on / off / auto.
     #: ``auto`` is off for now; it will pick well-reachable, always-on machines.
     relay: str = "auto"
@@ -217,6 +227,12 @@ def load_manager_config(root: Path) -> ManagerConfig:
         cfg.builtins = bool(data.get("builtins", any((cfg.root / rel).is_dir() for rel in BUILTIN_DIRS)))
         terminal = data.get("terminal")
         cfg.terminal = not (isinstance(terminal, dict) and terminal.get("enabled") is False)
+        agents = data.get("agents") if isinstance(data.get("agents"), dict) else {}
+        cfg.agents = agents.get("enabled") is not False
+        remote = agents.get("remote")
+        cfg.agents_remote = cfg.agents and (remote if isinstance(remote, bool) else cfg.terminal)
+        allow_full = agents.get("allow_full_remote")
+        cfg.agents_allow_full_remote = allow_full if isinstance(allow_full, bool) else cfg.terminal
         desktop = data.get("desktop")
         cfg.desktop = not (isinstance(desktop, dict) and desktop.get("enabled") is False)
         relay = data.get("relay")

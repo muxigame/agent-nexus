@@ -97,7 +97,7 @@ def score_tool_search(query: str, mcp_id: str, tool: dict) -> tuple[int, list[st
 #: Claude connectors call them).
 LEGACY_TOOLS_MODES = ("listed", "hidden", "off")
 LEGACY_TOOL_NAMES = frozenset({"workspace_list", "set_workspace"})
-SESSION_KINDS = ("claude", "codex", "gpt", "human", "other")
+SESSION_KINDS = ("claude", "codex", "gpt", "dsh", "gemini", "human", "other")
 WAKE_MODES = ("auto", "never")
 MAX_HANDLES = 10000
 _SESSION_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
@@ -604,6 +604,99 @@ class Gateway:
             result["renamed_from"] = bound["renamed_from_display"]
         return result
 
+    def agent_handle(self, args: Any, *, caller: str | None = None) -> dict:
+        """A workspace handle and mailbox address for a console agent run (docs/agent-chat.md §1, §9, §10).
+
+        ``args``: ``{device_id, workdir, kind, name?}``. The handle selects the device's registered workdir
+        that holds ``workdir`` (the closest one; else its default), and the address is bound with ``workdir``
+        itself, ``kind`` and ``name`` (a free ``session_name``; without one an automatic name such as
+        ``codex-proj``). ``caller``: the device asking for it (None = the owner's console). Console runs are
+        never woken by mail (``wake: never``): the chat shows their mail itself."""
+        if not isinstance(args, dict):
+            raise RoutingError("agent_handle needs an object")
+        device = args.get("device_id") or caller
+        if not isinstance(device, str) or not device:
+            raise RoutingError("agent_handle needs device_id")
+        agent_id = self.devices.resolve(device)
+        if caller is not None and agent_id != caller:
+            requester = self.hub.peers.get(caller)
+            if requester is not None and getattr(requester, "locked", False):
+                raise RoutingError("locked: 这台设备已锁定，解锁后才能操作其他设备")
+        peer = self.hub.peer(agent_id)  # RoutingError when offline
+        workspaces = peer.catalog.get("workspaces") or {}
+        if not workspaces:
+            raise RoutingError(f"{self.devices.label(agent_id)} 没有登记任何工作目录，无法签发工作区")
+        workdir = args.get("workdir") if isinstance(args.get("workdir"), str) else ""
+        name, match = self._closest_workspace(workspaces, workdir)
+        kind = args.get("kind") if args.get("kind") in SESSION_KINDS else "other"
+        # ``console_run``: made here, so agent_release may end it; ``requested_by``: who may (besides the owner).
+        meta: dict[str, Any] = {"kind": kind, "wake": "never", "console_run": True}
+        if caller is not None:
+            meta["requested_by"] = caller
+        session_name = args.get("name")
+        if isinstance(session_name, str) and _SESSION_NAME.fullmatch(session_name):
+            meta["session_name"] = session_name
+        if self.store.live_handle_count() >= MAX_HANDLES:
+            raise RoutingError("workspace context limit reached")
+        handle = uuid4().hex
+        self.store.put_handle(handle, agent_id, name, meta=meta)
+        try:
+            bound = self.mailbox.bind(handle, agent_id, workdir=workdir or workspaces[name].get("path"), meta=meta,
+                                      client_id=None, kind_hint=kind, exclusive=True)
+        except RoutingError:
+            self.store.drop_handle(handle)
+            raise
+        return {"workspace_id": handle, "agent_id": agent_id, "device_id": agent_id, "workspace": name,
+                "path": workdir or workspaces[name].get("path"), "workspace_path": workspaces[name].get("path"),
+                "match": match, "display_name": self.devices.display_name(agent_id),
+                "device_display": self.devices.label(agent_id), "address": bound["address"],
+                "address_display": bound["address_display"], "name_source": bound["name_source"],
+                "mail": {"unread": bound["unread"]}}
+
+    def agent_release(self, args: Any, *, caller: str | None = None) -> dict:
+        """A console run closed (or never started): end the handle :meth:`agent_handle` gave it, so its
+        automatic address is free for the next chat in that folder and no longer listed as live.
+
+        ``args``: ``{workspace_id}``. Only handles made by :meth:`agent_handle`, and only by the device that
+        asked for it, the device it points at, or the owner (``caller`` None). Unknown or expired handles are
+        not an error (the run may outlive the handle)."""
+        if not isinstance(args, dict) or not isinstance(args.get("workspace_id"), str):
+            raise RoutingError("agent_release needs workspace_id")
+        record = self.store.handle_record(args["workspace_id"])
+        if record is None:
+            return {"released": False}
+        meta = record.get("meta") or {}
+        if not meta.get("console_run"):
+            raise RoutingError("agent_release: not a console run's handle")
+        if caller is not None and caller not in (record.get("agent_id"), meta.get("requested_by")):
+            raise RoutingError("agent_release: not this device's handle")
+        address = self.store.expire_handle(args["workspace_id"])
+        ended = False
+        if address and not self.mailbox.has_live_handle(address):
+            self.mailbox.bye(address)
+            ended = True
+        return {"released": True, "address": address, "ended": ended}
+
+    @staticmethod
+    def _closest_workspace(workspaces: dict, workdir: str) -> tuple[str, str]:
+        """(registered workdir name, ``exact`` / ``inside`` / ``default``) for a folder on the device."""
+        def norm(path: str) -> str:
+            return path.replace("\\", "/").rstrip("/").casefold() if path else ""
+
+        target = norm(workdir)
+        best, best_len = None, -1
+        for key, value in workspaces.items():
+            base = norm((value or {}).get("path") or "") if isinstance(value, dict) else ""
+            if not base or not target:
+                continue
+            if target == base:
+                return key, "exact"
+            if target.startswith(base + "/") and len(base) > best_len:
+                best, best_len = key, len(base)
+        if best is not None:
+            return best, "inside"
+        return ("default" if "default" in workspaces else next(iter(workspaces))), "default"
+
     async def hub_call(self, peer, params: Any) -> dict:
         """A device -> gateway request (``hub_call/1``, design §3.2).
 
@@ -658,6 +751,12 @@ class Gateway:
         if op == "connector_registry" and self.hub.connectors is not None:
             # The local console's connectors page writes the same registry (design §7.1).
             return await self.hub.connectors.registry_op(args)
+        if op == "agent_handle":
+            # A console agent run on this device (docs/agent-chat.md §9): its handle and mailbox address.
+            return self.agent_handle(args, caller=peer.agent_id)
+        if op == "agent_release":
+            # That run closed: its handle ends and its automatic address is free again.
+            return self.agent_release(args, caller=peer.agent_id)
         if op == "mail_local":
             # The local console's inbox page (design §8.12).
             return await self.inbox.call(args.get("op"), args, via="inbox")

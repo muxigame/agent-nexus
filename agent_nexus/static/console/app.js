@@ -1,16 +1,18 @@
 // The gateway console (docs/ui-spec.md §3): shell, routing, polling.
-import { renderShell, createRouter, fetchJSON, el, mount, setTheme, restoreTheme, icon } from "/ui/ui.js";
+import { renderShell, createRouter, fetchJSON, el, mount, restoreTheme, icon, appearanceButton } from "/ui/ui.js";
 import { mountInbox } from "/ui/inbox.js";
 import { overviewPage, devicesPage, settingsPage, pluginsPage } from "/console/pages.js";
 import { renderDownloads } from "/console/downloads.js";
 import { connectorsPage } from "/console/connectors.js";
 import { terminalPage, loadVendor } from "/ui/terminal.js";
 import { topologyPage } from "/console/topology.js";
+import { agentPage, cloudAgentApi } from "/ui/agent-wire.js";
 
 restoreTheme();
 const NAV = [
   { path: "/", label: "概览", icon: "layout-dashboard", primary: true },
   { path: "/devices", label: "设备", icon: "monitor", primary: true },
+  { path: "/agent", label: "Agent", icon: "bot" },
   { path: "/topology", label: "拓扑", icon: "network" },
   { path: "/connectors", label: "连接器", icon: "plug", primary: true },
   { path: "/plugins", label: "插件", icon: "puzzle" },
@@ -29,17 +31,12 @@ async function logout() {
   location.href = "/auth/login";
 }
 
-function toggleTheme() {
-  const root = document.documentElement;
-  const dark = root.dataset.theme === "dark" || (!root.dataset.theme && matchMedia("(prefers-color-scheme: dark)").matches);
-  setTheme(dark ? "light" : "dark");
-}
 
 const shell = renderShell(document.body, {
   sub: "云端控制台", nav: NAV, status: { state: "connecting", label: "正在连接网关…" },
   footer: [{ label: "退出登录", icon: "log-out", onClick: logout }],
 });
-shell.setActions(el("button", { class: "btn btn-ghost btn-icon", type: "button", "aria-label": "切换主题", title: "切换主题", onclick: toggleTheme }, icon("sun", { size: 18 })));
+shell.setActions(appearanceButton());
 
 /** Everything a page needs: where to draw, the shell, and a way to poll while it is shown. */
 let cleanup = [];
@@ -101,7 +98,8 @@ async function downloadsPage() {
 }
 
 const router = createRouter({
-  "/": (route) => overviewPage(context("概览"), route),
+  "/": (route) => overviewPage(context("概览", { wide: true }), route),
+  "/agent": (route) => agentPage(context("Agent", { wide: true }), route, { api: cloudAgentApi() }),
   "/devices": (route) => devicesPage(context("设备"), route),
   "/topology": (route) => topologyPage(context("拓扑", { wide: true }), route),
   "/connectors": (route) => connectorsPage(context("连接器"), route),

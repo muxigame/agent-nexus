@@ -21,6 +21,13 @@ export function loadVendor() {
   return vendor;
 }
 
+/** Something to type once the next 终端 page of a device is connected (the agent chat's 在终端登录):
+ *  {program, args, note}. Kept in memory only -- a link can never make the terminal type a command. */
+const pendingInput = new Map();
+export function queueTerminalInput(deviceId, { program, args = [], note = "" } = {}) {
+  if (deviceId && program) pendingInput.set(deviceId, { program, args, note, at: Date.now() });
+}
+
 function shellKey(deviceId) { return `anx.terminal.shell.${deviceId}`; }
 function rememberedShell(deviceId) { try { return localStorage.getItem(shellKey(deviceId)) || ""; } catch { return ""; } }
 function rememberShell(deviceId, shell) { try { localStorage.setItem(shellKey(deviceId), shell); } catch { /* private mode */ } }
@@ -166,6 +173,12 @@ export async function terminalPage(ctx, { params, query }, api = GATEWAY_TERMINA
         setStatus("online", message.shell?.name || "已连接");
         term?.focus();
         if (launchOnReady) { launchOnReady = false; codex(); }
+        const queued = pendingInput.get(deviceId);
+        pendingInput.delete(deviceId);
+        if (queued && Date.now() - queued.at < 120000) {
+          send(`${[runCommand(queued.program, shellId), ...queued.args].join(" ")}\r`);
+          if (queued.note) toast(queued.note, { type: "info", timeout: 12000 });
+        }
       } else if (message.type === "exit") {
         ready = false;
         setStatus("offline", "已退出");

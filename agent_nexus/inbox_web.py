@@ -245,6 +245,10 @@ class InboxWeb:
             op = "summary"
         elif route == "threads":
             op = "threads"
+        elif route == "conversation":
+            op = "conversation"
+            args.update(address=query.get("address", ""), limit=query.get("limit") or 200,
+                        mark_read=query.get("mark_read") in ("1", "true"))
         elif route == "thread":
             op, args["thread_id"] = "thread", params["thread_id"]
             args["mark_read"] = query.get("mark_read", "1") not in ("0", "false")
@@ -286,6 +290,7 @@ class InboxWeb:
             api("/api/inbox/summary", "summary", ["GET"]),
             api("/api/inbox/threads", "threads", ["GET"]),
             api("/api/inbox/threads/{thread_id}", "thread", ["GET"]),
+            api("/api/inbox/conversation", "conversation", ["GET"]),
             api("/api/inbox/send", "send", ["POST"]),
             api("/api/inbox/asks", "asks", ["GET"]),
             api("/api/inbox/asks/{ask_id}", "ask", ["GET"]),

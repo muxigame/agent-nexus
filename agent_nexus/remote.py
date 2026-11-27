@@ -89,6 +89,38 @@ async def terminal_info(root: Path, device_id: str, *, refresh: bool = False) ->
     return response.json()
 
 
+async def agents_call(root: Path, device_id: str, op: str, params: dict) -> dict:
+    """One ``agent_*`` op on another device through the gateway (docs/agent-chat.md §9), with this device's
+    credential. The handler's own ``{"error", "code"}`` answers come back as they are."""
+    import httpx
+
+    from .agents.hub import call_timeout
+
+    origin, agent_id, token = credentials(root)
+    url = f"{origin}/api/devices/{quote(device_id, safe='')}/agents/{quote(op, safe='')}"
+    try:
+        response = await gateway_http().post(url, json=params, headers={**headers(agent_id, token), "X-ANX": "1"},
+                                             timeout=call_timeout(op, params) + 10)
+    except httpx.TimeoutException:
+        raise RemoteError(504, "设备没有及时回应，请稍后再试", "timeout") from None
+    except httpx.HTTPError:
+        raise RemoteError(502, "无法连接网关", "gateway_unreachable") from None
+    if response.status_code == 404:
+        try:
+            missing = response.json().get("code") != "unknown_op"
+        except (ValueError, AttributeError):
+            missing = True
+        if missing:  # a gateway without agents/1 has no such route
+            raise RemoteError(409, "网关版本太旧，不支持 Agent 对话（升级网关后再试）", "gateway_too_old")
+    if response.status_code != 200:
+        raise _gateway_error(response)
+    try:
+        body = response.json()
+    except ValueError:
+        raise RemoteError(502, "网关的回答格式不对", "gateway_error") from None
+    return body if isinstance(body, dict) else {"error": "网关的回答格式不对", "code": "gateway_error"}
+
+
 def terminal_socket_url(origin: str, device_id: str, query: dict) -> str:
     scheme, _, rest = origin.partition("://")
     ws = "wss" if scheme == "https" else "ws"

@@ -410,6 +410,9 @@ def build_cloud_app(config: dict, root: Path):
     # Remote terminal: GET /api/devices/{id}/terminal and its WebSocket (term/1 devices).
     from .terminal_bridge import TerminalBridge
     app.router.routes[0:0] = TerminalBridge(console, device_credential=device_credential).routes()
+    # The agent chat: /api/devices/{id}/agents/{op} to agents/1 devices, and run handles (docs/agent-chat.md §9).
+    from .agents_bridge import AgentsBridge
+    app.router.routes[0:0] = AgentsBridge(console, device_credential=device_credential).routes()
     # File transfer through the gateway when no tunnel can be punched (files/1 devices).
     from .files_bridge import FilesBridge
     app.router.routes[0:0] = FilesBridge(console, device_credential=device_credential).routes()

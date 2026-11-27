@@ -1,0 +1,9 @@
+{"sessionId": "acp-demo-1", "cwd": "/home/u/acp", "timestamp": "2026-11-23T10:00:00Z"}
+{"timestamp": "2026-11-23T10:00:01Z", "update": {"sessionUpdate": "user_message_chunk", "content": {"type": "text", "text": "列出当前目录"}}}
+{"timestamp": "2026-11-23T10:00:02Z", "update": {"sessionUpdate": "agent_thought_chunk", "content": {"type": "text", "text": "用 ls。"}}}
+{"timestamp": "2026-11-23T10:00:03Z", "update": {"sessionUpdate": "tool_call", "toolCallId": "tc1", "title": "ls -la", "kind": "execute", "status": "pending", "rawInput": {"command": "ls -la"}}}
+{"timestamp": "2026-11-23T10:00:04Z", "update": {"sessionUpdate": "tool_call_update", "toolCallId": "tc1", "status": "completed", "content": [{"type": "content", "content": {"type": "text", "text": "a.txt\nb.txt"}}]}}
+{"timestamp": "2026-11-23T10:00:05Z", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "有两个文件："}}}
+{"timestamp": "2026-11-23T10:00:05Z", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "a.txt 和 b.txt。"}}}
+{"timestamp": "2026-11-23T10:00:06Z", "update": {"sessionUpdate": "tool_call", "toolCallId": "tc2", "title": "编辑 a.txt", "kind": "edit", "status": "completed", "content": [{"type": "diff", "path": "/home/u/acp/a.txt", "oldText": "x", "newText": "y"}]}}
+{"timestamp": "2026-11-23T10:00:07Z", "update": {"sessionUpdate": "unknown_future_thing", "foo": 1}}
