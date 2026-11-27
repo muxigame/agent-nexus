@@ -1,10 +1,14 @@
-// Agent chat (docs/agent-chat.md §3, §4, §10, §11): session sidebar grouped by CLI, target bar
-// (运行设备 / Agent / 目录 / 权限 / ⋯), unified event stream, composer.
+// Agent chat (docs/agent-chat.md §3, §4, §10, §11, §16): session sidebar grouped by CLI, target bar
+// (运行设备 / Agent / 目录 / 权限 / ⋯), unified event stream, composer with the context-usage ring.
 //
 //   import { mountChat } from "/ui/chat.js";
 //   const chat = mountChat(container, api, {onLogin(kind, device, command, info) {…}, onEditPrompts(device) {…},
-//                                           localDevice: true /* false: no synthetic 本机 entry (the cloud console) */});
-//   chat.destroy();   // stops polling (also stops by itself once the container leaves the document)
+//                                           localDevice: true /* false: no synthetic 本机 entry (the cloud console) */,
+//                                           storageKey: "anx-chat:local" /* §16.2: the state kept per console */,
+//                                           persistent: true /* keep running while detached (ui/chat-page.js) */,
+//                                           want: {device, kind, session: {kind, id}, fresh} /* URL params, win over storage */});
+//   chat.apply(want);  // later URL params (#/chat?device=&kind=&session=)
+//   chat.destroy();    // stops polling (without `persistent` also by itself once the container leaves the document)
 //
 // `api` adapts the console's transport so the same component runs in the cloud console and the local one:
 //   call(op, params, device) -> Promise<result>   POST JSON → JSON; `device` = runner device id from devices()
@@ -17,7 +21,7 @@
 
 import { el, icon, mount, toast, modal, drawer, confirmDialog, relTime, copy } from "./ui.js";
 import {
-  xicon, KINDS, KIND_ORDER, kindLabel, kindShort, kindMark, callOp, normalizeAgents, agentStatus, notReadyReason,
+  xicon, KINDS, KIND_ORDER, kindLabel as baseLabel, kindShort as baseShort, kindMark as baseMark, callOp, normalizeAgents, agentStatus, notReadyReason,
   watchInstall, progressBar, jobActive, loginCommand, shortPath, toSeconds, mountTmpManager,
 } from "./agent-admin.js";
 import { mountPromptEditor } from "./prompts.js";
@@ -37,13 +41,84 @@ const EXAMPLES = [
   ["写提交说明", "看看工作区里未提交的改动，帮我写一条提交说明"],
   ["检查依赖", "检查依赖里有没有需要升级的安全问题，列出来但先别改"],
 ];
-const KEY = "anx.chat.";
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// §16.2: a hidden page keeps its long-poll for this long, then pauses until it is shown again.
+export const PAUSE_HIDDEN_MS = 10 * 60 * 1000;
 
-function load(key, fallback) {
-  try { const raw = localStorage.getItem(KEY + key); return raw ? JSON.parse(raw) : fallback; } catch { return fallback; }
+/** §16.2: the chat state of one console, one JSON object under `anx-chat:<console>`. */
+export function chatStore(key) {
+  const read = () => {
+    try { const raw = localStorage.getItem(key); const value = raw ? JSON.parse(raw) : {}; return value && typeof value === "object" ? value : {}; } catch { return {}; }
+  };
+  return {
+    key, read,
+    write(patch) {
+      const next = { ...read(), ...patch };
+      try { localStorage.setItem(key, JSON.stringify(next)); } catch { /* private mode / quota */ }
+      return next;
+    },
+  };
 }
-function save(key, value) { try { localStorage.setItem(KEY + key, JSON.stringify(value)); } catch { /* private mode */ } }
+
+/**
+ * One device's remembered choices ({kind, workdir, permission, preset, context, session, rid}) in a stored chat
+ * state: its `byDevice` entry. The top-level fields are the last device's, so they count only in a state without
+ * `byDevice`, and only for that device -- else the previous device's workdir leaks onto a newly chosen one.
+ */
+export function devicePrefs(stored, id) {
+  const st = stored && typeof stored === "object" ? stored : {};
+  const byDevice = st.byDevice && typeof st.byDevice === "object" ? st.byDevice : {};
+  if (Object.keys(byDevice).length) return byDevice[id ?? "local"] || {};
+  return st.device === id ? st : {};   // a state written before byDevice existed
+}
+
+// ---------------------------------------------------------------- API models (§16.4): kind = "api:<provider>/<model>"
+
+export const isApiKind = (kind) => String(kind || "").startsWith("api:");
+const apiName = (kind) => String(kind).slice(4).split("/").filter(Boolean).pop() || "API";
+function kindLabel(kind, info) { return isApiKind(kind) && !info?.label ? apiName(kind) : baseLabel(kind, info); }
+function kindShort(kind, info) { return isApiKind(kind) ? info?.label || apiName(kind) : baseShort(kind, info); }
+function kindMark(kind, opts = {}) {
+  if (!isApiKind(kind)) return baseMark(kind, opts);
+  return el("span", { class: `aa-mark ${opts.size || "sm"}`, dataset: { kind: "api" }, "aria-hidden": "true" }, "API");
+}
+
+// ---------------------------------------------------------------- context usage (§16.3)
+
+/** 872100 -> "872.1K", 1000000 -> "1M" (the ring's title and its no-limit count). */
+export function tokenCount(n) {
+  const v = Math.max(0, Number(n) || 0);
+  const trim = (x) => x.toFixed(1).replace(/\.0$/, "");
+  return v >= 1e6 ? `${trim(v / 1e6)}M` : v >= 1e3 ? `${trim(v / 1e3)}K` : String(Math.round(v));
+}
+
+/** {used, limit, model} -> {pct|null, tone: ""|warn|bad, title}; null when nothing is known yet. */
+export function usageView(context) {
+  if (!context || !(Number(context.used) >= 0) || context.used === null) return null;
+  const used = Number(context.used) || 0;
+  const limit = Number(context.limit) > 0 ? Number(context.limit) : null;
+  const model = context.model ? `· 模型 ${context.model}` : "";
+  if (!limit) return { pct: null, tone: "", title: `已用 ${tokenCount(used)}（上限未知）${model}` };
+  const ratio = used / limit;
+  const pct = Math.round(ratio * 100);
+  return { pct, ratio, tone: ratio > 0.95 ? "bad" : ratio > 0.8 ? "warn" : "", title: `已用 ${tokenCount(used)} / ${tokenCount(limit)}（${pct}%）${model}` };
+}
+
+function usageRing(view) {
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("viewBox", "0 0 18 18"); svg.setAttribute("width", "18"); svg.setAttribute("height", "18"); svg.setAttribute("aria-hidden", "true");
+  const r = 7, c = 2 * Math.PI * r;
+  const track = document.createElementNS(ns, "circle");
+  const bar = document.createElementNS(ns, "circle");
+  for (const node of [track, bar]) { node.setAttribute("cx", "9"); node.setAttribute("cy", "9"); node.setAttribute("r", String(r)); }
+  track.setAttribute("class", "chat-usage-track");
+  bar.setAttribute("class", "chat-usage-bar");
+  bar.setAttribute("stroke-dasharray", `${(Math.min(1, view.ratio) * c).toFixed(2)} ${c.toFixed(2)}`);
+  bar.setAttribute("transform", "rotate(-90 9 9)");
+  svg.append(track, bar);
+  return svg;
+}
 
 // ---------------------------------------------------------------- popovers and menus (appended to <body>)
 
@@ -52,8 +127,10 @@ function closePop() { openPop?.close(); }
 // Popovers opened from the keyboard focus their first item; opened by pointer they focus the panel
 // (arrow keys still work) so no focus ring flashes on a mouse click.
 let keyboardUse = false;
-document.addEventListener("keydown", () => { keyboardUse = true; }, true);
-document.addEventListener("pointerdown", () => { keyboardUse = false; }, true);
+if (typeof document !== "undefined") {   // (the module also loads without a DOM: tests/test_chat_page_ui.cjs)
+  document.addEventListener("keydown", () => { keyboardUse = true; }, true);
+  document.addEventListener("pointerdown", () => { keyboardUse = false; }, true);
+}
 
 function placePop(panel, anchor, align) {
   const rect = anchor.getBoundingClientRect ? anchor.getBoundingClientRect() : { left: anchor.x, right: anchor.x, top: anchor.y, bottom: anchor.y };
@@ -232,15 +309,17 @@ function formatInput(input) {
 // ---------------------------------------------------------------- the component
 
 export function mountChat(container, api, opts = {}) {
+  const store = chatStore(opts.storageKey || "anx-chat:local");
   const S = {
-    devices: [], device: opts.device || null, agents: [], dirs: null, presets: [], runs: [],
+    devices: [], device: null, agents: [], dirs: null, presets: [], runs: [],
     kind: null, workdir: "", permission: "ask", preset: "default", context: { mode: "direct", device: "", workdir: "" },
     sessions: [], sessionsState: "loading", sessionsError: "", filterKind: "all", query: "",
     session: null, rid: null, cursor: 0, runState: "idle", sessionId: null, address: null,
-    deviceError: "", loading: true, gen: 0, alive: true,
+    deviceError: "", loading: true, gen: 0, alive: true, usage: null,
   };
   const installs = new Map();   // kind -> {watch, job}
   let convTimer = null;
+  let fellBack = false;         // the "device offline, using another" toast is said once
 
   // --- skeleton
   const sideList = el("div", { class: "chat-sessions", role: "list", "aria-label": "会话" });
@@ -251,6 +330,7 @@ export function mountChat(container, api, opts = {}) {
     el("div", { class: "chat-side-head" },
       el("h2", {}, "会话"),
       el("button", { class: "btn btn-sm chat-new", type: "button", onclick: () => newChat() }, xicon("square-pen", { size: 14 }), "新对话"),
+      el("button", { class: "btn btn-ghost btn-icon btn-sm chat-side-collapse", type: "button", "aria-label": "收起会话列表", title: "收起会话列表", onclick: () => setCollapsed(true) }, icon("panel-left", { size: 16 })),
       el("button", { class: "btn btn-ghost btn-icon btn-sm chat-side-close", type: "button", "aria-label": "收起会话列表", onclick: () => toggleSide(false) }, icon("x", { size: 16 }))),
     kindTabs,
     el("div", { class: "input-icon chat-search-wrap" }, icon("search", { size: 15 }), search),
@@ -270,12 +350,18 @@ export function mountChat(container, api, opts = {}) {
   const sendBtn = el("button", { class: "btn btn-primary btn-icon chat-send", type: "button", "aria-label": "发送", title: "发送（Enter）", onclick: () => send() }, xicon("arrow-up", { size: 18 }));
   const stopBtn = el("button", { class: "btn chat-stop", type: "button", hidden: true, onclick: () => stop() }, icon("square", { size: 13 }), "停止");
   const composerNote = el("div", { class: "chat-note" });
+  // a button: phones show no title tooltip, so a tap shows the figures
+  const usageNode = el("button", { class: "chat-usage", type: "button", hidden: true, onclick: () => {
+    const view = usageView(S.usage);
+    if (view) toast(`上下文${view.title}`, { type: "info", timeout: 5000 });
+  } });
   const composer = el("div", { class: "chat-composer" },
     input,
-    el("div", { class: "chat-composer-foot" }, composerNote, el("div", { class: "chat-composer-actions" }, stopBtn, sendBtn)));
+    el("div", { class: "chat-composer-foot" }, composerNote, el("div", { class: "chat-composer-actions" }, usageNode, stopBtn, sendBtn)));
   const main = el("section", { class: "chat-main", "aria-label": "对话" }, bar, ctxLine, el("div", { class: "chat-body" }, scroller, jump), el("div", { class: "chat-composer-wrap" }, composer), live);
   const root = el("div", { class: "chat card" }, side, scrim, main);
   if (opts.height) root.style.setProperty("--chat-h", typeof opts.height === "number" ? `${opts.height}px` : opts.height);
+  if (store.read().sideCollapsed) root.classList.add("side-collapsed");
   mount(container, root);
 
   const call = (op, params = {}) => callOp(api, op, params, S.device);
@@ -307,6 +393,10 @@ export function mountChat(container, api, opts = {}) {
 
   // --- input behaviour
   input.addEventListener("input", autoGrow);
+  let draftTimer = null;
+  input.addEventListener("input", () => { clearTimeout(draftTimer); draftTimer = setTimeout(saveDraft, 300); });
+  function saveDraft() { clearTimeout(draftTimer); store.write({ draft: input.value }); }
+  { const draft = store.read().draft; if (typeof draft === "string" && draft) { input.value = draft; requestAnimationFrame(autoGrow); } }
   input.addEventListener("keydown", (event) => {
     if (event.key === "Enter" && !event.shiftKey && !event.isComposing && event.keyCode !== 229) {
       event.preventDefault();
@@ -355,6 +445,16 @@ export function mountChat(container, api, opts = {}) {
     if (open) (sideList.querySelector(".chat-sess.active .chat-sess-main") || search).focus();
     else if (was && side.contains(document.activeElement)) bar.querySelector(".chat-side-toggle")?.focus();
   }
+  // wide layouts: the list can be collapsed (remembered, §16.2); the bar's toggle brings it back
+  function setCollapsed(on) {
+    root.classList.toggle("side-collapsed", on);
+    store.write({ sideCollapsed: on });
+    if (on) bar.querySelector(".chat-side-toggle")?.focus(); else (sideList.querySelector(".chat-sess.active .chat-sess-main") || search).focus();
+  }
+  function sideButton() {
+    // the same breakpoint as the `@container chat (max-width: 899px)` drawer layout
+    if (root.clientWidth < 900) toggleSide(!root.classList.contains("side-open")); else setCollapsed(!root.classList.contains("side-collapsed"));
+  }
   root.addEventListener("keydown", (event) => {
     if (event.key !== "Escape" || !root.classList.contains("side-open") || event.defaultPrevented) return;
     if (openPop || event.target.closest?.(".chat-rename")) return;  // a menu or the rename field takes it first
@@ -367,7 +467,21 @@ export function mountChat(container, api, opts = {}) {
 
   // ============================================================ data loading
 
-  async function init() {
+  const usableDevice = (id) => S.devices.some((d) => d.id === id && d.online !== false);
+  /** The default runner: 本机 when it can run, else the first usable device. */
+  const defaultDevice = () => (S.devices.find((d) => d.self && d.online !== false) || S.devices.find((d) => d.online !== false) || {}).id;
+  /** `fromLink`: the device came from a URL param (Overview card, inbox), else from the stored state. */
+  function fallBackToast(wanted, used, { fromLink = false } = {}) {
+    if (fellBack) return;
+    fellBack = true;
+    const d = S.devices.find((item) => item.id === wanted);
+    const source = fromLink ? "链接里的运行设备" : "上次的运行设备";
+    const name = d ? `“${d.self ? "本机" : d.name || d.id}”` : "";
+    const why = d ? `不可用（原因：${d.hint || (d.online === false ? "离线" : "不支持 Agent 对话")}）` : "已不在设备列表里";
+    toast(`${source}${name}${why}，已改用${deviceName(used)}`, { type: "info", timeout: 4200 });
+  }
+
+  async function init(want = {}) {
     let devices = [];
     try { devices = (await api.devices()) || []; } catch { devices = []; }
     if (!alive()) return;
@@ -385,25 +499,58 @@ export function mountChat(container, api, opts = {}) {
       renderAll();
       return;
     }
-    const remembered = load("device", undefined);
-    const pick = [S.device, remembered].find((id) => id !== undefined && devices.some((d) => d.id === id && d.online !== false));
-    await selectDevice(pick !== undefined ? pick : devices[0].id, { initial: true });
-    // The session the page asked for (selectDevice already reopened what was open before a reload).
-    const want = opts.session;
-    const found = want && S.sessions.find((s) => s.id === want.id && (!want.kind || s.kind === want.kind));
-    if (found && alive() && !(S.session && S.session.id === found.id && S.session.kind === found.kind)) openSession(found);
+    // URL params win over the stored state (§16.2); a device that is offline or no longer supported falls
+    // back to the default once, with a toast.
+    const wanted = want.device !== undefined ? want.device : store.read().device;
+    let pick = wanted !== undefined && usableDevice(wanted) ? wanted : defaultDevice();
+    if (pick === undefined) pick = devices[0].id;
+    if (wanted !== undefined && wanted !== pick) fallBackToast(wanted, pick, { fromLink: want.device !== undefined });
+    const asked = !!(want.session || want.fresh);
+    await selectDevice(pick, { initial: true, restore: !asked });
+    if (alive()) await applyWant({ ...want, device: undefined });
   }
 
-  async function selectDevice(id, { initial = false } = {}) {
+  /** Act on URL params ({device, kind, session: {kind, id}, fresh}) once the chat has a device. */
+  async function applyWant(want = {}) {
+    if (!want || !alive()) return;
+    const asked = !!(want.session || want.fresh);
+    if (want.device !== undefined && want.device !== S.device) {
+      if (usableDevice(want.device)) await selectDevice(want.device, { restore: !asked });
+      else if (S.devices.length) { fellBack = false; fallBackToast(want.device, S.device, { fromLink: true }); }
+      if (!alive()) return;
+    }
+    if (want.fresh && (S.session || S.rid)) newChat();
+    if (want.session?.id) {
+      const { kind, id } = want.session;
+      const same = S.session && S.session.id === id && (!kind || S.session.kind === kind);
+      const found = S.sessions.find((x) => x.id === id && (!kind || x.kind === kind));
+      if (!same) {
+        const run = !found && S.runs.find((r) => r.session_id === id && r.state !== "closed");
+        if (found) await openSession(found);
+        else if (run) attachRun(run);
+        else if (kind) await openSession({ kind, id });
+      }
+    } else if (want.kind && want.kind !== S.kind && agentInfo(want.kind)) {
+      S.kind = want.kind; fitPermission(); persist(); renderBar(); renderWelcome(); renderComposer();
+    }
+    if (asked && want.fresh) input.focus({ preventScroll: true });
+  }
+
+  /** Per-device choices ({kind, workdir, permission, preset, context, session, rid}) from the console's store. */
+  function prefsFor(id) { return devicePrefs(store.read(), id); }
+
+  async function selectDevice(id, { initial = false, restore = true } = {}) {
     S.gen += 1;
     const gen = S.gen;
+    // read this device's choices before the store's top-level fields are re-attributed to it: those belong to
+    // the device chosen before (prefsFor falls back to them only when they were that device's own)
+    const prefs = prefsFor(id);
     S.device = id;
-    save("device", id);
+    store.write({ device: id });
     Object.assign(S, { agents: [], policy: null, dirs: null, presets: [], runs: [], sessions: [], sessionsState: "loading", deviceError: "", loading: true,
       session: null, rid: null, cursor: 0, runState: "idle", sessionId: null, address: null });
     for (const entry of installs.values()) entry.watch?.stop();
     installs.clear();
-    const prefs = load(`prefs.${id ?? "local"}`, {});
     S.kind = prefs.kind || null;
     S.workdir = prefs.workdir || "";
     S.permission = PERMISSION_LABEL[prefs.permission] && prefs.permission !== "full" ? prefs.permission : "ask";
@@ -437,13 +584,21 @@ export function mountChat(container, api, opts = {}) {
     S.loading = false;
     for (const agent of S.agents) if (jobActive(agent.install) && agent.install.job_id) followInstall(agent.kind, agent.install.job_id);
     renderAll();
-    // back on the Overview (reload, or from another page): reopen the conversation that was open
+    // back on the chat (reload, another device, from another page): reopen the conversation that was open --
+    // a run that is still alive is followed again (agent_run_read), else the session's history opens.
     const lastRun = prefs.rid && S.runs.find((r) => r.rid === prefs.rid && r.state !== "closed");
     const lastSession = prefs.session && S.sessions.find((x) => x.kind === prefs.session.kind && x.id === prefs.session.id);
-    if (initial && opts.session) { /* init opens the session the page asked for */ }
-    else if (lastSession) openSession(lastSession);
-    else if (lastRun) attachRun(lastRun);
-    if (initial && !S.session && !S.rid) input.focus({ preventScroll: true });
+    if (!restore) { /* the URL asked for a session or a new chat */ }
+    else if (lastSession) {
+      const g = S.gen;
+      await openSession(lastSession);   // follows the session's live run itself (runFor)
+      if (lastRun && S.gen === g + 1 && !S.rid) attachRun(lastRun, { keep: true });
+    } else if (lastRun) attachRun(lastRun);
+    else if (prefs.session?.id && prefs.session.kind) {
+      // not in the list (past its limit, hidden, written late by the CLI) and no live run: its history opens
+      await openSession({ kind: prefs.session.kind, id: prefs.session.id }, { restoring: true });
+    }
+    if (initial && !S.session && !S.rid && root.isConnected) input.focus({ preventScroll: true });
   }
 
   function listOf(value, key) { return Array.isArray(value) ? value : Array.isArray(value?.[key]) ? value[key] : []; }
@@ -460,8 +615,12 @@ export function mountChat(container, api, opts = {}) {
   }
 
   function persist() {
-    const session = S.session ? { kind: S.session.kind, id: S.session.id } : null;
-    save(`prefs.${S.device ?? "local"}`, { kind: S.kind, workdir: S.workdir, permission: S.permission === "full" ? "ask" : S.permission, preset: S.preset, context: S.context, session, rid: S.rid || null });
+    const session = S.session ? { kind: S.session.kind, id: S.session.id } : S.sessionId && S.kind ? { kind: S.kind, id: S.sessionId } : null;
+    // "full" is never remembered: it needs its explicit confirmation every time
+    const prefs = { kind: S.kind, workdir: S.workdir, permission: S.permission === "full" ? "ask" : S.permission, preset: S.preset, context: S.context, session, rid: S.rid || null };
+    const st = store.read();
+    const byDevice = { ...(st.byDevice && typeof st.byDevice === "object" ? st.byDevice : {}), [S.device ?? "local"]: prefs };
+    store.write({ device: S.device, ...prefs, byDevice });
   }
 
   async function refreshSessions() {
@@ -479,10 +638,10 @@ export function mountChat(container, api, opts = {}) {
     renderSessions();
   }
 
-  async function refreshAgents() {
+  async function refreshAgents({ fresh = true } = {}) {
     const gen = S.gen;
     try {
-      const value = await call("agent_info", { fresh: true });
+      const value = await call("agent_info", fresh ? { fresh: true } : {});
       if (gen !== S.gen) return;
       S.agents = normalizeAgents(value);
       S.policy = value?.policy || null;
@@ -496,15 +655,16 @@ export function mountChat(container, api, opts = {}) {
 
   function renderKinds() {
     const counts = {};
-    for (const s of S.sessions) if (!s.hidden) counts[s.kind] = (counts[s.kind] || 0) + 1;
+    for (const s of S.sessions) if (!s.hidden) { const k = tabKind(s.kind); counts[k] = (counts[k] || 0) + 1; }
     const kinds = KIND_ORDER.filter((k) => counts[k] || S.agents.some((a) => a.kind === k && a.installed));
-    for (const k of Object.keys(counts)) if (!kinds.includes(k)) kinds.push(k);
+    for (const k of Object.keys(counts)) if (!kinds.includes(k) && k !== "api") kinds.push(k);
+    if (counts.api) kinds.push("api");
     if (S.filterKind !== "all" && !kinds.includes(S.filterKind)) S.filterKind = "all";
     const tab = (key, label, count) => el("button", {
       class: "chat-kind", type: "button", role: "tab", "aria-selected": String(S.filterKind === key),
       onclick: () => { S.filterKind = key; renderKinds(); renderSessions(); },
     }, label);
-    mount(kindTabs, tab("all", "全部", 0), kinds.map((k) => tab(k, kindShort(k, agentInfo(k)), counts[k] || 0)));
+    mount(kindTabs, tab("all", "全部", 0), kinds.map((k) => tab(k, k === "api" ? "API" : kindShort(k, agentInfo(k)), counts[k] || 0)));
     requestAnimationFrame(kindsEdge);
   }
   // More CLIs than fit: fade the cut edge so the strip reads as scrollable.
@@ -514,6 +674,10 @@ export function mountChat(container, api, opts = {}) {
     kindTabs.classList.toggle("fade-start", max > 2 && kindTabs.scrollLeft > 2);
   }
   kindTabs.addEventListener("scroll", kindsEdge, { passive: true });
+
+  // the sidebar's CLI tabs: every API model's sessions share one "API" tab (§16.4)
+  function tabKind(kind) { return isApiKind(kind) ? "api" : kind; }
+  const kindFilter = (kind) => S.filterKind === "all" || tabKind(kind) === S.filterKind;
 
   function sessionTitle(s) { return s.alias || s.title || "（无标题）"; }
   function runFor(s) { return S.runs.find((r) => r.session_id && r.session_id === s.id && r.state !== "closed"); }
@@ -531,19 +695,19 @@ export function mountChat(container, api, opts = {}) {
       return;
     }
     const q = S.query;
-    const visible = S.sessions.filter((s) => !s.hidden && (S.filterKind === "all" || s.kind === S.filterKind)
+    const visible = S.sessions.filter((s) => !s.hidden && kindFilter(s.kind)
       && (!q || [s.alias, s.title, s.cwd].some((v) => String(v || "").toLowerCase().includes(q))));
     // a run whose session is not on disk yet (new, or a CLI that writes its file late) still gets a row
     const known = new Set(S.sessions.map((x) => `${x.kind}:${x.id}`));
     const pendingRuns = S.runs.filter((r) => r.state !== "closed" && (!r.session_id || !known.has(`${r.kind}:${r.session_id}`))
-      && (S.filterKind === "all" || r.kind === S.filterKind));
+      && kindFilter(r.kind));
     const byTime = (a, b) => toSeconds(b.updated_at) - toSeconds(a.updated_at);
     const pinned = visible.filter((s) => s.pinned && !s.archived).sort(byTime);
     const recent = visible.filter((s) => !s.pinned && !s.archived).sort(byTime);
     const archived = visible.filter((s) => s.archived).sort(byTime);
     if (!visible.length && !pendingRuns.length) {
       mount(sideList, el("div", { class: "chat-side-empty" },
-        el("p", {}, q ? "没有匹配的会话" : S.filterKind === "all" ? "这台设备上还没有会话" : `还没有 ${kindShort(S.filterKind)} 会话`),
+        el("p", {}, q ? "没有匹配的会话" : S.filterKind === "all" ? "这台设备上还没有会话" : `还没有 ${S.filterKind === "api" ? "API" : kindShort(S.filterKind)} 会话`),
         q ? null : el("p", { class: "faint xs" }, "发出第一条消息后，会话会出现在这里；在终端里用 CLI 聊过的也会被发现。")));
       return;
     }
@@ -694,7 +858,7 @@ export function mountChat(container, api, opts = {}) {
       onClick: (event) => permissionMenu(event.currentTarget), cls: S.permission === "full" ? "danger" : "" });
     const more = el("button", { class: "btn btn-ghost btn-icon btn-sm chat-more", type: "button", "aria-label": "更多设置", title: "提示词预设、工作上下文、临时目录", "aria-haspopup": "menu",
       onclick: (event) => moreMenu(event.currentTarget) }, icon("ellipsis", { size: 18 }));
-    const sideBtn = el("button", { class: "btn btn-ghost btn-icon btn-sm chat-side-toggle", type: "button", "aria-label": "会话列表", title: "会话列表", onclick: () => toggleSide(!root.classList.contains("side-open")) }, icon("panel-left", { size: 18 }));
+    const sideBtn = el("button", { class: "btn btn-ghost btn-icon btn-sm chat-side-toggle", type: "button", "aria-label": "会话列表", title: "会话列表", onclick: () => sideButton() }, icon("panel-left", { size: 18 }));
     const picks = el("div", { class: "chat-bar-picks" }, device, el("span", { class: "chat-bar-sep", "aria-hidden": "true" }), agent, dir, perm);
     picks.addEventListener("scroll", () => barEdge(picks), { passive: true });
     mount(bar, sideBtn, picks, more);
@@ -780,8 +944,12 @@ export function mountChat(container, api, opts = {}) {
     const list = el("div", { class: "chat-agents", role: "listbox", "aria-label": "选择 Agent" });
     const fill = () => {
       const agents = S.agents.length ? S.agents : KIND_ORDER.map((kind) => ({ kind, installed: false }));
+      const cli = agents.filter((a) => !isApiKind(a.kind));
+      const models = agents.filter((a) => isApiKind(a.kind));
       mount(list, el("div", { class: "chat-menu-heading" }, `${deviceName()} 上的 CLI`),
-        agents.map((info) => agentRow(info, () => pop.close())),
+        cli.map((info) => agentRow(info, () => pop.close())),
+        models.length ? [el("div", { class: "menu-sep" }), el("div", { class: "chat-menu-heading" }, "API 模型"),
+          models.map((info) => agentRow(info, () => pop.close()))] : null,
         el("div", { class: "menu-sep" }),
         el("button", { class: "menu-item", type: "button", onclick: () => { refreshAgents().then(() => openPop?.panel === pop.panel && fill()); } }, icon("refresh-cw", { size: 14 }), "重新检测"));
     };
@@ -800,6 +968,8 @@ export function mountChat(container, api, opts = {}) {
     } else if (status.state === "installing") {
       const barNode = progressBar(status.progress);
       action = el("span", { class: "chat-agent-progress" }, barNode, el("span", { class: "xs faint" }, `${status.progress}%`));
+    } else if (status.state === "login" && isApiKind(info.kind)) {
+      action = el("button", { class: "btn btn-sm", type: "button", onclick: (event) => { event.stopPropagation(); close(); apiSettings(); } }, icon("key-round", { size: 13 }), "设置密钥");
     } else if (status.state === "login") {
       action = el("button", { class: "btn btn-sm", type: "button", onclick: (event) => { event.stopPropagation(); close(); login(info.kind); } }, icon("terminal", { size: 13 }), "在终端登录");
     }
@@ -809,6 +979,7 @@ export function mountChat(container, api, opts = {}) {
         kindMark(info.kind, { size: "md" }),
         el("span", { class: "chat-agent-text" },
           el("span", { class: "strong" }, kindLabel(info.kind, info)),
+          isApiKind(info.kind) && info.provider_label ? el("span", { class: "chat-menu-desc" }, info.provider_label) : null,
           el("span", { class: `chat-agent-state tone-${status.tone}` }, status.label, status.unsure ? el("span", { class: "faint" }, " · 登录状态未知") : null)),
         selected ? xicon("check", { size: 15, cls: "chat-agent-check" }) : null),
       action);
@@ -817,7 +988,22 @@ export function mountChat(container, api, opts = {}) {
   function installStatus(info) {
     const entry = installs.get(info.kind);
     if (entry && jobActive(entry.job)) return { state: "installing", label: `安装中 ${entry.job.progress}%`, tone: "info", progress: entry.job.progress };
-    return agentStatus(info);
+    const status = agentStatus(info);
+    if (isApiKind(info.kind)) {
+      // an API model has nothing to install or sign in to: only its provider's key
+      if (status.state === "login" || status.state === "missing") return { ...status, state: "login", label: "未设置密钥", tone: "warn" };
+      if (status.state === "ready") return { ...status, label: "就绪", unsure: false };
+    }
+    return status;
+  }
+
+  /** Agent 设置 → API (§16.5), on this runner device. */
+  function apiSettings() {
+    if (opts.onApiSettings) { opts.onApiSettings(S.device); return; }
+    // always name the device: without one the Agent page recalls its own last device (maybe another computer);
+    // an empty value is 本机 there
+    apiBack = true;
+    location.hash = `#/agent?tab=api&device=${encodeURIComponent(S.device ?? "")}`;
   }
 
   async function startInstall(kind) {
@@ -1099,6 +1285,7 @@ export function mountChat(container, api, opts = {}) {
     const reason = notReadyReason(info ? { ...info, install: installs.get(S.kind)?.job || info.install } : { kind: S.kind });
     if (status.state === "missing") return { text: reason, action: { label: "安装", icon: "download", onClick: () => startInstall(S.kind) } };
     if (status.state === "installing") return { text: reason, action: null };
+    if (status.state === "login" && isApiKind(S.kind)) return { text: `${kindLabel(S.kind, info)} 的服务商还没有设置密钥`, action: { label: "设置密钥", icon: "key-round", onClick: () => apiSettings() } };
     if (status.state === "login") return { text: reason, action: { label: "在终端登录", icon: "terminal", onClick: () => login(S.kind) } };
     if (reason) return { text: reason, action: null };
     if (S.session?.cwd_missing && !S.rid) {
@@ -1139,11 +1326,18 @@ export function mountChat(container, api, opts = {}) {
   const blocks = new Map();     // key -> {node, ev}
   let lastBlock = null;         // {type, role, key, ev, node}
   const pendingUser = [];
+  const notices = new Set();    // §16.6: one line per notice text per session
+  let turnUsage = null;         // the last live usage event's `turn`, for the "完成 · 输入 … 输出 …" line
+  let apiBack = false;          // left for Agent 设置 → API (设置密钥)
 
   function clearStream() {
     blocks.clear();
     lastBlock = null;
     pendingUser.length = 0;
+    notices.clear();
+    turnUsage = null;
+    S.usage = null;
+    renderUsage();
     mount(stream);
     setWorking(false);
     stick = true;
@@ -1188,23 +1382,31 @@ export function mountChat(container, api, opts = {}) {
       }
       case "message": {
         if (ev.role === "user") { ingest({ ...ev, type: "user" }, { history }); return; }
-        if (lastBlock && lastBlock.type === "message" && (ev.delta || ev.partial || (ev.id && lastBlock.ev.id === ev.id))) {
-          const text = ev.id && lastBlock.ev.id === ev.id && !ev.delta ? ev.text : `${lastBlock.ev.text || ""}${ev.text || ""}`;
-          lastBlock.ev = { ...lastBlock.ev, text };
-          scheduleText(lastBlock);
+        // a block with an id: its deltas append, its whole (non-delta) event replaces the text -- also when another
+        // block came in between (an API step's whole thinking and text arrive after both streamed, §16.4)
+        const own = ev.id && !history ? blocks.get(`m:${ev.id}`) : null;   // (history: whole events only; ids of older sessions repeat)
+        const tail = !ev.id && lastBlock && lastBlock.type === "message" && (ev.delta || ev.partial) ? lastBlock : null;
+        const entry = own || tail;
+        if (entry) {
+          const text = own && !ev.delta && !ev.partial ? ev.text : `${entry.ev.text || ""}${ev.text || ""}`;
+          entry.ev = { ...entry.ev, text };
+          scheduleText(entry);
         } else {
-          put(`m${seqKey++}`, assistantNode(ev.text), { ...ev });
+          put(ev.id && !history ? `m:${ev.id}` : `m${seqKey++}`, assistantNode(ev.text), { ...ev });
         }
         break;
       }
       case "thinking": {
-        if (lastBlock && lastBlock.type === "thinking" && (ev.delta || ev.partial)) {
-          lastBlock.ev = { ...lastBlock.ev, text: `${lastBlock.ev.text || ""}${ev.text || ""}` };
-          const fresh = thinkingNode(lastBlock.ev.text, !history);
-          keepOpen(lastBlock.node, fresh);
-          lastBlock.node.replaceWith(fresh);
-          lastBlock.node = fresh;
-        } else put(`k${seqKey++}`, thinkingNode(ev.text, !history), ev);
+        const own = ev.id && !history ? blocks.get(`k:${ev.id}`) : null;   // (history: whole events only; ids of older sessions repeat)
+        const tail = !ev.id && lastBlock && lastBlock.type === "thinking" && (ev.delta || ev.partial) ? lastBlock : null;
+        const entry = own || tail;
+        if (entry) {
+          entry.ev = { ...entry.ev, text: own && !ev.delta && !ev.partial ? ev.text : `${entry.ev.text || ""}${ev.text || ""}` };
+          const fresh = thinkingNode(entry.ev.text, !history);
+          keepOpen(entry.node, fresh);
+          entry.node.replaceWith(fresh);
+          entry.node = fresh;
+        } else put(ev.id && !history ? `k:${ev.id}` : `k${seqKey++}`, thinkingNode(ev.text, !history), ev);
         break;
       }
       case "tool": {
@@ -1230,15 +1432,38 @@ export function mountChat(container, api, opts = {}) {
         break;
       }
       case "mail": put(`mail:${ev.message_id || seqKey++}`, mailNode(ev), ev, { at: blocks.has(`mail:${ev.message_id}`) ? null : t }); break;
+      case "usage": {
+        // the ring shows a real context report only (a turn's tokens alone are not the context's size, §16.3)
+        if (ev.context && typeof ev.context === "object" && ev.context.used != null) { S.usage = { ...ev.context }; renderUsage(); }
+        // a history turn's figures never label the next live turn's end line
+        if (ev.turn && typeof ev.turn === "object" && !history) turnUsage = ev.turn;
+        return;   // nothing in the stream itself: the ring and the turn line show it
+      }
       case "status": {
-        if (ev.session_id) { S.sessionId = ev.session_id; }
+        if (ev.session_id && ev.session_id !== S.sessionId) { S.sessionId = ev.session_id; if (!history) persist(); }
         if (ev.address && ev.address !== S.address) { S.address = ev.address; startConversation(); }
         if (!history) setRunState(ev.state);
         if (ev.note && !history) put(null, el("div", { class: "chat-turn-end chat-note-line" }, icon("info", { size: 13 }), el("span", {}, ev.note)), ev);
-        if (["done", "failed", "stopped"].includes(ev.state) && (ev.usage || ev.state !== "done")) put(null, turnEndNode(ev), ev);
+        if (["done", "failed", "stopped"].includes(ev.state)) {
+          const usage = ev.usage || turnUsage;
+          turnUsage = null;
+          if (usage || ev.state !== "done") put(null, turnEndNode({ ...ev, usage }), ev);
+        }
         break;
       }
-      case "error": put(null, el("div", { class: "chat-error", role: "alert" }, icon("circle-alert", { size: 16 }), el("div", {}, ev.text || "出错了")), ev); break;
+      case "error": {
+        const text = String(ev.text || "").trim() || "出错了";
+        if (ev.level === "notice") {   // the CLI's own config hints (§16.6): grey, one line, said once
+          if (notices.has(text)) return;
+          notices.add(text);
+          put(null, noticeNode(text), ev);
+          break;
+        }
+        const warn = ev.level === "warn";
+        put(null, el("div", { class: `chat-error ${warn ? "warn" : ""}`, role: history ? null : warn ? "status" : "alert" },
+          icon(warn ? "triangle-alert" : "circle-alert", { size: 16 }), el("div", {}, text)), ev);
+        break;
+      }
       default: break;
     }
     if (ev.type === "approval" || ev.type === "ask") setWorking(["starting", "running"].includes(S.runState));
@@ -1404,6 +1629,25 @@ export function mountChat(container, api, opts = {}) {
       body ? bodyNode : null,
       long ? el("button", { class: "btn btn-ghost btn-sm chat-mail-more", type: "button", onclick: (e) => { bodyNode.classList.remove("clamped"); e.currentTarget.remove(); } }, "展开全文") : null);
   }
+  function noticeNode(text) {
+    const first = text.split("\n")[0];
+    const more = text.length > first.length || first.length > 90;
+    if (!more) return el("div", { class: "chat-notice" }, icon("info", { size: 13 }), el("span", { class: "chat-notice-text" }, first));
+    return el("details", { class: "chat-notice" },
+      el("summary", {}, icon("info", { size: 13 }), el("span", { class: "chat-notice-text truncate" }, first), icon("chevron-right", { size: 12, cls: "chat-caret" })),
+      el("pre", { class: "chat-notice-body" }, text));
+  }
+
+  function renderUsage() {
+    const view = usageView(S.usage);
+    usageNode.hidden = !view;
+    if (!view) { mount(usageNode); usageNode.removeAttribute("title"); usageNode.removeAttribute("aria-label"); return; }
+    usageNode.className = `chat-usage ${view.tone} ${view.pct === null ? "count" : ""}`;
+    usageNode.title = view.title;
+    usageNode.setAttribute("aria-label", `上下文${view.title}`);
+    mount(usageNode, view.pct === null ? el("span", { class: "chat-usage-num" }, tokenCount(S.usage.used)) : usageRing(view));
+  }
+
   function turnEndNode(ev) {
     const usage = ev.usage || {};
     const parts = [];
@@ -1455,7 +1699,7 @@ export function mountChat(container, api, opts = {}) {
     input.focus();
   }
 
-  async function openSession(s) {
+  async function openSession(s, { restoring = false } = {}) {
     S.gen += 1;
     const gen = S.gen;
     stopConversation();
@@ -1475,6 +1719,12 @@ export function mountChat(container, api, opts = {}) {
       if (result.address) S.address = result.address;
     } catch (error) {
       if (gen !== S.gen) return;
+      if (restoring && error.code === "not_found") {
+        // the remembered session is gone (deleted): forget it and start fresh, without an error
+        Object.assign(S, { session: null, sessionId: null, address: null });
+        persist(); clearStream(); renderSessions(); renderWelcome(); renderComposer();
+        return;
+      }
       mount(stream, el("div", { class: "chat-error" }, icon("circle-alert", { size: 16 }), el("div", {}, `读不到这个会话的记录：${error.message}。${canResume(s.kind) ? "仍然可以发消息续接。" : ""}`)));
       renderComposer();
       return;
@@ -1515,6 +1765,8 @@ export function mountChat(container, api, opts = {}) {
   async function poll(rid, gen) {
     let failures = 0;
     while (alive() && gen === S.gen && S.rid === rid) {
+      const nap = asleep();
+      if (nap) { await nap; continue; }
       let result;
       try {
         result = await call("agent_run_read", { rid, cursor: S.cursor, wait: 20 });
@@ -1551,6 +1803,7 @@ export function mountChat(container, api, opts = {}) {
     if (blocked && !S.rid) { toast(blocked.text, { type: "warn" }); return; }
     input.value = "";
     autoGrow();
+    saveDraft();
     pendingUser.push(text);
     put(null, userNode(text), { type: "user", text });
     renderWelcome();
@@ -1608,6 +1861,8 @@ export function mountChat(container, api, opts = {}) {
     const gen = S.gen, address = S.address;
     const tick = async () => {
       if (!alive() || gen !== S.gen || S.address !== address) return;
+      const nap = asleep();
+      if (nap) { await nap; tick(); return; }
       try {
         const result = (await api.conversation(address)) || {};
         if (gen !== S.gen) return;
@@ -1627,29 +1882,82 @@ export function mountChat(container, api, opts = {}) {
   // ============================================================ lifecycle
 
   let destroyed = false;
+  // `persistent` (the 对话 page, §16.2): the instance outlives its page -- detached from the document it keeps
+  // its run and long-poll; otherwise it stops by itself once the container leaves the document.
   function alive() {
     if (destroyed) return false;
-    if (!root.isConnected) { destroy(); return false; }
+    if (!opts.persistent && !root.isConnected) { destroy(); return false; }
     return true;
   }
+
+  // Hidden for more than PAUSE_HIDDEN_MS: the long-poll and the mailbox poll wait until the page is shown.
+  // (The local console's desktop window reports its own visibility: window.__mcpmNativeVisible.)
+  const isHidden = () => document.hidden || window.__mcpmNativeVisible === false;
+  let hiddenSince = isHidden() ? Date.now() : 0;
+  const wakers = [];
+  function onVisibility() {
+    if (isHidden()) { if (!hiddenSince) hiddenSince = Date.now(); return; }
+    hiddenSince = 0;
+    for (const wake of wakers.splice(0)) wake();
+  }
+  document.addEventListener("visibilitychange", onVisibility);
+  window.addEventListener("mcpmvisibilitychange", onVisibility);
+  /** A promise that resolves when the page is shown again, or null while polling may go on. */
+  function asleep() {
+    if (!hiddenSince || !isHidden() || Date.now() - hiddenSince < (opts.pauseAfter ?? PAUSE_HIDDEN_MS)) return null;
+    return new Promise((resolve) => wakers.push(resolve));
+  }
+
   function destroy() {
     if (destroyed) return;
     destroyed = true;
     S.gen += 1;
+    saveDraft();
     stopConversation();
     for (const entry of installs.values()) entry.watch?.stop();
     installs.clear();
     closePop();
+    document.removeEventListener("visibilitychange", onVisibility);
+    window.removeEventListener("mcpmvisibilitychange", onVisibility);
+    for (const wake of wakers.splice(0)) wake();
+  }
+
+  /** The page put the (persistent) chat back into the document. */
+  function attached() {
+    if (destroyed) return;
+    const picks = bar.querySelector(".chat-bar-picks");
+    requestAnimationFrame(() => { if (picks) barEdge(picks); kindsEdge(); if (stick) scrollToEnd(true); else jump.hidden = false; });
+    if (!S.loading && S.device !== undefined) {
+      refreshSessions(); refreshRuns();
+      // back from Agent 设置 (a key set, models added or enabled there): the pickers and the composer re-read it
+      // (re-probing the CLIs only when coming back from 设置密钥; else the device's cached probe is enough)
+      refreshAgents({ fresh: apiBack }).then(() => agentMenu.refill?.());
+      apiBack = false;
+    }
+  }
+  /** The page took the chat out of the document (another page opened): menus close, the run goes on. */
+  function detached() {
+    closePop();
+    saveDraft();
+    if (root.classList.contains("side-open")) toggleSide(false);
   }
 
   renderAll();
-  init();
+  let ready = init(opts.want || {}).catch(() => {});
 
   return {
-    destroy,
+    destroy, attached, detached,
+    root,
+    get ready() { return ready; },
+    /** URL params after the first mount (#/chat?device=&kind=&session=…); they win over the current state. */
+    apply(want) { ready = ready.then(() => applyWant(want)).catch(() => {}); return ready; },
     refresh: () => selectDevice(S.device),
     setDevice: (id) => selectDevice(id),
     newChat,
-    get state() { return { device: S.device, kind: S.kind, workdir: S.workdir, rid: S.rid, session: S.session?.id || null, runState: S.runState }; },
+    get state() { return { device: S.device, kind: S.kind, workdir: S.workdir, rid: S.rid, session: S.session?.id || null, runState: S.runState, usage: S.usage }; },
+    /** What the Overview's 对话 card lists: the runner device and its sessions / runs as last read. */
+    snapshot() { return { device: S.device, devices: S.devices.slice(), sessions: S.sessions.slice(), runs: S.runs.slice(), loading: S.loading || S.sessionsState === "loading", error: S.deviceError || "" }; },
   };
 }
+
+export { kindMark as chatKindMark, kindShort as chatKindShort };

@@ -224,6 +224,8 @@ class Devices:
             # remote-hub/1 + desktop/1: a P2P tunnel agent, and a desktop to share.
             p2p=bool(peer is not None and "remote-hub/1" in getattr(peer, "features", ())),
             desktop=bool(peer is not None and "desktop/1" in getattr(peer, "features", ())),
+            # desktop/2: flow control, an adaptive bit rate and scaling (the viewer's 自动 quality)
+            desktop_auto=bool(peer is not None and "desktop/2" in getattr(peer, "features", ())),
             # files/1: send and fetch files (P2P, else relayed by the gateway).
             files=bool(peer is not None and "files/1" in getattr(peer, "features", ())),
             # agents/1: the agent chat runs CLIs there (docs/agent-chat.md); the chat's 运行设备 list.

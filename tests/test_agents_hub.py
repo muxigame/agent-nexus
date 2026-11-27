@@ -111,7 +111,10 @@ async def test_handlers_are_exactly_the_spec_ops_and_never_raise(hub):
         "agent_info", "agent_install", "agent_install_job", "agent_sessions", "agent_session_read",
         "agent_session_meta", "agent_run_open", "agent_run_send", "agent_run_read", "agent_run_answer",
         "agent_run_stop", "agent_run_close", "agent_run_list", "agent_dirs", "agent_prompts", "agent_prompt_save",
-        "agent_prompt_preview", "agent_tmp_list", "agent_tmp_clean"}
+        "agent_prompt_preview", "agent_tmp_list", "agent_tmp_clean",
+        # §16.4: API providers
+        "agent_api_providers", "agent_api_provider_save", "agent_api_provider_delete", "agent_api_key_set",
+        "agent_api_test", "agent_api_models"}
     assert hub_mod.FEATURE == "agents/1"
     for op, handler in handlers.items():
         for params in (None, {}, {"rid": "nope", "kind": 5, "id": [], "path": 7, "job_id": None}):

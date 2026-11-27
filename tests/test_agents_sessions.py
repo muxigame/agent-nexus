@@ -268,7 +268,7 @@ def test_read_claude(home):
     events = S.read(None, home, "claude", CLAUDE_1, env={})
     assert [e["seq"] for e in events] == list(range(1, len(events) + 1))
     kinds = [e["type"] for e in events]
-    assert kinds == ["user", "thinking", "tool", "tool", "file_change", "tool", "message", "status"]
+    assert kinds == ["user", "thinking", "tool", "tool", "file_change", "tool", "message", "usage", "status"]
     assert events[0]["text"] == "登录后跳转到了 404，帮我看看 src/login.ts"
     assert events[0]["t"] == pytest.approx(S._ts("2026-11-20T10:00:00Z"))
     read_tool, edit_tool, bash_tool = events[2], events[3], events[5]
@@ -295,7 +295,8 @@ def test_read_claude_commands_and_write(home):
 def test_read_codex(home):
     events = S.read(None, home, "codex", CODEX_1, env={})
     kinds = [e["type"] for e in events]
-    assert kinds == ["user", "thinking", "tool", "tool", "file_change", "file_change", "tool", "message", "status"]
+    assert kinds == ["user", "thinking", "tool", "tool", "file_change", "file_change", "tool", "message", "usage",
+                     "status"]
     assert events[0]["text"] == "给 utils.py 加一个 slugify 函数并跑测试"  # injected context skipped, no duplicate
     assert events[1]["text"].startswith("**Planning**")
     shell = events[2]
@@ -308,6 +309,88 @@ def test_read_codex(home):
     assert events[7] == {**events[7], "type": "message", "role": "assistant", "text": "已添加 slugify，测试还有 1 个失败。"}
     assert events[-1]["usage"] == {"input": 5400, "output": 420, "cost_usd": 0}
 
+
+
+# ------------------------------------------------------------------------------------------ context usage (§16.3)
+
+def test_read_claude_ends_with_the_last_context_usage(home):
+    events = S.read(None, home, "claude", CLAUDE_1, env={})
+    usage = events[-2]
+    # the last main-chain assistant message: input + cache read + cache creation + output; the model carries over
+    assert usage["type"] == "usage" and usage["context"] == {"used": 1730, "limit": 200000,
+                                                            "model": "claude-sonnet-4-5"}
+    assert usage["turn"] == {"input": 1700, "output": 30}
+    assert usage["t"] == events[-1]["t"]
+
+
+def test_read_claude_context_over_200k_is_the_1m_window(home, tmp_path):
+    folder = home / ".claude" / "projects" / "-home-u-big"
+    folder.mkdir(parents=True)
+    sid = "12345678-1234-4234-8234-123456789abc"
+    records = [
+        {"type": "user", "uuid": "u1", "cwd": "/home/u/big", "sessionId": sid, "timestamp": "2026-11-20T10:00:00Z",
+         "message": {"role": "user", "content": "go"}},
+        {"type": "assistant", "uuid": "a1", "sessionId": sid, "timestamp": "2026-11-20T10:00:01Z",
+         "message": {"id": "m1", "model": "claude-opus-4-5", "role": "assistant",
+                     "content": [{"type": "text", "text": "ok"}],
+                     "usage": {"input_tokens": 5, "cache_read_input_tokens": 300000, "output_tokens": 10}}},
+        {"type": "assistant", "uuid": "a2", "sessionId": sid, "isSidechain": True, "timestamp": "2026-11-20T10:00:02Z",
+         "message": {"id": "m2", "model": "claude-haiku-4-5", "content": [{"type": "text", "text": "sub"}],
+                     "usage": {"input_tokens": 9}}},
+        {"type": "assistant", "uuid": "a3", "sessionId": sid, "timestamp": "2026-11-20T10:00:03Z",
+         "message": {"id": "m3", "model": "<synthetic>", "content": [{"type": "text", "text": "No response"}],
+                     "usage": {"input_tokens": 0, "output_tokens": 0}}},
+    ]
+    (folder / f"{sid}.jsonl").write_text("\n".join(json.dumps(r) for r in records))
+    usage = next(e for e in S.read(None, home, "claude", sid, env={}) if e["type"] == "usage")
+    assert usage["context"] == {"used": 300015, "limit": 1000000, "model": "claude-opus-4-5"}
+    assert usage["turn"] == {"input": 300005, "output": 10, "cached": 300000}
+
+
+def test_read_codex_ends_with_the_last_token_count(home):
+    events = S.read(None, home, "codex", CODEX_1, env={})
+    usage = events[-2]
+    # last_token_usage; no model_context_window in this rollout: the built-in table for the turn_context's model
+    assert usage["context"] == {"used": 110, "limit": 272000, "model": "gpt-5-codex"}
+    assert usage["turn"] == {"input": 100, "output": 10}
+
+
+def test_sessions_without_usage_get_no_usage_event(home):
+    for kind, sid in (("gemini", GEMINI_1), ("dsh", "acp-demo-1"), ("dsh", DSH_INPUT)):
+        assert not [e for e in S.read(None, home, kind, sid, env={}) if e["type"] == "usage"]
+
+
+def test_codex_context_reads_the_rollout_tail(home, monkeypatch):
+    path = S.codex_rollout(home, {}, CODEX_1)
+    assert path is not None and path.name.endswith(f"{CODEX_1}.jsonl")
+    assert S.codex_context(home, {}, CODEX_1) == {"used": 110, "limit": None, "model": "gpt-5-codex",
+                                                  "turn": {"input": 100, "output": 10}}
+    with path.open("a") as handle:
+        handle.write("x" * 300 + "\n")
+        handle.write(json.dumps({"type": "event_msg", "payload": {"type": "token_count", "info": {
+            "last_token_usage": {"input_tokens": 9000, "cached_input_tokens": 8000, "output_tokens": 100},
+            "model_context_window": 258400}}}) + "\n")
+    monkeypatch.setattr(S, "ROLLOUT_TAIL_BYTES", 400)  # only the tail: the turn_context is out of reach
+    assert S.codex_context(home, {}, CODEX_1) == {"used": 9100, "limit": 258400, "model": None,
+                                                  "turn": {"input": 9000, "output": 100, "cached": 8000}}
+    # CODEX_HOME moves the rollouts; bad or unknown ids find nothing
+    moved = home.parent / "codex-home"
+    shutil.move(str(home / ".codex"), str(moved))
+    assert S.codex_rollout(home, {}, CODEX_1) is None
+    assert S.codex_rollout(home, {"CODEX_HOME": str(moved)}, CODEX_1) is not None
+    assert S.codex_rollout(home, {"CODEX_HOME": str(moved)}, "../../etc") is None
+    assert S.codex_rollout(home, {"CODEX_HOME": str(moved)}, "*") is None
+    assert S.codex_context(home, {"CODEX_HOME": str(moved)}, "019a0000-0000-7000-8000-000000000000") is None
+
+
+def test_context_window_table():
+    assert S.context_window("gpt-5-codex") == 272000
+    assert S.context_window("gpt-5.1-codex-max") == 272000
+    assert S.context_window("openai/gpt-4.1-mini") == 1047576
+    assert S.context_window("claude-sonnet-4-5[1m]") == 1000000
+    assert S.context_window("claude-sonnet-4-5", 250000) == 1000000
+    assert S.context_window("claude-sonnet-4-5", 1000) == 200000
+    assert S.context_window("mystery") is None and S.context_window(None) is None
 
 def test_read_gemini(home):
     events = S.read(None, home, "gemini", GEMINI_1, env={})
@@ -356,11 +439,11 @@ def test_read_index_only_session(home):
 
 
 def test_read_max_events_keeps_newest(home):
-    events = S.read(None, home, "claude", CLAUDE_1, env={}, max_events=3)
-    assert len(events) == 3
-    assert [e["type"] for e in events] == ["tool", "message", "status"]
+    events = S.read(None, home, "claude", CLAUDE_1, env={}, max_events=4)
+    assert len(events) == 4
+    assert [e["type"] for e in events] == ["tool", "message", "usage", "status"]  # the usage event is always kept
     assert events[-1]["dropped"] == 5
-    assert [e["seq"] for e in events] == [1, 2, 3]
+    assert [e["seq"] for e in events] == [1, 2, 3, 4]
 
 
 def test_read_truncates_long_output(home, monkeypatch):

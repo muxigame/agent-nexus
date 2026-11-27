@@ -100,6 +100,8 @@ LEGACY_TOOL_NAMES = frozenset({"workspace_list", "set_workspace"})
 SESSION_KINDS = ("claude", "codex", "gpt", "dsh", "gemini", "human", "other")
 WAKE_MODES = ("auto", "never")
 MAX_HANDLES = 10000
+#: The gateway setting holding the agent chat's synced API provider config (docs/agent-chat.md §16.4).
+API_CONFIG_SETTING = "agents.api.providers"
 _SESSION_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
 
 INSTRUCTIONS = (
@@ -677,6 +679,67 @@ class Gateway:
             ended = True
         return {"released": True, "address": address, "ended": ended}
 
+    def _console_run_address(self, args: Any, caller: str | None, op: str) -> tuple[str, str]:
+        """``(handle, address)`` of a live console run's handle (:meth:`agent_handle`), checked like
+        :meth:`agent_release`: only the device that asked for it, the device it points at, or the owner."""
+        handle = args.get("workspace_id") if isinstance(args, dict) else None
+        if not isinstance(handle, str) or not handle:
+            raise RoutingError(f"{op} needs workspace_id")
+        record = self.store.handle_record(handle)
+        meta = (record or {}).get("meta") or {}
+        if record is None or not meta.get("console_run") or self.store.touch_handle(handle) is None:
+            raise RoutingError(f"{op}: not a live console run's handle")
+        if caller is not None and caller not in (record.get("agent_id"), meta.get("requested_by")):
+            raise RoutingError(f"{op}: not this device's handle")
+        address = self._address_of(handle)
+        if not address:
+            raise RoutingError(f"{op}: this run has no mailbox address")
+        return handle, address
+
+    def agent_ask(self, args: Any, *, caller: str | None = None) -> dict:
+        """``ask_user`` of an API model run (docs/agent-chat.md §16.4): a question from the run's address
+        (``{workspace_id, question, options?, recommended?, context?}``); the device polls ``ask_get``."""
+        _handle, address = self._console_run_address(args, caller, "agent_ask")
+        options = args.get("options") if isinstance(args.get("options"), list) and args.get("options") else None
+        recommended = args.get("recommended") if isinstance(args.get("recommended"), str) and options and \
+            args.get("recommended") in options else None
+        created = self.mailbox.ask_create(address, args.get("question"), options=options, recommended=recommended,
+                                          context=str(args.get("context") or "")[:4000], blocking=True)
+        self.ask_created(created["ask_id"])
+        return created
+
+    def agent_mail_send(self, args: Any, *, caller: str | None = None) -> dict:
+        """``mail_send`` of an API model run: mail from the run's address (``{workspace_id, to, body, subject?,
+        kind?}``)."""
+        _handle, address = self._console_run_address(args, caller, "agent_mail_send")
+        kind = args.get("kind") if args.get("kind") in ("message", "task", "result") else "message"
+        result = self.mailbox.send(address, args.get("to"), args.get("body"),
+                                   subject=str(args.get("subject") or "")[:200], kind=kind)
+        self.mail_sent(result)
+        return result
+
+    def api_config_get(self) -> dict:
+        """The synced API provider config (docs/agent-chat.md §16.4): ``{providers, updated_at}``."""
+        value, updated = self.store.setting(API_CONFIG_SETTING)
+        providers = value.get("providers") if isinstance(value, dict) else None
+        return {"providers": providers if isinstance(providers, list) else [], "updated_at": updated}
+
+    def api_config_put(self, args: Any) -> dict:
+        """Replace the synced API provider config: ``{providers: [...]}``, non-secret fields only. Any key-like
+        field (key, api_key, token, secret, authorization...) refuses the whole request: keys stay on devices."""
+        from .agents.api import config as api_config
+        if not isinstance(args, dict) or not isinstance(args.get("providers"), list):
+            raise RoutingError("api_config_put needs {providers: [...]}")
+        secret = api_config.find_secret(args)
+        if secret:
+            raise RoutingError(f"网关不保存密钥：请求里有密钥字段 {secret}，密钥只能在设备上设置")
+        try:
+            providers = api_config.normalize_list(args["providers"], strict=True)
+        except api_config.ConfigError as exc:
+            raise RoutingError(str(exc)) from exc
+        updated = self.store.set_setting(API_CONFIG_SETTING, {"providers": providers})
+        return {"ok": True, "providers": providers, "updated_at": updated}
+
     @staticmethod
     def _closest_workspace(workspaces: dict, workdir: str) -> tuple[str, str]:
         """(registered workdir name, ``exact`` / ``inside`` / ``default``) for a folder on the device."""
@@ -757,6 +820,20 @@ class Gateway:
         if op == "agent_release":
             # That run closed: its handle ends and its automatic address is free again.
             return self.agent_release(args, caller=peer.agent_id)
+        if op == "api_config_get":
+            # The agent chat's API providers (docs/agent-chat.md §16.4): the non-secret config devices merge in.
+            return self.api_config_get()
+        if op == "api_config_put":
+            if getattr(peer, "locked", False):
+                raise RoutingError("locked: 这台设备已锁定，解锁后才能修改网关上的配置")
+            result = self.api_config_put(args)
+            log.info("api_config_put by device %s: %d providers", peer.agent_id, len(result.get("providers") or []))
+            return result
+        if op == "agent_ask":
+            # ask_user / mail_send of an API model run on this device, as its run's mailbox address
+            return self.agent_ask(args, caller=peer.agent_id)
+        if op == "agent_mail_send":
+            return self.agent_mail_send(args, caller=peer.agent_id)
         if op == "mail_local":
             # The local console's inbox page (design §8.12).
             return await self.inbox.call(args.get("op"), args, via="inbox")

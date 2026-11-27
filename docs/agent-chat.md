@@ -347,3 +347,50 @@ FEATURE = "agents/1"
 `Claude Code-credentials`）。登录后：`claude-stream` 两轮对话正常（第一轮用 `Read` 读测试文件并回复内容，第二轮续接）；会话出现在列表里，
 目录和标题正确，历史含工具调用；"需要审批"模式下 `echo` 这类只读命令 Claude Code 自己放行，`touch` 这类写操作经 anx 的审批 MCP
 发出审批请求，允许后执行。
+
+## 16. 第二期：独立对话页、状态保持、上下文用量、API 接入
+
+### 16.1 独立「对话」页
+- 两个控制台的侧边栏新增「对话」（路由 `#/chat`，可带 `?device=&kind=&session=`），聊天组件铺满内容区（侧栏 + 消息流 + 输入框，高度 = 视口 − 顶栏，手机端减去底部标签栏）。
+- 概览页不再嵌入聊天，改为一张「对话」卡片：最近 3 个会话（点开直达 `#/chat?…`）+「新对话」按钮。
+- 「Agent 设置」页（提示词 / CLI / 临时目录 / API）不变，另加 API 标签页（16.5）。
+
+### 16.2 状态保持
+- 聊天状态（运行设备、Agent、目录、权限、工作上下文、当前会话 kind+id、当前 rid、侧栏是否收起、未发出的草稿）存 `localStorage`，键 `anx-chat:<console>`（`<console>` = `local` 或 `cloud:<origin>`），每次变化写入。
+- 打开对话页时按这个状态恢复：设备离线或不再支持时退回默认设备并提示一次；rid 还活着就接上（`agent_run_read`），否则打开该会话的历史。
+- 切换页面不销毁正在进行的读取：聊天组件在模块级保留一个实例（同一个 console 只建一次），页面切走时只把 DOM 摘下，回来时挂回，长轮询继续（页面隐藏超过 10 分钟才暂停）。
+- URL 参数优先于存储的状态（从概览卡片 / 收件箱跳转用）。
+
+### 16.3 上下文用量圆环
+- 事件：`{"type": "usage", "context": {"used": 123456, "limit": 1000000|null, "model": "…"}, "turn": {"input":…, "output":…, "cached":…, "cost_usd":…}}`。每轮结束发一次（在 `status done` 之前）；拿得到时在轮内也可以更新。`limit` 未知时为 null。
+- 来源：
+  - Claude（stream-json）：`result.modelUsage[<model>].contextWindow` 为上限；`used` = 最后一条 assistant 消息 `usage` 的 input + cache_read + cache_creation + output。
+  - Codex（exec --json）：`turn.completed.usage` 给本轮 token；上限优先取会话 rollout 里最近的 `event_msg/token_count.info.model_context_window`（runner 知道 session id，按 sessions 的 codex 路径找文件尾部），没有就按模型表；`used` = `info.last_token_usage.input_tokens + output_tokens`（rollout）或本轮 input+output。
+  - ACP / text：没有可靠数据时只发 `turn`（若有），`context.limit=null`。
+  - API（16.4）：自己计：`used` = 上一次请求的 prompt+completion token（以服务商返回为准），上限来自模型配置（`context_window`），没配就查内置表，查不到为 null。
+- 历史：`agent_session_read` 返回的事件里，最后一次能算出的用量也以一条 `usage` 事件给出（Claude 从 jsonl 的 usage，Codex 从 token_count）。
+- 界面：输入框右下角一个圆环（直径 18px，按 used/limit 填充；>80% 变黄，>95% 变红）；`limit` 为 null 时圆环换成 token 数字。悬停显示「已用 872.1K / 1M（87%）· 模型 …」。
+
+### 16.4 API 接入（客户端直连）
+- **原则**：请求从运行设备直接发给服务商（不经网关）；密钥只存在设备本机；网关只同步「服务商 + 模型」的非机密配置。
+- **协议**（三种，每种一个适配器，全部流式）：
+  - `openai`：Chat Completions（`POST {base_url}/chat/completions`，`stream: true`，`stream_options.include_usage`），tools = function calling。覆盖 OpenAI、DeepSeek、通义、Kimi、智谱、OpenRouter、Ollama、vLLM、NewAPI/OneAPI 等中转。
+  - `anthropic`：Messages（`POST {base_url}/v1/messages`，SSE），tool_use / tool_result。
+  - `gemini`：`POST {base_url}/v1beta/models/{model}:streamGenerateContent?alt=sse`，functionDeclarations / functionResponse。
+- **配置**：`agent-nexus.json` → `agents.api.providers[]`：`{id, label, protocol, base_url, headers?: {…非机密}, models: [{id, label?, context_window?, max_output?, tools?: true}], enabled}`；网关同步的同名结构存在网关，设备拉取后合并（本机配置优先）。
+- **密钥**：本机 `<root>/.anx/agents/api-keys.json`（0600 / 仅当前账户 ACL），`{provider_id: {key, updated}}`；接口只能写和删，读时只返回 `{set: true, last4}`。也支持 `env:VARNAME` 引用环境变量。密钥设置时绑定服务商地址的 origin（scheme://host:port）；地址改了（本机编辑或网关同步）密钥不会发往新地址，状态为 `origin_changed`，`agent_run_open` / `agent_api_test` 返回 `code: key_origin_changed`（「服务商地址变了，请重新输入密钥」）。`base_url` 不能带账号密码。
+- **作为 Agent**：每个启用的模型是一个 Agent，kind = `api:<provider>/<model>`，label = 模型 label，在 Agent 选择器里单列「API 模型」一组；`supports`: resume ✓、approvals ✓、tools 按模型配置。
+- **对话循环**（`agents/api/loop.py`）：消息 → 服务商流式 → 文本/思考增量转统一事件；遇到工具调用 → 按权限模式审批（复用 approval 事件与 `agent_run_answer`）→ 在本机执行 → 结果回填 → 继续，直到无工具调用（上限 50 步）。
+- **工具**（首期）：`read_file`、`write_file`、`edit_file`（精确替换）、`list_dir`、`glob`、`grep`、`run_command`（工作目录内，超时 120s，输出截断）、以及经网关的 `ask_user` / `mail_send`（有 handle 时）。权限：readonly 只给读类工具；ask 时写/执行需审批；edits 时写自动、执行需审批；full 全自动。路径限制在工作目录 + 临时目录内（符号链接解析后校验）。anx 自己的状态目录（`<root>/.anx`、`.mcp-manager`，含密钥和设备凭据）即使在工作目录内也拒绝访问；服务以 root / SYSTEM 运行、执行账户是别的用户时，文件工具在以执行账户启动的辅助进程里执行（`agents/api/fileops.py`）。`ask_user` / `mail_send` 走网关 `hub_call agent_ask` / `agent_mail_send`（带 run 的 workspace handle，只接受申请它的设备），`ask_user` 轮询 `ask_get` 等主人回答（最多 10 分钟）；readonly 只给 `ask_user`，`mail_send` 按写操作审批。
+- **会话存储**：`<root>/.anx/agents/api-sessions/<id>.jsonl`（每行一条统一事件 + 用于续接的原始消息），会话发现里作为 kind `api:*` 列出，按 provider 分组显示为「API」标签页。
+- **系统提示词**：直接作为各协议的 system 字段（openai: system 消息；anthropic: `system`；gemini: `systemInstruction`）。
+- **错误**：401/403 → 「密钥无效或无权限」；429 → 显示并按 `retry-after` 自动重试一次；网络错误 → 显示服务商 host。
+- **RPC**（设备端，经 `agents/1` 同样可远程调用）：`agent_api_providers`（列出，含 key 状态）、`agent_api_provider_save`、`agent_api_provider_delete`、`agent_api_key_set {provider_id, key|null}`、`agent_api_test {provider_id, model}`（发一条极短请求，返回延迟/错误）、`agent_api_models {provider_id}`（openai 协议调 `/models` 列出可选模型）。
+- **网关**：`hub_call` op `api_config_get` / `api_config_put`（只接受非机密字段，带 key 字段直接拒绝），控制台 API 页可选「同步到所有设备」。
+
+### 16.5 界面：Agent 设置 → API
+- 服务商列表（名称、协议、地址、密钥状态 ●已设置 ****1a2b / ○未设置、模型数）；新增/编辑弹窗：预设模板（OpenAI、DeepSeek、通义、Kimi、OpenRouter、Ollama、Anthropic、Gemini、自定义 OpenAI 兼容/NewAPI），选模板自动填 protocol + base_url；密钥输入框只写不读；「测试」按钮；「从服务商拉取模型」（openai 协议）。
+- 每个模型一行：启用开关、显示名、上下文窗口、是否允许工具。
+
+### 16.6 Codex 配置警告
+- `Codex is ignoring … unrecognized configuration setting` 这类来自 CLI 自身配置的提示：适配器发 `{"type":"error","level":"notice",…}`；界面把 `notice` 显示成一行灰色小字（可展开），同一会话同一文本只显示一次。`warn` 仍为黄色，无 level 为红色。

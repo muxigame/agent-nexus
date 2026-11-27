@@ -45,7 +45,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import adapters, registry
+from . import adapters, registry, sessions
 from .adapters import AdapterOptions
 from .registry import AgentDef
 
@@ -389,7 +389,7 @@ class Run:
                 "tmpdir": self.tmpdir}
 
 
-SHELL_TOOLS = ("Bash", "shell", "execute", "BashOutput")
+SHELL_TOOLS = ("Bash", "shell", "execute", "BashOutput", "run_command")  # run_command: API models (§16.4)
 
 
 def _remember_key(tool: str, data: dict) -> str:
@@ -403,6 +403,23 @@ def _remember_key(tool: str, data: dict) -> str:
             command = " ".join(str(part) for part in command)
         return f"{tool}\0{' '.join(str(command or '').split())}"
     return tool
+
+
+def _codex_lookup(account: Any, env: dict) -> Callable[[str], dict | None]:
+    """``session_id -> context figures`` from the run-as account's Codex rollouts (the same HOME the hub uses)."""
+    home = getattr(account, "home", None) or (env.get("USERPROFILE") if WINDOWS else None) or env.get("HOME") \
+        or str(Path.home())
+    found: dict[str, Path] = {}
+
+    def lookup(session_id: str) -> dict | None:
+        path = found.get(session_id)
+        if path is None or not path.exists():
+            path = sessions.codex_rollout(Path(home), env, session_id)
+            if path is None:
+                return None
+            found[session_id] = path
+        return sessions.codex_context_file(path)
+    return lookup
 
 
 def _within(path: str, roots: list[str]) -> bool:
@@ -603,6 +620,9 @@ class Runs:
 
     def _start_turn(self, run: Run, prompt: str) -> None:
         adapter = run.adapter
+        if getattr(adapter, "in_process", False):  # an API model's loop: a task on this event loop
+            self._push_all(run, adapter.begin_turn(prompt))
+            return
         try:
             if adapter.persistent:
                 spawned = run.proc is None
@@ -815,6 +835,8 @@ class Runs:
         workdir = self._workdir(params.get("workdir"), account)
         run_env = self._env(account, env)
         popen = (account.popen_args() if account is not None else None) if run_as is False else (run_as or None)
+        if d.adapter == "api":  # an API model: no binary, the loop runs in process (§16.4)
+            binary = binary or "api"
         if binary is None:
             binary = await asyncio.to_thread(registry.locate, d, run_env)
         if not binary:
@@ -824,6 +846,8 @@ class Runs:
             system_prompt = params.get("system_prompt") if isinstance(params.get("system_prompt"), str) else ""
         opts = AdapterOptions(binary=binary, workdir=workdir, permission=permission, system_prompt=system_prompt or "",
                               resume_id=resume_id, batch=batch, extra=dict(extra or {}))
+        if d.adapter == "codex-exec":  # the context window lives in the thread's rollout (§16.3)
+            opts.context_lookup = _codex_lookup(account, run_env)
         rid = rid or uuid.uuid4().hex[:12]
         own = not tmpdir
         if own:
@@ -845,6 +869,8 @@ class Runs:
                 opts.mcp_config = self._approval_files(run, url)
             except OSError as exc:
                 notices.append(f"审批服务没能启动（{exc}），需要权限的操作会被拒绝")
+        if getattr(run.adapter, "in_process", False):
+            run.adapter.attach(self, run)
         self.runs[rid] = run
         self._push(run, {"type": "status", "state": "starting", "session_id": resume_id or None})
         for event in events or ():
@@ -956,6 +982,8 @@ class Runs:
 
     def _close(self, run: Run, *, sync: bool = False) -> _Proc | None:
         run.closed = True
+        if getattr(run.adapter, "in_process", False):
+            run.adapter.shutdown()
         self.runs.pop(run.rid, None)
         self._deny_all(run, "对话已关闭")
         for timer in run.timers:
