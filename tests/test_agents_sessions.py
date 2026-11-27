@@ -90,6 +90,213 @@ def test_codex_title_without_index_skips_injected_context(home):
     assert found[("codex", CODEX_1)]["title"] == "给 utils.py 加一个 slugify 函数并跑测试"
 
 
+# --- Codex multi-agent: sub-agent threads, forks, one thread id in several rollouts (synthetic content) ---------
+
+PARENT = "019b0000-0000-7000-8000-00000000a001"
+SUB_1 = "019b0000-0000-7000-8000-00000000b001"
+SUB_2 = "019b0000-0000-7000-8000-00000000b002"
+SUB_NESTED = "019b0000-0000-7000-8000-00000000b003"
+FORK = "019b0000-0000-7000-8000-00000000c001"
+TWICE = "019b0000-0000-7000-8000-00000000d001"
+
+
+def _cx_rec(kind, payload, stamp="2026-11-25T08:00:00.000Z"):
+    return json.dumps({"timestamp": stamp, "type": kind, "payload": payload}, ensure_ascii=False)
+
+
+def _cx_user(text, stamp="2026-11-25T08:00:01.000Z"):
+    # Real rollouts write the response_item first, then its event_msg (see the fixture under tests/fixtures).
+    return [_cx_rec("response_item", {"type": "message", "role": "user",
+                                   "content": [{"type": "input_text", "text": text}]}, stamp),
+            _cx_rec("event_msg", {"type": "user_message", "message": text}, stamp)]
+
+
+def _cx_answer(text, stamp="2026-11-25T08:00:02.000Z"):
+    return [_cx_rec("response_item", {"type": "message", "role": "assistant",
+                                   "content": [{"type": "output_text", "text": text}]}, stamp)]
+
+
+def _rollout(home, day, session_id, meta, lines, when):
+    folder = home / ".codex" / "sessions" / "2026" / day[:2] / day[3:]
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"rollout-2026-{day}T08-00-00-{session_id}.jsonl"
+    head = _cx_rec("session_meta", {"id": session_id, "timestamp": f"2026-{day}T08:00:00.000Z", "cwd": "/home/u/plan",
+                                 "originator": "Codex Desktop", "cli_version": "0.171.0", **meta})
+    path.write_text("\n".join([head] + lines) + "\n", encoding="utf-8")
+    touch(path, when)
+    return path
+
+
+def _spawn(parent, nickname, ordinal):
+    return {"source": {"subagent": {"thread_spawn": {"parent_thread_id": parent, "depth": 1,
+                                                     "agent_path": f"/root/{nickname}", "agent_nickname": nickname}}},
+            "forked_from_id": parent, "parent_thread_id": parent, "subagent_history_start_ordinal": ordinal,
+            "agent_nickname": nickname, "agent_path": f"/root/{nickname}"}
+
+
+@pytest.fixture
+def multi(home):
+    # The fork ordinals count the inherited ``response_item`` records (2: one prompt + one answer).
+    now = time.time()
+    inherited = _cx_user("新版本导入图纸并生成清单") + _cx_answer("好的，先拆分任务")
+    _rollout(home, "11-25", PARENT, {"source": "vscode"}, inherited, now - 50)
+    _rollout(home, "11-25", SUB_1, _spawn(PARENT, "Gibbs", 2), inherited + _cx_user("只负责解析第 1-3 页"), now - 40)
+    _rollout(home, "11-25", SUB_2, _spawn(PARENT, "Gibbs the 2nd", 2), inherited, now - 30)  # nothing of its own yet
+    _rollout(home, "11-25", SUB_NESTED, _spawn(SUB_1, "Noether", 3), inherited + _cx_user("只负责解析第 1-3 页")
+             + _cx_user("核对第 2 页的尺寸"), now - 20)
+    _rollout(home, "11-26", FORK, {"source": "vscode", "forked_from_id": PARENT, "history_base": 2},
+             inherited + _cx_user("换一种方式：先导出 CSV"), now - 10)
+    first = _cx_user("整理会议纪要", "2026-10-13T08:00:01.000Z") + _cx_answer("已整理", "2026-10-13T08:00:02.000Z")
+    _rollout(home, "10-13", TWICE, {"source": "cli"}, first, now - 400)
+    _rollout(home, "11-25", TWICE, {"source": "cli"},
+             first + _cx_user("再加一节待办", "2026-11-25T09:00:01.000Z") + _cx_answer("已加上", "2026-11-25T09:00:02.000Z"),
+             now - 5)
+    return home
+
+
+def test_codex_subagents_fold_into_their_parent(multi):
+    items = S.discover(None, multi, kind="codex", env={})
+    ids = [s["id"] for s in items]
+    assert SUB_1 not in ids and SUB_2 not in ids and SUB_NESTED not in ids
+    assert ids.count(PARENT) == 1
+    parent = by_id(items)[("codex", PARENT)]
+    assert parent["subagents"] == 3  # the nested one counts towards the top-level thread
+    assert parent["title"] == "新版本导入图纸并生成清单"
+    assert "subagents" not in by_id(items)[("codex", CODEX_1)]
+    every = by_id(S.discover(None, multi, kind="codex", env={}, include_subagents=True))
+    sub = every[("codex", SUB_1)]
+    assert sub["parent_id"] == PARENT and sub["agent_nickname"] == "Gibbs"
+    assert sub["title"] == "只负责解析第 1-3 页"  # its own first prompt, not the inherited one
+    assert every[("codex", SUB_NESTED)]["title"] == "核对第 2 页的尺寸"
+    assert every[("codex", SUB_2)]["title"] == "新版本导入图纸并生成清单"  # nothing of its own: the inherited one
+
+
+def test_codex_subagent_history_still_opens_by_id(multi):
+    events = S.read(None, multi, "codex", SUB_1, env={})
+    users = [e["text"] for e in events if e["type"] == "user"]
+    assert users[-1] == "只负责解析第 1-3 页"
+
+
+def test_codex_fork_title_comes_after_the_fork_point(multi):
+    fork = by_id(S.discover(None, multi, kind="codex", env={}))[("codex", FORK)]
+    assert fork["title"] == "换一种方式：先导出 CSV" and fork["forked_from"] == PARENT
+    assert "parent_id" not in fork  # a fork is a session of its own
+
+
+def test_codex_one_entry_per_thread_id_across_rollouts(multi):
+    items = S.discover(None, multi, kind="codex", env={})
+    assert [s["id"] for s in items].count(TWICE) == 1
+    entry = by_id(items)[("codex", TWICE)]
+    assert len(entry["files"]) == 2 and "11-25" in entry["file"].replace("\\", "/")  # the newest rollout
+    assert entry["title"] == "整理会议纪要"
+    assert entry["updated_at"] >= max(Path(f).stat().st_mtime for f in entry["files"]) - 1
+    assert items[0]["id"] == TWICE  # sorted by its newest activity
+    events = S.read(None, multi, "codex", TWICE, env={})
+    users = [e["text"] for e in events if e["type"] == "user"]
+    assert users == ["整理会议纪要", "再加一节待办"]  # the copied history once, then the continuation
+    assert S.codex_rollout(multi, {}, TWICE) == Path(entry["file"])
+
+
+def test_codex_join_appends_a_continuation_only_rollout(multi):
+    # A second rollout holding only the new turns is appended after the older one.
+    _rollout(multi, "11-27", TWICE, {"source": "cli"}, _cx_user("第三轮", "2026-11-27T09:00:01.000Z"), time.time())
+    events = S.read(None, multi, "codex", TWICE, env={})
+    assert [e["text"] for e in events if e["type"] == "user"] == ["整理会议纪要", "再加一节待办", "第三轮"]
+    S.clear_cache()
+    entry = by_id(S.discover(None, multi, kind="codex", env={}))[("codex", TWICE)]
+    assert entry["title"] == "整理会议纪要"  # the oldest rollout names the thread, not the continuation
+
+
+def test_codex_join_skips_a_retimestamped_copy_of_the_history(home):
+    # The newer rollout copies the earlier turns with new timestamps: they are shown once.
+    old = _cx_user("第一问", "2026-10-13T08:00:01.000Z") + _cx_answer("答", "2026-10-13T08:00:02.000Z")
+    new = (_cx_user("第一问", "2026-11-25T08:00:01.000Z") + _cx_answer("答", "2026-11-25T08:00:02.000Z")
+           + _cx_user("第二问", "2026-11-25T08:00:03.000Z"))
+    _rollout(home, "10-13", TWICE, {"source": "cli"}, old, time.time() - 100)
+    _rollout(home, "11-25", TWICE, {"source": "cli"}, new, time.time())
+    events = S.read(None, home, "codex", TWICE, env={})
+    assert [e["text"] for e in events if e["type"] == "user"] == ["第一问", "第二问"]
+
+
+def test_codex_join_keeps_real_repeats_and_is_bounded(home, monkeypatch):
+    lines = _cx_user("再试一次") + _cx_answer("失败") + _cx_user("再试一次") + _cx_answer("失败")
+    _rollout(home, "10-13", TWICE, {"source": "cli"}, lines[:3], time.time() - 100)
+    _rollout(home, "11-25", TWICE, {"source": "cli"}, lines, time.time())
+    events = S.read(None, home, "codex", TWICE, env={})
+    assert [e["text"] for e in events if e["type"] == "user"] == ["再试一次", "再试一次"]
+    files = [Path(f) for f in by_id(S.discover(None, home, kind="codex", env={}))[("codex", TWICE)]["files"]]
+    monkeypatch.setattr(S, "READ_BYTES", 600)
+    data, dropped = S._codex_join(files)
+    assert len(data) <= 601 and dropped > 0
+
+
+def test_codex_fork_title_when_the_inherited_history_ends_with_a_prompt(home):
+    # The last inherited record is a prompt: its event_msg (written after the response_item) sits at the fork
+    # point and must not name the fork.
+    now = time.time()
+    _rollout(home, "11-25", PARENT, {"source": "vscode"}, _cx_user("父问题"), now - 50)
+    _rollout(home, "11-26", FORK, {"source": "vscode", "forked_from_id": PARENT, "history_base": 1},
+             _cx_user("父问题") + _cx_answer("答") + _cx_user("自己的"), now - 10)
+    assert by_id(S.discover(None, home, kind="codex", env={}))[("codex", FORK)]["title"] == "自己的"
+
+
+def test_codex_fork_scan_title_when_the_inherited_history_ends_with_a_prompt(home, monkeypatch):
+    big = _cx_answer("x" * 3000)
+    _rollout(home, "11-26", FORK, {"source": "vscode", "forked_from_id": PARENT, "history_base": 4},
+             big * 3 + _cx_user("父问题") + big * 3 + _cx_user("自己的"), time.time())
+    monkeypatch.setattr(S, "FULL_SCAN_BYTES", 1000)
+    monkeypatch.setattr(S, "HEAD_BYTES", 4000)
+    monkeypatch.setattr(S, "TAIL_BYTES", 4000)
+    S.clear_cache()
+    assert by_id(S.discover(None, home, kind="codex", env={}))[("codex", FORK)]["title"] == "自己的"
+
+
+def test_codex_large_subagent_is_not_scanned_for_its_title(multi, monkeypatch):
+    big = _cx_answer("x" * 3000)
+    _rollout(multi, "11-25", SUB_2, _spawn(PARENT, "Gibbs the 2nd", 7),
+             _cx_user("新版本导入图纸并生成清单") + big * 6 + _cx_user("子代理自己的"), time.time())
+    monkeypatch.setattr(S, "FULL_SCAN_BYTES", 1000)
+    monkeypatch.setattr(S, "HEAD_BYTES", 4000)
+    monkeypatch.setattr(S, "TAIL_BYTES", 4000)
+    S.clear_cache()
+    calls = []
+    real = S._codex_scan_title
+    monkeypatch.setattr(S, "_codex_scan_title", lambda *a, **k: calls.append(a) or real(*a, **k))
+    every = by_id(S.discover(None, multi, kind="codex", env={}, include_subagents=True))
+    assert every[("codex", SUB_2)]["parent_id"] == PARENT and not calls
+
+
+def test_codex_orphan_subagent_is_listed(multi):
+    orphan = "019b0000-0000-7000-8000-00000000f001"
+    _rollout(multi, "11-25", orphan, _spawn("019b0000-0000-7000-8000-0000000000ff", "Lost", 0), _cx_user("孤儿任务"),
+             time.time())
+    entry = by_id(S.discover(None, multi, kind="codex", env={}))[("codex", orphan)]
+    assert entry["orphan"] and entry["title"] == "孤儿任务"
+
+
+def test_codex_fork_title_in_a_large_rollout(multi, monkeypatch):
+    # Past the head (a big file): the streaming scan keeps counting the inherited records.
+    big = _cx_answer("x" * 3000)
+    _rollout(multi, "11-26", FORK, {"source": "vscode", "forked_from_id": PARENT, "history_base": 4},
+             _cx_user("旧问题") + big * 3 + _cx_user("分叉后的新问题") + big * 3, time.time())
+    monkeypatch.setattr(S, "FULL_SCAN_BYTES", 1000)
+    monkeypatch.setattr(S, "HEAD_BYTES", 4000)
+    monkeypatch.setattr(S, "TAIL_BYTES", 4000)
+    S.clear_cache()
+    fork = by_id(S.discover(None, multi, kind="codex", env={}))[("codex", FORK)]
+    assert fork["title"] == "分叉后的新问题"
+
+
+def test_codex_subagents_do_not_crowd_out_the_window(multi):
+    # limit counts top-level threads: the sub-agent rollouts (newer than the parent) do not use up the window.
+    for n in range(30):
+        _rollout(multi, "11-25", f"019b0000-0000-7000-8000-0000000e{n:04d}", _spawn(PARENT, f"A{n}", 2), [], time.time())
+    S.clear_cache()
+    items = S.discover(None, multi, kind="codex", env={}, limit=1)
+    assert PARENT in [s["id"] for s in S.discover(None, multi, kind="codex", env={}, limit=3)]
+    assert len(items) == 1
+
+
 def test_codex_home_and_dsh_home_relocate(home, tmp_path):
     moved = tmp_path / "elsewhere"
     shutil.move(str(home / ".codex"), str(moved / "codex"))
@@ -690,3 +897,22 @@ def test_console_started_session_titled_by_its_first_prompt(home, tmp_path):
     meta.set("dsh", DSH_1, first_prompt="later message")  # kept once set
     found = by_id(S.discover(None, home, kind="dsh", env={}, meta=meta))
     assert found[("dsh", DSH_1)]["title"] == "修复 登录页"
+
+
+def test_codex_fork_that_points_into_its_parent_is_titled_without_a_scan(home, monkeypatch):
+    # The shape of a real fork (Codex desktop 0.171): history_base points into the parent's file (thread id,
+    # ordinal and byte offset there) and forked_from_ordinal_exclusive counts in the parent; the fork's own
+    # records start at once, its first prompt included.
+    big = _cx_answer("x" * 3000)
+    meta = {"source": "vscode", "forked_from_id": PARENT, "forked_from_ordinal_exclusive": 4980,
+            "history_base": {"thread_id": PARENT, "end_ordinal_exclusive": 89600, "end_byte_offset": 388404484}}
+    _rollout(home, "11-26", FORK, meta, _cx_user("分叉自己的问题") + big * 6, time.time())
+    monkeypatch.setattr(S, "FULL_SCAN_BYTES", 1000)
+    monkeypatch.setattr(S, "HEAD_BYTES", 4000)
+    monkeypatch.setattr(S, "TAIL_BYTES", 4000)
+    S.clear_cache()
+    calls = []
+    real = S._codex_scan_title
+    monkeypatch.setattr(S, "_codex_scan_title", lambda *a, **k: calls.append(a) or real(*a, **k))
+    fork = by_id(S.discover(None, home, kind="codex", env={}))[("codex", FORK)]
+    assert fork["title"] == "分叉自己的问题" and not calls

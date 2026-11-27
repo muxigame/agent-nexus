@@ -5,7 +5,9 @@ Runs on the runner device, against the run-as user's HOME (``home``) and environ
 * Claude Code -- ``~/.claude/projects/<mangled cwd>/<id>.jsonl`` (``$CLAUDE_CONFIG_DIR`` wins). ``cwd`` comes from the
   records; the title is the ``custom-title`` / ``summary`` record, else the first real user message.
 * Codex -- ``~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`` (``$CODEX_HOME`` wins) plus ``archived_sessions/``. The
-  ``session_meta`` record gives ``id`` / ``cwd``; titles come from ``session_index.jsonl`` (``thread_name``) first.
+  ``session_meta`` record gives ``id`` / ``cwd``; titles come from ``session_index.jsonl`` (``thread_name``) first,
+  then the first prompt (after the fork point for forked / sub-agent threads). Sub-agent threads (``parent_thread_id``)
+  fold into their parent's ``subagents`` count; several rollouts of one thread id are one session.
 * DeepSeek Harness (dsh) -- the index ``~/.dsh/storages/session_projcache/sessions/<id>.json`` (``$DSH_HOME`` wins)
   for listing, ``sessions/<encoded cwd>/<id>/session.v4.jsonl.zstd`` for history (zstd is optional). Plain
   ``*.jsonl`` / ``*.json`` files under ``sessions/`` or ``profiles/*/sessions/`` are listed too, parsed leniently.
@@ -559,10 +561,70 @@ def _codex_compacted_user(payload: dict) -> str | None:
     return None
 
 
-def _codex_scan_title(path: Path, compacted_user: str | None) -> tuple[str | None, str | None]:
+#: ``session_meta`` keys (also looked up in ``source.subagent.thread_spawn``) that give the number of history items a
+#: forked or spawned thread inherited; the first one that is an integer wins.
+_CODEX_FORK_KEYS = ("subagent_history_start_ordinal", "forked_from_ordinal_exclusive", "history_base",
+                    "history_start_ordinal", "fork_ordinal")
+
+
+def _codex_ordinal(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return max(0, value)
+    if isinstance(value, dict):
+        for key in ("ordinal", "ordinal_exclusive", "len", "count", "items"):
+            found = _codex_ordinal(value.get(key))
+            if found is not None:
+                return found
+    return None
+
+
+def _codex_lineage(payload: dict) -> dict:
+    """What ``session_meta`` says about where the thread came from: ``{parent_id, nickname, ordinal, forked_from}``.
+
+    A sub-agent thread (multi-agent Codex) has ``source: {subagent: {thread_spawn: {parent_thread_id, ...}}}`` and
+    usually a top-level ``parent_thread_id``; a forked thread has ``forked_from_id``. Both start with a copy of the
+    other thread's history, the first ``ordinal`` history (``response_item``) records."""
+    source = payload.get("source")
+    sub = source.get("subagent") if isinstance(source, dict) else None
+    spawn = sub.get("thread_spawn") if isinstance(sub, dict) and isinstance(sub.get("thread_spawn"), dict) else {}
+    if not spawn and isinstance(sub, dict):
+        spawn = sub
+
+    def pick(*keys: str) -> Any:
+        for where in (payload, spawn):
+            for key in keys:
+                value = where.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+        return None
+    ordinal = None
+    if isinstance(payload.get("history_base"), dict):
+        # Seen in real rollouts (Codex desktop 0.171): a fork with ``history_base`` {thread_id, end_ordinal_exclusive,
+        # end_byte_offset} does not copy the parent's history, it points into the parent's file; its own records
+        # (first prompt at the top) follow at once, and ``forked_from_ordinal_exclusive`` counts in the parent.
+        return {"parent_id": pick("parent_thread_id"), "nickname": pick("agent_nickname", "agent_path"),
+                "ordinal": None, "forked_from": pick("forked_from_id")}
+    for where in (payload, spawn):
+        for key in _CODEX_FORK_KEYS:
+            ordinal = _codex_ordinal(where.get(key))
+            if ordinal is not None:
+                break
+        if ordinal is not None:
+            break
+    return {"parent_id": pick("parent_thread_id"), "nickname": pick("agent_nickname", "agent_path"),
+            "ordinal": ordinal, "forked_from": pick("forked_from_id")}
+
+
+def _codex_scan_title(path: Path, compacted_user: str | None,
+                      ordinal: int | None = None) -> tuple[str | None, str | None]:
     """``(first own user text, first compacted user text)`` found by streaming the file line by line (at most
-    ``READ_BYTES``); used only when the head and the tail held no prompt. The summary cache keeps the result."""
+    ``READ_BYTES``); used only when the head and the tail held no prompt. With ``ordinal`` (a fork / sub-agent),
+    only a prompt after the first ``ordinal`` inherited ``response_item`` records counts. The summary cache keeps
+    the result."""
     read = 0
+    items = 0
     try:
         with path.open("rb") as handle:
             for raw in handle:
@@ -570,6 +632,14 @@ def _codex_scan_title(path: Path, compacted_user: str | None) -> tuple[str | Non
                 if read > READ_BYTES:
                     break
                 start = raw[:400]
+                if ordinal is not None and b'"response_item"' in start:
+                    items += 1
+                    if items <= ordinal:
+                        continue
+                elif ordinal is not None and (items < ordinal or (items == ordinal and b'"event_msg"' in start)):
+                    # Codex writes a prompt's ``event_msg`` right after its ``response_item``: until an item past
+                    # the fork point shows up, an event still echoes the inherited history.
+                    continue
                 if b'"compacted"' in start:
                     if compacted_user is None:
                         record = _json_loads(raw)
@@ -600,6 +670,7 @@ def _codex_summary(path: Path, stat: os.stat_result) -> list[dict]:
     out = _summary(id=match.group(0) if match else path.stem, primary=True,
                    cli_archived="archived_sessions" in path.parts)
     first = _first_line(path)
+    lineage = {"parent_id": None, "nickname": None, "ordinal": None, "forked_from": None}
     if first:
         kind, payload = _codex_payload(first)
         if kind in ("session_meta", None) or "cwd" in payload or "instructions" in payload:
@@ -608,21 +679,46 @@ def _codex_summary(path: Path, stat: os.stat_result) -> list[dict]:
             if isinstance(payload.get("cwd"), str):
                 out["cwd"] = payload["cwd"]
             out["created_at"] = _ts(payload.get("timestamp")) or _ts(first.get("timestamp"))
+            lineage = _codex_lineage(payload)
+    if lineage["parent_id"] and lineage["parent_id"] != out["id"]:
+        out["parent_id"] = lineage["parent_id"]
+        if lineage["nickname"]:
+            out["agent_nickname"] = lineage["nickname"]
+    if lineage["forked_from"]:
+        out["forked_from"] = lineage["forked_from"]
+    ordinal = lineage["ordinal"]
     head, tail, complete = _read_jsonl(path, stat.st_size)
     first_user, messages, event_user = None, 0, None
-    for record in head + tail:
+    own_user, own_event = None, None  # the first prompts after the fork point (``ordinal``)
+    items = 0  # response_item records seen in the head (the ordinal counts those)
+    own_seen = False  # a response_item past the fork point was seen: later event_msg records are the thread's own
+    for number, record in enumerate(head + tail):
         kind, payload = _codex_payload(record)
+        in_head = number < len(head)
+        past = ordinal is None or items >= ordinal  # tail records are past the fork point iff the head reached it
+        if ordinal is not None and not in_head and past:
+            own_seen = True
         if not out["cwd"] and kind == "turn_context" and isinstance(payload.get("cwd"), str):
             out["cwd"] = payload["cwd"]
-        if kind == "event_msg" and payload.get("type") == "user_message" and event_user is None:
+        if kind == "event_msg" and payload.get("type") == "user_message":
             text = str(payload.get("message") or "").strip()
             if text and not text.startswith("<"):
-                event_user = text
+                event_user = event_user or text
+                # Codex writes a prompt's event right AFTER its response_item: the event of the last inherited
+                # prompt sits at the fork point, so only an event after an own item counts.
+                if (ordinal is None or own_seen) and own_event is None:
+                    own_event = text
         if kind in ("response_item", None):
+            if kind == "response_item" and in_head:
+                past = ordinal is None or items >= ordinal
+                own_seen = own_seen or (ordinal is not None and past)
+                items += 1
             text = _codex_user_text(payload)
             if text:
                 messages += 1
                 first_user = first_user or text
+                if past and own_user is None:
+                    own_user = text
             elif payload.get("type") == "message" and payload.get("role") == "assistant" \
                     and _text_of(payload.get("content")).strip():
                 messages += 1
@@ -631,7 +727,16 @@ def _codex_summary(path: Path, stat: os.stat_result) -> list[dict]:
         kind, payload = _codex_payload(record)
         if kind == "compacted" and compacted_user is None:
             compacted_user = _codex_compacted_user(payload)
-    title = event_user or first_user
+    title = None
+    if ordinal is not None:
+        # A fork / sub-agent starts with a copy of another thread's history: its own first prompt (after the fork
+        # point) names it; the inherited one would give every fork of a thread the same title.
+        title = own_user or own_event
+        if not title and not complete and not out.get("parent_id"):
+            # Only for top-level forks: sub-agents (many per prompt, each a copy of the parent's history) are
+            # folded into their parent and their titles are not listed, so a scan to their own prompt is wasted.
+            title, compacted_user = _codex_scan_title(path, compacted_user, ordinal)
+    title = title or event_user or first_user
     if not title and not complete:
         # The Codex desktop app writes a multi-megabyte ``compacted`` record near the top of a forked / resumed
         # session, so the first prompt of the session itself sits past the head (seen on a real Windows device).
@@ -892,6 +997,9 @@ def _parse(kind: str, path: Path, stat: os.stat_result) -> list[dict]:
 
 
 def _summaries(kind: str, path: Path, stat: os.stat_result, deadline: float | None = None) -> list[dict]:
+    # Past ``deadline`` a file gets a quick, unparsed summary (id from the file name only). For Codex that has no
+    # ``parent_id``, so sub-agent rollouts left unparsed show up as separate untitled sessions in that one
+    # response; the next listing parses them (they are not cached) and folds them in again.
     key = (kind, str(path), stat.st_mtime_ns, stat.st_size)
     cached = _CACHE.get(key)
     if cached is not None:
@@ -915,8 +1023,19 @@ def _summaries(kind: str, path: Path, stat: os.stat_result, deadline: float | No
 def _merge(kind: str, parts: list[dict], label: str) -> dict:
     """One session from every file that names it: metadata from the best-titled part, history from the primary."""
     primary = [p for p in parts if p.get("primary")]
-    reader = max(primary, key=lambda p: (p["file"].endswith(".zstd"), p["fsize"]), default=None)
-    best = max(parts, key=lambda p: (p["title_rank"], p.get("primary", False)))
+    if kind == "codex":
+        # Codex can write one thread id into several rollouts (a resumed / continued thread gets a new dated file):
+        # the newest one is the live file (resume, context usage); history reads join them all, see _codex_join.
+        reader = max(primary, key=lambda p: (p["mtime"], p["fsize"]), default=None)
+    else:
+        reader = max(primary, key=lambda p: (p["file"].endswith(".zstd"), p["fsize"]), default=None)
+    if kind == "codex":
+        # Equal titles: the oldest rollout of the thread holds its original prompt (a continuation may start with
+        # only the new turns), so it names the session.
+        best = max(parts, key=lambda p: (p["title_rank"], p.get("primary", False),
+                                         -(p.get("created_at") or p.get("mtime") or 0)))
+    else:
+        best = max(parts, key=lambda p: (p["title_rank"], p.get("primary", False)))
     session_id = str(best.get("id") or parts[0]["id"])
 
     def first(key: str) -> Any:
@@ -943,6 +1062,7 @@ def _merge(kind: str, parts: list[dict], label: str) -> dict:
         "own_files": sorted({p["file"] for p in parts if not p.get("shared")}),
         "readable": bool(reader) or any(p.get("shared") for p in parts),
         **({"project_hash": first("project_hash")} if first("project_hash") else {}),
+        **{key: first(key) for key in ("parent_id", "agent_nickname", "forked_from") if first(key)},
     }
 
 
@@ -953,20 +1073,59 @@ def _discover_kind(kind: str, globs: list[str], home: Path, env: Mapping[str, st
     # Newest first, a little past the limit: blank and hidden sessions are dropped later, and dsh keeps two files
     # (index + transcript) per session.
     window = limit * 2 + 20 if kind == "dsh" else limit + 20
-    chosen = ordered[:window] + [item for item in ordered[window:] if _guess_id(kind, item[0]) in want]
     groups: dict[str, list[dict]] = {}
-    for path, stat in chosen:
-        for part in _summaries(kind, path, stat, deadline):
-            if part.get("id"):
-                groups.setdefault(str(part["id"]), []).append(dict(part))
+
+    def add(path: Path, stat: os.stat_result) -> list[dict]:
+        parts = [part for part in _summaries(kind, path, stat, deadline) if part.get("id")]
+        for part in parts:
+            groups.setdefault(str(part["id"]), []).append(dict(part))
+        return parts
+    if kind == "codex":
+        # Sub-agent threads (one rollout each, often many per prompt) and extra rollouts of one thread do not
+        # count towards the window: it holds ``window`` distinct top-level threads.
+        top: set[str] = set()
+        rest = []
+        for number, (path, stat) in enumerate(ordered):
+            if len(top) >= window:
+                rest = ordered[number:]
+                break
+            top.update(str(part["id"]) for part in add(path, stat) if not part.get("parent_id"))
+    else:
+        rest = ordered[window:]
+        for path, stat in ordered[:window]:
+            add(path, stat)
+    for path, stat in rest:
+        if _guess_id(kind, path) in want:
+            add(path, stat)
     sessions = [_merge(kind, parts, label) for parts in groups.values()]
     if kind == "codex":
+        _codex_fold_subagents(sessions)
         index = _codex_index(home, env)
         for session in sessions:
             entry = index.get(session["id"])
             if entry and isinstance(entry.get("thread_name"), str) and entry["thread_name"].strip():
                 session["title"] = _title(entry["thread_name"])
     return sessions
+
+
+def _codex_fold_subagents(sessions: list[dict]) -> None:
+    """Sub-agent threads are not sessions of their own in the list: each top-level thread gets ``subagents`` -- the
+    number of (nested) sub-agent threads found under it. The sub-agents keep ``parent_id`` (and stay readable by
+    id); :func:`discover` leaves them out unless asked. A sub-agent whose parent is not on the list (deleted, or
+    older than the listing window) is an ``orphan``: it is listed as a session, with its own sub-agents folded in.
+    ``source: {subagent: "review"}`` style threads (no parent id) are not recognised as sub-agents and stay listed."""
+    by_id = {s["id"]: s for s in sessions}
+    for session in sessions:
+        if not session.get("parent_id"):
+            continue
+        root, seen = session, {session["id"]}
+        while root.get("parent_id") in by_id and root["parent_id"] not in seen:
+            seen.add(root["parent_id"])
+            root = by_id[root["parent_id"]]
+        if root is session:
+            session["orphan"] = True
+        else:
+            root["subagents"] = root.get("subagents", 0) + 1
 
 
 def _resolve_gemini_cwds(sessions: list[dict], known_dirs: Iterable[str]) -> None:
@@ -989,13 +1148,14 @@ def _env(env: Mapping[str, str] | None) -> Mapping[str, str]:
 
 def discover(defs: Any, home: Path, *, kind: str | None = None, limit: int = 200, env: Mapping[str, str] | None = None,
              meta: SessionMeta | None = None, include_hidden: bool = False, include_blank: bool = False,
-             query: str | None = None, known_dirs: Iterable[str] = ()) -> list[dict]:
+             query: str | None = None, known_dirs: Iterable[str] = (), include_subagents: bool = False) -> list[dict]:
     """Sessions on disk: per kind every pinned one plus the ``limit`` most recent others (renamed or console-started
     ones are kept beyond that), sorted pinned first, then by ``updated_at`` (newest first).
 
     Each: ``{kind, id, title, cwd, updated_at, created_at, messages, size, source, managed, pinned, archived, alias,
-    hidden, label, file, files}``. Hidden (removed from the list) and blank (never prompted) sessions are left out
-    unless asked for. Never raises for unreadable files; ``kind`` that is unknown gives ``[]``."""
+    hidden, label, file, files}`` (Codex adds ``subagents``, ``parent_id``, ``agent_nickname``, ``forked_from`` when
+    known). Hidden (removed from the list), blank (never prompted) and sub-agent (``parent_id``, folded into the
+    parent's ``subagents`` count) sessions are left out unless asked for. Never raises for unreadable files; ``kind`` that is unknown gives ``[]``."""
     home = Path(home)
     env = _env(env)
     limit = max(1, min(int(limit or 200), 5000))
@@ -1022,6 +1182,8 @@ def discover(defs: Any, home: Path, *, kind: str | None = None, limit: int = 200
             items = [s for s in items if not s["hidden"]]
         if not include_blank:
             items = [s for s in items if not s["blank"] or s["pinned"] or s["alias"] or s["managed"]]
+        if not include_subagents:
+            items = [s for s in items if not s.get("parent_id") or s.get("orphan") or s["pinned"] or s["alias"]]
         if needle:
             items = [s for s in items if any(needle in str(s.get(k) or "").casefold()
                                              for k in ("alias", "title", "cwd", "id"))]
@@ -1063,7 +1225,8 @@ def find(defs: Any, home: Path, kind: str, session_id: str, *, env: Mapping[str,
     """The discovered session ``kind`` / ``session_id`` (hidden and blank ones included), or ``None``."""
     if not isinstance(session_id, str) or not session_id:
         return None
-    for session in discover(defs, home, kind=kind, limit=5000, env=env, include_hidden=True, include_blank=True):
+    for session in discover(defs, home, kind=kind, limit=5000, env=env, include_hidden=True, include_blank=True,
+                            include_subagents=True):
         if session["id"] == session_id:
             return session
     return None
@@ -1766,7 +1929,10 @@ def read_session(session: dict, *, max_events: int = 2000) -> list[dict]:
         builder.add({"type": "error", "text": "这个会话只有索引信息，没有找到记录文件，无法显示历史；仍然可以发消息续接。"})
         return builder.finish(session_id, max_events=max_events)
     try:
-        data, dropped_bytes = _read_bytes(path)
+        if kind == "codex" and len(session.get("own_files") or []) > 1:
+            data, dropped_bytes = _codex_join([Path(f) for f in session["own_files"]])
+        else:
+            data, dropped_bytes = _read_bytes(path)
     except LookupError:
         builder.add({"type": "error", "text": "会话记录是 zstd 压缩的，这台设备缺少解压支持（安装 Python 包 zstandard 或 zstd "
                                                  "命令后可显示），暂时只能显示会话信息；仍然可以发消息续接。"})
@@ -1797,6 +1963,78 @@ def read_session(session: dict, *, max_events: int = 2000) -> list[dict]:
     if not builder.events and not records and data.strip():
         builder.add({"type": "error", "text": "无法识别这个会话文件的格式，只能显示会话信息；仍然可以发消息续接。"})
     return builder.finish(session_id, max_events=max_events, dropped=dropped, usage=usage)
+
+
+def _codex_line_key(line: bytes) -> bytes:
+    """A rollout line compared by content: Codex stamps every line with the time it wrote it, so a copy of the
+    history in a newer rollout differs from the original only in ``timestamp``."""
+    record = _json_loads(line)
+    if not isinstance(record, dict):
+        return line
+    record = {k: v for k, v in record.items() if k != "timestamp"}
+    return json.dumps(record, sort_keys=True, ensure_ascii=False).encode("utf-8", "replace")
+
+
+def _codex_line(line: bytes) -> tuple[str | None, dict]:
+    record = _json_loads(line)
+    return _codex_payload(record) if isinstance(record, dict) else (None, {})
+
+
+def _codex_is_meta(line: bytes) -> bool:
+    return b'"session_meta"' in line[:400] and _codex_line(line)[0] == "session_meta"
+
+
+def _codex_join(paths: list[Path]) -> tuple[bytes, int]:
+    """The history of a Codex thread written to several rollouts, oldest first (by mtime -- the newest is the one
+    Codex kept appending to). A newer rollout either starts with a copy of the history before it (compared by
+    content, ignoring ``timestamp``) -- the copied prefix is skipped -- or holds only the new turns, which are
+    appended; one that holds the older history's first prompt anywhere else replaces it. Real repeats inside a
+    file stay. A rollout whose start was cut off (bigger than ``READ_BYTES``) drops the older ones, so the only gap
+    is at the start, and the joined data is bounded by ``READ_BYTES``. ``(data, dropped_bytes)`` as
+    :func:`_read_bytes`."""
+    dated = []
+    for path in paths:
+        try:
+            dated.append((path.stat().st_mtime, str(path), path))
+        except OSError:
+            continue
+    lines: list[bytes] = []
+    keys: list[bytes] = []
+    dropped = 0
+    for _mtime, _name, path in sorted(dated):
+        data, lost = _read_bytes(path)
+        new = [line.strip() for line in data.splitlines() if line.strip()]
+        new_keys = [_codex_line_key(line) for line in new]
+        if lost or not lines:
+            dropped += lost + sum(len(line) + 1 for line in lines)
+            lines, keys = new, new_keys
+            continue
+        start = 0
+        while start < len(new) and _codex_is_meta(new[start]):
+            start += 1  # the newer rollout's own session_meta: the older one already opens the history
+        base = 0
+        while base < len(lines) and _codex_is_meta(lines[base]):
+            base += 1
+        same = 0
+        while base + same < len(keys) and start + same < len(new_keys) and keys[base + same] == new_keys[start + same]:
+            same += 1
+        if same == 0:
+            first_prompt = next((key for line, key in zip(lines, keys)
+                                 if _codex_user_text(_codex_line(line)[1])), None)
+            if first_prompt is not None and first_prompt in new_keys:
+                # a self-contained newer rollout (the history copied in some other shape): read it alone
+                dropped += sum(len(line) + 1 for line in lines)
+                lines, keys = new, new_keys
+                continue
+        lines += new[start + same:]
+        keys += new_keys[start + same:]
+    total = sum(len(line) + 1 for line in lines)
+    cut = 0
+    while total > READ_BYTES and cut < len(lines):
+        total -= len(lines[cut]) + 1
+        dropped += len(lines[cut]) + 1
+        cut += 1
+    return b"\n".join(lines[cut:]) + b"\n", dropped
 
 
 def _gemini_logs_feed(builder: _Builder, path: Path, session_id: str) -> None:

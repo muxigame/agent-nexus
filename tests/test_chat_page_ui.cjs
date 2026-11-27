@@ -75,8 +75,10 @@ test("state is kept per console under anx-chat:<console> (§16.2)", async () => 
     const store = chatStore("anx-chat:local");
     assert.deepEqual(store.read(), {});
     store.write({ device: null, draft: "草稿" });
-    store.write({ sideCollapsed: true });
-    assert.deepEqual(JSON.parse(memory.get("anx-chat:local")), { device: null, draft: "草稿", sideCollapsed: true });
+    store.write({ sideClosed: true });
+    assert.deepEqual(JSON.parse(memory.get("anx-chat:local")), { device: null, draft: "草稿", sideClosed: true });
+    store.write({ sideClosed: undefined });   // undefined drops a key (how the old sideCollapsed is cleared)
+    assert.deepEqual(JSON.parse(memory.get("anx-chat:local")), { device: null, draft: "草稿" });
     memory.set("anx-chat:local", "{broken");
     assert.deepEqual(store.read(), {});
   } finally {
@@ -137,4 +139,82 @@ test("switching the run device does not carry the previous device's workdir over
   const src = read("ui/chat.js");
   const body = src.slice(src.indexOf("async function selectDevice("));
   assert.ok(body.indexOf("prefsFor(id)") > 0 && body.indexOf("prefsFor(id)") < body.indexOf("store.write({ device: id })"));
+});
+
+
+test("the settings are one chip row inside the composer; a light head line replaces the toolbar band", () => {
+  const chat = read("ui/chat.js");
+  assert.ok(!chat.includes('"chat-bar"') && !chat.includes("chat-bar-picks") && !chat.includes("function pick("), "the old toolbar is gone");
+  assert.match(chat, /const chips = el\("div", \{ class: "chat-chips", role: "toolbar", "aria-label": "对话设置" \}\)/);
+  // the chips sit in the composer's foot, left of usage / stop / send
+  assert.match(chat, /el\("div", \{ class: "chat-composer-foot" \}, chips, el\("div", \{ class: "chat-composer-actions" \}, usageNode, stopBtn, sendBtn\)\)/);
+  // each chip: a button with the full text as its name, reusing the existing menus
+  assert.match(chat, /class: `chat-chip \$\{cls\}`, type: "button", "aria-haspopup": "true", "aria-expanded": "false", title: name, "aria-label": name/);
+  for (const [cls, opener] of [["chat-chip-device", "deviceMenu("], ["chat-chip-agent", "agentMenu("], ["chat-chip-dir", "dirMenu("], ["chat-chip-perm", "permissionMenu("]]) {
+    const at = chat.indexOf(`"${cls}`) >= 0 ? chat.indexOf(`"${cls}`) : chat.indexOf(`\`${cls}`);
+    assert.ok(at > 0, cls);
+    assert.ok(chat.slice(at, at + 600).includes(opener), `${cls} opens ${opener}`);
+  }
+  assert.match(chat, /mount\(chips, device, agent, dir, perm\)/);
+  assert.match(chat, /`dot \$\{status\.tone/, "the Agent chip has a status dot");
+  // head line: session toggle · current title · ⋯ (the ⋯ menu keeps presets / context / temp dirs / 新对话)
+  assert.match(chat, /const head = el\("div", \{ class: "chat-head" \}, sideBtn, headTitle, moreBtn\)/);
+  assert.match(chat, /const main = el\("section", \{ class: "chat-main", "aria-label": "对话" \}, head, ctxLine,/);
+  for (const item of ["编辑提示词片段…", "工作上下文…", "临时目录…"]) assert.ok(chat.includes(item), item);
+  const css = read("ui/ui.css");
+  for (const rule of [".chat-head {", ".chat-chips {", ".chat-chip {", ".chat-chips.fade-end", ".chat-chip.danger", ".chat-chip-dir.no-dir"]) assert.ok(css.includes(rule), rule);
+  assert.ok(!/\.chat-bar|\.chat-pick\b/.test(css), "no leftover toolbar rules");
+});
+
+test("the composer note keeps only state that matters; key hints are in the placeholder", () => {
+  const chat = read("ui/chat.js");
+  const body = chat.slice(chat.indexOf("function renderComposer("), chat.indexOf("// ============================================================ the event stream"));
+  assert.ok(!body.includes("kbd") && !body.includes("chat-note-keys"), "no always-visible key hints");
+  assert.ok(body.includes("Enter 发送") && body.includes("Shift+Enter 换行") && body.includes("input.title"));
+  assert.ok(body.includes('"将续接这个会话"'));
+  assert.ok(!body.includes("不会逐项询问") && !body.includes("chat-note-danger"), "the permission shows in its chip");
+  assert.match(body, /composerNote\.hidden = !composerNote\.childElementCount/);
+});
+
+test("the chat is not a card: messages on the page background, the composer is the raised surface", () => {
+  const chat = read("ui/chat.js");
+  assert.match(chat, /const root = el\("div", \{ class: "chat" \}, side, scrim, main\)/);
+  assert.ok(!chat.includes('class: "chat card"'));
+  const css = read("ui/ui.css");
+  assert.match(css, /\.chat \{ --chat-side-w: 272px; --chat-col: 820px;/);
+  const composer = css.slice(css.indexOf(".chat-composer {"), css.indexOf("}", css.indexOf(".chat-composer {")));
+  assert.ok(composer.includes("border:") && composer.includes("box-shadow:"));
+  // the skins do not give the chat back a card surface
+  for (const skin of ["ui/style-pure.css", "ui/style-mica.css"]) assert.ok(!/\.chat[\s.{,]/.test(read(skin)), skin);
+});
+
+test("the session list is open by default; only this version's collapse keeps it closed", () => {
+  const chat = read("ui/chat.js");
+  assert.ok(chat.includes('if ("sideCollapsed" in stored) store.write({ sideCollapsed: undefined });'), "the old preference is dropped once");
+  assert.ok(chat.includes("if (stored.sideClosed === true) root.classList.add(\"side-collapsed\")"));
+  assert.ok(chat.includes("store.write({ sideClosed: on })"));
+  assert.ok(!/read\(\)\.sideCollapsed/.test(chat), "sideCollapsed is never read");
+  // the drawer breakpoint is the same in the script and the stylesheet
+  const css = read("ui/ui.css");
+  assert.ok(css.includes("@container chat (max-width: 719px)") && css.includes("@container chat (min-width: 720px)"));
+  assert.ok(chat.includes("root.clientWidth < 720"));
+});
+
+test("chip text ellipsizes; on wide layouts the chips shrink instead of scrolling 权限 out of view", () => {
+  const chat = read("ui/chat.js");
+  // a plain string value is wrapped in .truncate (text-overflow needs a block, not a bare text node in a flex box)
+  assert.match(chat, /typeof value === "string" \? el\("span", \{ class: "truncate" \}, value\) : value/);
+  const css = read("ui/ui.css");
+  assert.ok(css.includes(".chat-chip-device, .chat-chip-agent, .chat-chip-dir { flex: 0 1 auto; min-width: 48px; }"));
+  assert.ok(css.includes(".chat-chip.fit { flex-shrink: 0; }") && chat.includes('deviceName().length <= 6 ? "fit" : ""'));
+  // phones keep the chips at size and scroll the row sideways
+  const phone = css.slice(css.indexOf("@container chat (max-width: 640px)"));
+  assert.ok(phone.slice(0, phone.indexOf("\n}")).includes(".chat-chip, .chat-chip-device, .chat-chip-agent, .chat-chip-dir { flex: none;"));
+});
+
+test("a Codex session row shows its sub-agent count; the key hint is only for keyboards", () => {
+  const chat = read("ui/chat.js");
+  assert.match(chat, /s\.subagents > 0 \? el\("span", \{ class: "chat-sess-subagents", title: `\$\{s\.subagents\} 个子代理会话` \}, `子代理 \$\{s\.subagents\}`\) : null/);
+  assert.ok(read("ui/ui.css").includes(".chat-sess-subagents {"));
+  assert.ok(chat.includes('matchMedia?.("(pointer: fine)")'));
 });
