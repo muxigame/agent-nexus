@@ -73,6 +73,70 @@ export function devicePrefs(stored, id) {
   return st.device === id ? st : {};   // a state written before byDevice existed
 }
 
+// ---------------------------------------------------------------- folders on other devices (§1 mode gateway)
+
+const folderBase = (path) => String(path || "").replace(/[\\/]+$/, "").split(/[\\/]/).filter(Boolean).pop() || String(path || "");
+
+/**
+ * The devices a run on `runner` can work on through the gateway, from the chat's device list: every device but the
+ * runner itself with an id on the gateway (本机 of the local console carries it as `gid`). `id` is that gateway id
+ * (the context's device), `call` the id the console's api takes for the device's own ops (null = 本机), `online`
+ * whether the gateway reaches it (`reachable`; a device without agents/1 still serves use_device), `agents` whether
+ * its own AgentHub answers (agent_dirs: its recent folders, workspaces, browsing), `files` whether files/1 lists it.
+ */
+export function contextTargets(devices, runner) {
+  const out = [];
+  for (const d of Array.isArray(devices) ? devices : []) {
+    if (!d || (d.self && runner === null) || (d.id != null && d.id === runner)) continue;
+    const id = d.id || d.gid;
+    if (!id || (d.gid && d.gid === runner)) continue;
+    const agents = d.online !== false;
+    out.push({ id, call: d.id ?? null, self: !!d.self, name: d.self ? `本机${d.name && d.name !== "本机" ? `（${d.name}）` : ""}` : d.name || id,
+      online: d.reachable !== undefined ? !!d.reachable : agents, agents, files: !!d.files,
+      workdirs: Array.isArray(d.workdirs) ? d.workdirs.filter((w) => w && w.path) : [], hint: d.hint || "" });
+  }
+  return out;
+}
+
+/**
+ * The folders the 目录 menu offers for one other device, newest first and each once: the folders this console used
+ * there (`used`: [{device, workdir}], newest first), its own recent folders and workspaces (agent_dirs, when its
+ * AgentHub answers), its registered workdirs (the device list). `limit` cuts the list.
+ */
+export function targetFolders(target, { used = [], dirs = null, limit = 4 } = {}) {
+  const seen = new Set(), out = [];
+  const push = (path, name, from) => {
+    if (typeof path !== "string" || !path || seen.has(path)) return;
+    seen.add(path);
+    out.push({ path, name: name || folderBase(path), from });
+  };
+  for (const u of used) if (u && u.device === target.id) push(u.workdir, "", "used");
+  for (const r of dirs?.recent || []) push(typeof r === "string" ? r : r?.path, "", "recent");
+  for (const w of dirs?.workspaces || []) push(typeof w === "string" ? w : w?.path, typeof w === "string" ? "" : w?.name, "workspace");
+  for (const w of target.workdirs || []) push(w.path, w.name, "workspace");
+  return out.slice(0, limit);
+}
+
+/** The 目录 chip: {value, title}; in gateway mode "<folder> · <device>" with the whole story in the title. */
+export function folderChip({ workdir, context, runnerName, targetName }) {
+  if (context?.mode === "gateway" && context.workdir) {
+    const device = targetName || context.device;
+    return { value: folderBase(context.workdir), device, gateway: true,
+      title: `目录：${device} 上的 ${context.workdir}（经网关；CLI 在 ${runnerName} 上运行）` };
+  }
+  if (!workdir) return { value: "选择目录", device: "", gateway: false, title: "目录：未选择" };
+  return { value: folderBase(shortPath(workdir)) || workdir, device: "", gateway: false, title: `目录：${workdir}` };
+}
+
+/**
+ * Remember a gateway folder (newest first, each device+folder once, at most `max`), with the device's display name
+ * so it still reads as that name while the device is not in the list (gateway out of reach, device removed).
+ */
+export function rememberTarget(list, device, workdir, { max = 24, name = "" } = {}) {
+  const rest = (Array.isArray(list) ? list : []).filter((u) => u && !(u.device === device && u.workdir === workdir));
+  return [{ device, workdir, ...(name ? { name } : {}) }, ...rest].slice(0, max);
+}
+
 // ---------------------------------------------------------------- API models (§16.4): kind = "api:<provider>/<model>"
 
 export const isApiKind = (kind) => String(kind || "").startsWith("api:");
@@ -341,7 +405,7 @@ export function mountChat(container, api, opts = {}) {
   // A light head line (session toggle · title · ⋯) and the composer's chip row (运行设备 / Agent / 目录 / 权限).
   const sideBtn = el("button", { class: "btn btn-ghost btn-icon btn-sm chat-side-toggle", type: "button", "aria-label": "会话列表", title: "会话列表", onclick: () => sideButton() }, icon("panel-left", { size: 17 }));
   const headTitle = el("span", { class: "chat-head-title truncate" });
-  const moreBtn = el("button", { class: "btn btn-ghost btn-icon btn-sm chat-more", type: "button", "aria-label": "更多设置", title: "提示词预设、工作上下文、临时目录", "aria-haspopup": "menu",
+  const moreBtn = el("button", { class: "btn btn-ghost btn-icon btn-sm chat-more", type: "button", "aria-label": "更多设置", title: "提示词预设、临时目录", "aria-haspopup": "menu",
     onclick: (event) => moreMenu(event.currentTarget) }, icon("ellipsis", { size: 18 }));
   const head = el("div", { class: "chat-head" }, sideBtn, headTitle, moreBtn);
   const chips = el("div", { class: "chat-chips", role: "toolbar", "aria-label": "对话设置" });
@@ -401,6 +465,51 @@ export function mountChat(container, api, opts = {}) {
     if (id === undefined) return "未选择";
     return opts.localDevice === false ? id : "本机";
   };
+
+  // --- the work context (§1): direct = the run device's folder; gateway = a folder on another device of the network
+  const directContext = () => ({ mode: "direct", device: "", workdir: "" });
+  let dirFieldSeq = 0;              // ids for the 目录 menu's per-device path fields (aria-controls)
+  const targetDirs = new Map();   // gateway device id -> {state, value, at, promise}: its agent_dirs, for the 目录 menu
+  const targets = () => contextTargets(S.devices, S.device);
+  const targetOf = (id) => targets().find((t) => t.id === id) || null;
+  // the device's name: from the device list, else the name stored with the context or the remembered folders
+  // (never the raw gateway id while the list lacks it), else the id
+  const knownName = (id) => (S.context.device === id && S.context.name) || usedTargets().find((u) => u?.device === id && u.name)?.name
+    || (typeof seenNames()[id] === "string" ? seenNames()[id] : "");
+  const seenNames = () => { const value = store.read().deviceNames; return value && typeof value === "object" ? value : {}; };
+  /** The names of the devices this console has listed (gateway id -> name, the newest 64), for knownName. */
+  function rememberNames(devices) {
+    const before = seenNames(), fresh = {};
+    for (const d of devices) { const id = d?.id || d?.gid; if (id && d.name && !(d.self && d.name === "本机")) fresh[id] = d.self ? `本机（${d.name}）` : d.name; }
+    const merged = Object.fromEntries(Object.entries({ ...before, ...fresh }).slice(-64));
+    if (JSON.stringify(merged) !== JSON.stringify(before)) store.write({ deviceNames: merged });
+  }
+  const targetName = (id) => targetOf(id)?.name || S.devices.find((d) => d.id === id || (d.gid && d.gid === id))?.name || knownName(id) || id || "未选择设备";
+  const gatewayCtx = () => S.context.mode === "gateway" && !!S.context.device && !!S.context.workdir;
+  const usedTargets = () => { const value = store.read().targets; return Array.isArray(value) ? value : []; };
+  /** Why the gateway context cannot run now ("" = it can): the gateway out of reach, the device offline. */
+  function contextProblem() {
+    if (!gatewayCtx()) return "";
+    if (S.devicesNote && !targets().length) return "连不上网关，暂时用不了其他设备上的目录";
+    const t = targetOf(S.context.device);
+    if (!t) return `${targetName(S.context.device)} 已不在设备列表里`;
+    if (!t.online) return `${t.name} ${t.hint || "离线"}`;
+    return "";
+  }
+  /** A session's or a run's context ({mode, device, workdir[, name]}) becomes the chat's: gateway, or back to direct. */
+  function adoptContext(ctx) {
+    S.context = ctx && ctx.mode === "gateway" && ctx.device && ctx.workdir ? { mode: "gateway", device: ctx.device, workdir: ctx.workdir } : directContext();
+    if (gatewayCtx()) {
+      const name = targetOf(S.context.device)?.name || (typeof ctx.name === "string" && ctx.name) || knownName(S.context.device);
+      if (name) S.context.name = name;
+    }
+    // a context on the run device itself is its own folder: direct
+    const self = S.devices.find((d) => d.self);
+    if (gatewayCtx() && (S.context.device === S.device || (S.device === null && self?.gid === S.context.device))) {
+      S.workdir = S.context.workdir;
+      S.context = directContext();
+    }
+  }
 
   // --- input behaviour
   input.addEventListener("input", autoGrow);
@@ -499,6 +608,10 @@ export function mountChat(container, api, opts = {}) {
     devices = devices.slice().sort((a, b) => (b.self ? 1 : 0) - (a.self ? 1 : 0) || (b.online ? 1 : 0) - (a.online ? 1 : 0) || String(a.name).localeCompare(String(b.name), "zh-CN"));
     if (opts.localDevice !== false && !devices.some((d) => d.self)) devices.unshift({ id: null, name: "本机", online: true, self: true });
     S.devices = devices;
+    // a fresh device list: keep the other devices' folder lists (read at most once a minute), drop the ones gone offline
+    rememberNames(devices);
+    for (const id of [...targetDirs.keys()]) if (!targets().some((t) => t.id === id && t.online && t.agents)) targetDirs.delete(id);
+    if (gatewayCtx() && targetOf(S.context.device)) S.context.name = targetOf(S.context.device).name;
     S.devicesNote = (typeof api.devicesNote === "function" && api.devicesNote()) || "";
     if (!devices.some((d) => d.online !== false)) {
       S.device = undefined;
@@ -566,7 +679,7 @@ export function mountChat(container, api, opts = {}) {
     S.workdir = prefs.workdir || "";
     S.permission = PERMISSION_LABEL[prefs.permission] && prefs.permission !== "full" ? prefs.permission : "ask";
     S.preset = prefs.preset || "default";
-    S.context = prefs.context?.mode === "gateway" ? prefs.context : { mode: "direct", device: "", workdir: "" };
+    adoptContext(prefs.context);
     clearStream();
     renderAll();
     const results = await Promise.allSettled([
@@ -618,7 +731,8 @@ export function mountChat(container, api, opts = {}) {
     const seen = new Set(), out = [];
     const push = (path) => { if (path && !seen.has(path)) { seen.add(path); out.push(path); } };
     for (const path of S.dirs?.recent || []) push(typeof path === "string" ? path : path.path);
-    for (const session of S.sessions.slice().sort((a, b) => toSeconds(b.updated_at) - toSeconds(a.updated_at))) if (!session.cwd_missing) push(session.cwd);
+    // (a gateway session's cwd is only the run device's base, not a folder anyone picked)
+    for (const session of S.sessions.slice().sort((a, b) => toSeconds(b.updated_at) - toSeconds(a.updated_at))) if (!session.cwd_missing && !session.context) push(session.cwd);
     return out;
   }
   function defaultDir() {
@@ -707,7 +821,7 @@ export function mountChat(container, api, opts = {}) {
     }
     const q = S.query;
     const visible = S.sessions.filter((s) => !s.hidden && kindFilter(s.kind)
-      && (!q || [s.alias, s.title, s.cwd].some((v) => String(v || "").toLowerCase().includes(q))));
+      && (!q || [s.alias, s.title, s.cwd, s.context?.workdir, s.context ? targetName(s.context.device) : ""].some((v) => String(v || "").toLowerCase().includes(q))));
     // a run whose session is not on disk yet (new, or a CLI that writes its file late) still gets a row
     const known = new Set(S.sessions.map((x) => `${x.kind}:${x.id}`));
     const pendingRuns = S.runs.filter((r) => r.state !== "closed" && (!r.session_id || !known.has(`${r.kind}:${r.session_id}`))
@@ -736,6 +850,17 @@ export function mountChat(container, api, opts = {}) {
     mount(sideList, groups);
   }
 
+  // A session row's folder: a gateway session lists under its run device like any other, and says whose folder
+  // it works on ("⇄ NAS · photos"); the run device's own cwd is only its base then.
+  function whereText(ctx, cwd) {
+    if (ctx?.mode === "gateway" && ctx.workdir) return `⇄ ${targetName(ctx.device)} · ${shortPath(ctx.workdir)}`;
+    return shortPath(cwd) || "—";
+  }
+  function whereTitle(ctx, cwd) {
+    if (ctx?.mode === "gateway" && ctx.workdir) return `经网关操作 ${targetName(ctx.device)} 上的 ${ctx.workdir}`;
+    return cwd || "";
+  }
+
   function runItem(run, showKind) {
     const active = S.rid === run.rid;
     const busy = ["starting", "running"].includes(active ? S.runState : run.state);
@@ -744,7 +869,7 @@ export function mountChat(container, api, opts = {}) {
         showKind ? kindMark(run.kind) : null,
         el("span", { class: "chat-sess-body" },
           el("span", { class: "chat-sess-title" }, busy ? el("span", { class: "chat-live", title: "进行中" }) : null, el("span", { class: "truncate" }, run.title || "新对话")),
-          el("span", { class: "chat-sess-sub" }, el("span", { class: "truncate" }, shortPath(run.workdir)), el("span", { class: "chat-sess-time" }, busy ? "进行中" : "空闲")))));
+          el("span", { class: "chat-sess-sub" }, el("span", { class: "truncate" }, whereText(run.context, run.workdir)), el("span", { class: "chat-sess-time" }, busy ? "进行中" : "空闲")))));
   }
 
   function sessionItem(s, showKind) {
@@ -757,10 +882,10 @@ export function mountChat(container, api, opts = {}) {
       s.pinned ? xicon("pin", { size: 12, cls: "chat-pin" }) : null,
       el("span", { class: "truncate" }, sessionTitle(s)));
     const node = el("div", { class: `chat-sess ${active ? "active" : ""} ${s.archived ? "archived" : ""}`, role: "listitem", dataset: { id: s.id, kind: s.kind } },
-      el("button", { class: "chat-sess-main", type: "button", "aria-current": active ? "true" : null, title: s.cwd || "", onclick: () => openSession(s) },
+      el("button", { class: "chat-sess-main", type: "button", "aria-current": active ? "true" : null, title: whereTitle(s.context, s.cwd), onclick: () => openSession(s) },
         showKind ? kindMark(s.kind) : null,
         el("span", { class: "chat-sess-body" }, title,
-          el("span", { class: "chat-sess-sub" }, el("span", { class: "truncate" }, shortPath(s.cwd) || "—"),
+          el("span", { class: "chat-sess-sub" }, el("span", { class: "truncate" }, whereText(s.context, s.cwd)),
             s.subagents > 0 ? el("span", { class: "chat-sess-subagents", title: `${s.subagents} 个子代理会话` }, `子代理 ${s.subagents}`) : null,
             el("span", { class: "chat-sess-time" }, relTime(s.updated_at))))),
       more);
@@ -863,9 +988,10 @@ export function mountChat(container, api, opts = {}) {
       iconNode: S.kind ? el("span", { class: `dot ${status.tone === "neutral" ? "" : status.tone}`, "aria-hidden": "true" }) : icon("bot", { size: 14, cls: "chat-chip-icon" }),
       value: [el("span", { class: "truncate" }, agentName), S.kind && status.tone !== "ok" ? el("span", { class: "chat-chip-status" }, status.label) : null],
       onClick: (event) => agentMenu(event.currentTarget) });
-    const base = S.workdir ? shortPath(S.workdir).split(/[\\/]/).filter(Boolean).pop() || S.workdir : "";
-    const dir = chip({ name: S.workdir ? `目录：${S.workdir}` : "目录：未选择", value: S.workdir ? base : "选择目录", cls: `chat-chip-dir ${S.workdir ? "" : "no-dir"}`,
-      iconNode: xicon("folder", { size: 14, cls: "chat-chip-icon" }), onClick: (event) => dirMenu(event.currentTarget) });
+    const folder = folderChip({ workdir: S.workdir, context: gatewayCtx() ? S.context : null, runnerName: deviceName(), targetName: targetName(S.context.device) });
+    const dir = chip({ name: folder.title, cls: `chat-chip-dir ${folder.gateway ? "via" : S.workdir ? "" : "no-dir"} ${folder.gateway && contextProblem() ? "warn" : ""}`,
+      value: folder.gateway ? [el("span", { class: "truncate chat-chip-folder" }, folder.value), el("span", { class: "truncate chat-chip-on" }, `· ${folder.device}`)] : folder.value,
+      iconNode: xicon(folder.gateway ? "network" : "folder", { size: 14, cls: "chat-chip-icon" }), onClick: (event) => dirMenu(event.currentTarget) });
     const perm = chip({ name: `权限：${permLabel()}`, value: permShort(), cls: `chat-chip-perm ${S.permission === "full" ? "danger" : ""}`,
       iconNode: icon(S.permission === "full" ? "triangle-alert" : "shield-check", { size: 14, cls: "chat-chip-icon" }), onClick: (event) => permissionMenu(event.currentTarget) });
     mount(chips, device, agent, dir, perm);
@@ -894,12 +1020,21 @@ export function mountChat(container, api, opts = {}) {
     const deviceBanner = S.deviceError ? el("div", { class: "chat-ctx bad" }, icon("circle-alert", { size: 14 }),
       el("span", { class: "grow" }, S.device === undefined ? S.deviceError : `${deviceName()} 暂时用不了 Agent 对话：${S.deviceError}`),
       el("button", { class: "btn btn-sm", type: "button", onclick: () => (S.devices.length ? selectDevice(S.device) : init()) }, "重试")) : null;
-    const gateway = c.mode === "gateway" ? el("div", { class: "chat-ctx" }, icon("network", { size: 14 }),
-      el("span", { class: "grow truncate" }, "经网关操作 ", el("strong", {}, deviceName(c.device) || c.device || "未选择设备"), c.workdir ? ` · ${shortPath(c.workdir)}` : ""),
-      agentInfo()?.gateway_mcp === false ? el("span", { class: "chat-ctx-warn" }, icon("triangle-alert", { size: 13 }), "未检测到网关连接器") : null,
-      el("button", { class: "btn btn-ghost btn-sm", type: "button", onclick: () => contextDialog() }, "修改"),
-      el("button", { class: "btn btn-ghost btn-icon btn-sm", type: "button", "aria-label": "改回同设备直接", title: "改回同设备直接",
-        onclick: () => { S.context = { mode: "direct", device: "", workdir: "" }; persist(); renderBar(); } }, icon("x", { size: 14 }))) : null;
+    // gateway mode: one line saying where the CLI runs and whose folder it works on (and what is in the way)
+    const problem = contextProblem();
+    const mcpMissing = agentInfo()?.gateway_mcp === false;
+    const dirChip = () => chips.querySelector(".chat-chip-dir");
+    const gateway = gatewayCtx() ? el("div", { class: `chat-ctx ${problem ? "warn" : ""}` }, icon(problem ? "triangle-alert" : "network", { size: 14 }),
+      el("span", { class: "grow chat-ctx-text", title: `CLI 在 ${deviceName()} 上运行，经网关操作 ${targetName(c.device)} 上的 ${c.workdir}` },
+        // phones: the run device part is dropped and the target's name is cut short, so the folder always shows
+        el("span", { class: "chat-ctx-run" }, "CLI 在 ", el("strong", {}, deviceName()), " 上运行，"), "经网关操作 ",
+        el("strong", { class: "chat-ctx-target" }, targetName(c.device)), " 的 ", el("code", {}, shortPath(c.workdir)),
+        problem ? `（${problem}）` : ""),
+      mcpMissing ? el("span", { class: "chat-ctx-warn", title: `${kindShort(S.kind, agentInfo())} 没有配 Agent Nexus MCP 连接器，调用不了 use_device：在 ${deviceName()} 上添加网关 MCP（网关控制台 → 设置 → AI 客户端接入）` },
+        icon("triangle-alert", { size: 13 }), "未检测到网关连接器") : null,
+      el("button", { class: "btn btn-ghost btn-sm", type: "button", onclick: () => { const anchor = dirChip(); if (anchor) dirMenu(anchor); } }, "更改"),
+      el("button", { class: "btn btn-ghost btn-icon btn-sm", type: "button", "aria-label": `改回 ${deviceName()} 上的目录`, title: `改回 ${deviceName()} 上的目录`,
+        onclick: () => { S.context = directContext(); persist(); renderBar(); renderComposer(); renderWelcome(); } }, icon("x", { size: 14 }))) : null;
     mount(ctxLine, deviceBanner, gateway);
     ctxLine.hidden = !deviceBanner && !gateway;
   }
@@ -1063,46 +1198,182 @@ export function mountChat(container, api, opts = {}) {
     else copy(command, { label: `已复制登录命令，在 ${deviceName()} 的终端里运行：${command}` });
   }
 
-  // --- directory picker: recent + workspaces + browse
-  function dirMenu(anchor) {
-    const field = el("input", { class: "input chat-sm mono chat-dir-input", value: S.workdir || "", placeholder: "输入路径，回车使用", "aria-label": "工作目录路径" });
-    const use = (path) => { if (!path) return; S.workdir = path; persist(); pop.close(); renderBar(); renderComposer(); renderWelcome(); };
-    const useTyped = async () => {
-      const typed = field.value.trim();
-      if (!typed) return;
-      // check it on the device first: a typo or a folder outside the roots is said here, not after the first message
-      field.disabled = true;
-      try {
-        const result = await call("agent_dirs", { path: typed });
-        use(result?.path || typed);
-      } catch (error) {
-        toast(error.message, { type: "warn", title: "不能用这个目录" });
-        field.disabled = false;
-        field.focus();
-      }
-    };
-    field.addEventListener("keydown", (event) => { if (event.key === "Enter" && !event.isComposing) { event.preventDefault(); useTyped(); } });
-    const recent = recentDirs().slice(0, 6);
-    const workspaces = (S.dirs?.workspaces || []).map((w) => (typeof w === "string" ? { path: w } : w));
-    const row = (path, name) => el("button", { class: `menu-item chat-dir-item ${path === S.workdir ? "on" : ""}`, type: "button", title: path, onclick: () => use(path) },
-      xicon("folder", { size: 15 }), el("span", { class: "chat-menu-text" }, el("span", { class: "truncate" }, name || shortPath(path).split(/[\\/]/).filter(Boolean).pop() || path),
-        el("span", { class: "chat-menu-desc mono truncate" }, shortPath(path))), path === S.workdir ? xicon("check", { size: 14 }) : null);
-    const content = el("div", { class: "chat-dirs" },
-      el("div", { class: "chat-dir-field" }, field),
-      recent.length ? [el("div", { class: "chat-menu-heading" }, "最近使用"), recent.map((p) => row(p))] : null,
-      workspaces.length ? [el("div", { class: "chat-menu-heading" }, "已登记的工作区"), workspaces.map((w) => row(w.path, w.name))] : null,
-      !recent.length && !workspaces.length ? el("p", { class: "chat-dirs-empty" }, "还没有最近使用的目录，点“浏览”挑一个。") : null,
-      el("div", { class: "menu-sep" }),
-      el("button", { class: "menu-item", type: "button", onclick: () => { pop.close(); browseDirs(); } }, icon("folder-open", { size: 15 }), "浏览其他目录…"));
-    const pop = popover(anchor, content, { label: "工作目录", cls: "chat-dir-pop" });
+  // --- directory picker: the run device's folders (recent + workspaces + browse), then every other online device of
+  // the network: a folder there makes the run work on it through the gateway (§1 mode gateway), one on the run
+  // device works directly.
+  function useDirect(path) {
+    S.workdir = path;
+    S.context = directContext();
+    persist(); renderBar(); renderComposer(); renderWelcome();
+  }
+  function useTarget(t, path) {
+    S.context = { mode: "gateway", device: t.id, workdir: path, name: t.name };
+    store.write({ targets: rememberTarget(usedTargets(), t.id, path, { name: t.name }) });
+    persist(); renderBar(); renderComposer(); renderWelcome();
   }
 
-  function browseDirs({ initial = S.workdir, onPick = null, title = "选择工作目录", device = S.device } = {}) {
+  /** A device's own folder list (agent_dirs on its AgentHub), read once a minute at most while the menu opens. */
+  function loadTargetDirs(t) {
+    if (!t.agents || !t.online) return null;
+    const have = targetDirs.get(t.id);
+    if (have && (have.state === "loading" || Date.now() - have.at < 60000)) return have.state === "loading" ? have.promise : null;
+    const entry = { state: "loading", at: Date.now(), value: have?.value || null };
+    entry.promise = callOp(api, "agent_dirs", {}, t.call)
+      .then((value) => { entry.state = "ready"; entry.value = value; }, (error) => { entry.state = "error"; entry.error = error.message; })
+      .finally(() => { entry.at = Date.now(); });
+    targetDirs.set(t.id, entry);
+    return entry.promise;
+  }
+  // Listing another device's folders: its AgentHub (agent_dirs, the same roots as the run device's picker) or,
+  // for a device without agents/1, the files/1 listing of the console (P2P or the gateway relay).
+  const canBrowse = (t) => t.online && (t.agents || (t.files && typeof api.files === "function"));
+  const filesLister = (t) => t.files && typeof api.files === "function";
+  // agent_dirs failed there (an older AgentHub, agents turned off): browse with files/1 when the device has it
+  const agentsListing = (t) => t.agents && !(targetDirs.get(t.id)?.state === "error" && filesLister(t));
+  function targetLister(t) {
+    if (agentsListing(t)) return (params) => callOp(api, "agent_dirs", params, t.call);
+    return async (params) => {
+      let listing = await api.files(t.id, params.path || "");
+      if (!params.path && listing?.home && listing.home !== listing.path) listing = await api.files(t.id, listing.home);
+      const sep = listing.sep || (String(listing.path).includes("\\") ? "\\" : "/");
+      const join = (name) => (String(listing.path).endsWith(sep) ? listing.path + name : `${listing.path}${sep}${name}`);
+      return { path: listing.path, parent: listing.parent || null,
+        dirs: (listing.entries || []).filter((e) => e.dir && !String(e.name).startsWith(".")).map((e) => ({ name: e.name, path: join(e.name) })) };
+    };
+  }
+  async function checkTargetPath(t, path) {
+    if (agentsListing(t)) return (await callOp(api, "agent_dirs", { path }, t.call))?.path || path;
+    if (t.files && typeof api.files === "function") {
+      const listing = await api.files(t.id, path);
+      if (listing?.error) throw new Error(listing.error);
+      return listing?.path || path;
+    }
+    if (!/^(~|\/|[A-Za-z]:[\\/])/.test(path)) throw new Error("填写完整路径（例如 ~/projects/web 或 D:\\work）");
+    return path;
+  }
+  function browseTarget(t) {
+    browseDirs({ device: t.call, lister: targetLister(t), initial: S.context.device === t.id ? S.context.workdir : null,
+      title: `选择 ${t.name} 上的目录`, where: `${t.name} 上的目录；CLI 在 ${deviceName()} 上运行，经网关操作这里。`,
+      onPick: (path) => useTarget(t, path) });
+  }
+
+  function dirMenu(anchor) {
+    const gateway = gatewayCtx();
+    const pathInput = (placeholder, label, check, apply) => {
+      const field = el("input", { class: "input chat-sm mono chat-dir-input", placeholder, "aria-label": label });
+      field.addEventListener("keydown", async (event) => {
+        if (event.key !== "Enter" || event.isComposing) return;
+        event.preventDefault();
+        const typed = field.value.trim();
+        if (!typed) return;
+        // check it on the device first: a typo or a folder outside the roots is said here, not after the first message
+        field.disabled = true;
+        try { const path = await check(typed); pop.close(); apply(path); } catch (error) {
+          toast(error.message, { type: "warn", title: "不能用这个目录" });
+          field.disabled = false;
+          field.focus();
+        }
+      });
+      return field;
+    };
+    const row = (path, name, on, pick) => el("button", { class: `menu-item chat-dir-item ${on ? "on" : ""}`, type: "button", title: path, dataset: { path }, onclick: () => { pop.close(); pick(path); } },
+      xicon("folder", { size: 15 }), el("span", { class: "chat-menu-text" }, el("span", { class: "truncate" }, name || folderBase(shortPath(path)) || path),
+        el("span", { class: "chat-menu-desc mono truncate" }, shortPath(path))), on ? xicon("check", { size: 14 }) : null);
+
+    const field = pathInput("输入路径，回车使用", "工作目录路径", async (typed) => (await call("agent_dirs", { path: typed }))?.path || typed, useDirect);
+    if (!gateway) field.value = S.workdir || "";
+    const all = targets();
+    // with other devices below, the run device's part stays short (3 recent, 3 workspaces not already among them; 浏览
+    // reaches the rest), so the other devices start within the first screen
+    const recent = recentDirs().slice(0, all.length ? 3 : 6);
+    const workspaces = (S.dirs?.workspaces || []).map((w) => (typeof w === "string" ? { path: w } : w)).filter((w) => w?.path && !recent.includes(w.path))
+      .slice(0, all.length ? 3 : Infinity);
+    const online = all.filter((t) => t.online);
+    const offline = all.filter((t) => !t.online);
+    const remote = S.devices.find((d) => d.id === S.device)?.self === false;
+    const here = (path) => !gateway && path === S.workdir;
+
+    const sections = new Map();
+    const section = (t) => {
+      // head and path field are built once; only the folder list below them is redrawn when the device's folders
+      // arrive, so typing in the field or a focused button is never replaced under the user
+      const fieldId = `chat-dir-field-${++dirFieldSeq}`;
+      const pathField = pathInput(`${t.name} 上的路径，回车使用`, `${t.name} 上的目录路径`, (typed) => checkTargetPath(t, typed), (path) => useTarget(t, path));
+      const fieldBox = el("div", { class: "chat-dir-field", id: fieldId, hidden: true }, pathField);
+      const toggle = el("button", { class: "btn btn-ghost btn-sm chat-dir-act", type: "button", "aria-expanded": "false", "aria-controls": fieldId, title: `输入 ${t.name} 上的路径`,
+        onclick: () => {
+          fieldBox.hidden = !fieldBox.hidden;
+          toggle.setAttribute("aria-expanded", String(!fieldBox.hidden));
+          if (!fieldBox.hidden) pathField.focus();
+          pop.reposition();
+        } }, "输入路径…");
+      const list = el("div", { class: "chat-dir-list" });
+      const box = el("div", { class: "chat-dir-dev", role: "group", "aria-label": t.name, dataset: { device: t.id } },
+        el("div", { class: "chat-dir-dev-head" },
+          icon(t.self ? "laptop" : "monitor", { size: 14 }),
+          el("span", { class: "chat-dir-dev-name truncate", title: t.name }, t.name),
+          toggle,
+          canBrowse(t) ? el("button", { class: "btn btn-ghost btn-sm chat-dir-act", type: "button", title: `浏览 ${t.name} 上的目录`,
+            onclick: () => { pop.close(); browseTarget(t); } }, "浏览…") : null),
+        fieldBox, list);
+      const paint = () => {
+        const entry = targetDirs.get(t.id);
+        const folders = targetFolders(t, { used: usedTargets(), dirs: entry?.value });
+        const on = (path) => gateway && S.context.device === t.id && S.context.workdir === path;
+        const focused = list.contains(document.activeElement) ? document.activeElement.dataset.path : undefined;
+        const failed = entry?.state === "error" ? el("p", { class: "chat-dirs-empty chat-dir-error", role: "status" }, icon("triangle-alert", { size: 12 }),
+          ` 读不到这台设备的目录：${entry.error || "未知错误"}`) : null;
+        mount(list,
+          folders.map((f) => row(f.path, f.name, on(f.path), () => useTarget(t, f.path))),
+          failed,
+          !folders.length ? el("p", { class: "chat-dirs-empty" }, entry?.state === "loading" ? "读取中…"
+            : canBrowse(t) ? (failed ? "可以浏览或输入路径" : "还没有用过的目录：浏览或输入路径") : "这台设备不能浏览：输入它上面的完整路径") : null);
+        // a keyboard user on a folder row keeps their place (the same folder, else the first one) across the redraw
+        if (focused !== undefined) (Array.from(list.querySelectorAll(".chat-dir-item")).find((b) => b.dataset.path === focused) || list.querySelector(".chat-dir-item") || toggle).focus();
+      };
+      paint();
+      sections.set(t.id, paint);
+      return box;
+    };
+
+    const info = agentInfo();
+    const mcpWarn = info?.gateway_mcp === false ? el("div", { class: "chat-dir-warn" }, icon("triangle-alert", { size: 13 }),
+      el("span", {}, `${kindShort(S.kind, info)} 在 ${deviceName()} 上没有配 Agent Nexus 连接器，经网关时调用不了 use_device。在 ${deviceName()} 上给它添加网关 MCP（网关控制台 → 设置 → AI 客户端接入）后再用。`)) : null;
+    const content = el("div", { class: "chat-dirs" },
+      all.length || S.devicesNote ? el("div", { class: "chat-dir-dev-head runner" }, icon(remote ? "monitor" : "laptop", { size: 14 }),
+        el("span", { class: "chat-dir-dev-name truncate", title: deviceName() }, deviceName()), el("span", { class: "chat-dir-tag" }, "运行设备"),
+        // the other devices are further down: a jump there, with how many are online
+        all.length ? el("button", { class: "btn btn-ghost btn-sm chat-dir-act chat-dir-jump", type: "button", title: "跳到其他设备的目录（经网关）",
+          onclick: () => { const to = content.querySelector(".chat-dir-others"); to?.scrollIntoView({ block: "start" }); (content.querySelector(".chat-dir-dev .chat-dir-act") || to)?.focus?.(); } },
+          icon("network", { size: 12 }), ` 其他设备 ${online.length}`, icon("chevron-down", { size: 12 })) : null) : null,
+      el("div", { class: "chat-dir-field" }, field),
+      recent.length ? [el("div", { class: "chat-menu-heading" }, "最近使用"), recent.map((p) => row(p, "", here(p), useDirect))] : null,
+      workspaces.length ? [el("div", { class: "chat-menu-heading" }, "已登记的工作区"), workspaces.map((w) => row(w.path, w.name, here(w.path), useDirect))] : null,
+      !recent.length && !workspaces.length ? el("p", { class: "chat-dirs-empty" }, "还没有最近使用的目录，点“浏览”挑一个。") : null,
+      el("button", { class: "menu-item", type: "button", onclick: () => { pop.close(); browseDirs(); } }, icon("folder-open", { size: 15 }), "浏览其他目录…"),
+      all.length ? [
+        el("div", { class: "menu-sep" }),
+        el("div", { class: "chat-menu-heading chat-dir-others" }, icon("network", { size: 12 }), "其他设备 · 经网关"),
+        mcpWarn,
+        online.map(section),
+        !online.length ? el("p", { class: "chat-dirs-empty" }, "网关上没有其他在线设备。") : null,
+        offline.length ? el("p", { class: "chat-dirs-empty chat-dir-offline" },
+          `不可用：${offline.map((t) => `${t.name}（${t.hint || "离线"}）`).join("、")}`) : null,
+      ] : null,
+      S.devicesNote ? [el("div", { class: "menu-sep" }), el("p", { class: "chat-dirs-empty" }, icon("network", { size: 12 }), ` ${S.devicesNote}：现在只能用${deviceName()}上的目录。`)] : null);
+    const pop = popover(anchor, content, { label: "工作目录", cls: "chat-dir-pop" });
+    for (const t of online) {
+      const loading = loadTargetDirs(t);
+      if (loading) { sections.get(t.id)?.(); loading.then(() => { if (pop.panel.isConnected) { sections.get(t.id)?.(); pop.reposition(); } }); }
+    }
+  }
+
+  function browseDirs({ initial = S.workdir, onPick = null, title = "选择工作目录", device = S.device, lister = null, where = "" } = {}) {
     let current = null;
-    const dirsCall = (params) => callOp(api, "agent_dirs", params, device);
+    const dirsCall = lister || ((params) => callOp(api, "agent_dirs", params, device));
     const crumbs = el("div", { class: "chat-browse-path mono" });
     const list = el("div", { class: "chat-browse-list", role: "list" });
-    const usePick = onPick || ((path) => { S.workdir = path; persist(); renderBar(); renderComposer(); renderWelcome(); });
+    const usePick = onPick || useDirect;
     async function go(path) {
       mount(list, el("div", { class: "chat-browse-loading" }, el("span", { class: "spinner" }), "读取中…"));
       let result;
@@ -1125,7 +1396,7 @@ export function mountChat(container, api, opts = {}) {
       useBtn.disabled = !current;
     }
     const useBtn = el("button", { class: "btn btn-primary", type: "button", disabled: true, onclick: () => { if (current) { usePick(current); dialog.close(); } } }, "使用此目录");
-    const dialog = drawer({ title, description: `${deviceName(device)} 上的目录；只能在执行账户的主目录和已登记的工作区里选。`, body: el("div", { class: "chat-browse" }, crumbs, list),
+    const dialog = drawer({ title, description: where || `${deviceName(device)} 上的目录；只能在执行账户的主目录和已登记的工作区里选。`, body: el("div", { class: "chat-browse" }, crumbs, list),
       footLeft: el("button", { class: "btn btn-ghost", type: "button", onclick: () => go(null) }, icon("hard-drive", { size: 15 }), "起点"),
       actions: [] });
     dialog.root.querySelector(".drawer-foot")?.append(el("button", { class: "btn", type: "button", onclick: () => dialog.close() }, "取消"), useBtn);
@@ -1133,7 +1404,7 @@ export function mountChat(container, api, opts = {}) {
     go(initial || null);
   }
 
-  // --- ⋯ menu: presets, work context, temp dirs
+  // --- ⋯ menu: presets, temp dirs (the work context is the 目录 chip's: a folder on another device = gateway mode)
   function moreMenu(anchor) {
     const presets = S.presets.length ? S.presets : [{ id: "default", name: "默认" }];
     menu(anchor, [
@@ -1141,7 +1412,6 @@ export function mountChat(container, api, opts = {}) {
       ...presets.map((p) => ({ label: p.name || p.id, checked: S.preset === p.id, onClick: () => { S.preset = p.id; persist(); toast(`下次对话使用“${p.name || p.id}”预设`, { timeout: 1800 }); } })),
       { label: "编辑提示词片段…", icon: "sliders-horizontal", onClick: () => editPrompts() },
       "sep",
-      { label: "工作上下文…", icon: "network", hint: S.context.mode === "gateway" ? "经网关" : "同设备", onClick: () => contextDialog() },
       { label: "临时目录…", icon: "folder-open", onClick: () => tmpDrawer() },
       "sep",
       { label: "新对话", icon: "square-pen", onClick: () => newChat() },
@@ -1161,83 +1431,6 @@ export function mountChat(container, api, opts = {}) {
     let manager;
     drawer({ title: "临时目录", description: `${deviceName()} 上每次对话的 $tmpdir`, body, onClose: () => manager?.destroy() });
     manager = mountTmpManager(body, api, { device: S.device });
-  }
-
-  function contextDialog() {
-    const c = { ...S.context };
-    // Targets: other devices the gateway knows (a real id; never the runner itself -- that is 同设备直接).
-    const targets = S.devices.filter((d) => d.id && d.id !== S.device);
-    const onlineTargets = targets.filter((d) => d.online !== false);
-    const gatewayOff = S.devicesNote ? "加入网关后可用" : !onlineTargets.length ? "网关上没有其他在线设备" : "";
-    if (gatewayOff && c.mode === "gateway") c.mode = "direct";
-    if (!targets.some((d) => d.id === c.device)) c.device = (onlineTargets[0] || {}).id || "";
-    const radio = (mode, title, desc, glyph, disabledReason = "") => el("label", { class: `choice ${disabledReason ? "disabled" : ""}` },
-      el("input", { type: "radio", name: "chat-ctx-mode", value: mode, checked: c.mode === mode, disabled: !!disabledReason, onchange: () => { c.mode = mode; paint(); } }),
-      icon(glyph, { size: 18 }), el("div", {}, el("div", { class: "choice-title" }, title),
-        el("div", { class: "choice-sub" }, disabledReason ? `${desc}（${disabledReason}）` : desc)));
-    const deviceSelect = el("select", { class: "select", "aria-label": "要操作的设备", onchange: () => { c.device = deviceSelect.value; } },
-      targets.map((d) => el("option", { value: d.id, selected: d.id === c.device, disabled: d.online === false },
-        `${d.name || d.id}${d.online === false ? "（离线）" : ""}`)));
-    const dirInput = el("input", { class: "input mono", value: c.workdir || "", placeholder: "例如 ~/projects/web", "aria-label": "要操作的目录", oninput: () => { c.workdir = dirInput.value.trim(); } });
-    // 浏览: an inline folder list of the target device (a second overlay on top of this dialog would fight
-    // it over focus and Escape).
-    const browser = el("div", { class: "chat-ctx-browse", hidden: true, role: "list", "aria-label": "目标设备上的目录" });
-    async function browseTo(path) {
-      mount(browser, el("div", { class: "chat-browse-loading" }, el("span", { class: "spinner" }), "读取中…"));
-      let result;
-      try { result = await callOp(api, "agent_dirs", path ? { path } : {}, c.device); } catch (error) {
-        mount(browser, el("div", { class: "chat-browse-loading" }, icon("circle-alert", { size: 16 }), error.message));
-        return;
-      }
-      const here = result.path || null;
-      const entries = here ? (result.dirs || []) : (result.roots || []);
-      const items = entries.map((d) => (typeof d === "string" ? { name: d.split(/[\\/]/).pop() || d, path: d } : d));
-      if (here) { c.workdir = here; dirInput.value = here; }
-      mount(browser,
-        here && result.parent ? el("button", { class: "chat-browse-item up", type: "button", onclick: () => browseTo(result.parent) }, xicon("corner-left-up", { size: 15 }), "上一级") : null,
-        items.map((d) => el("button", { class: "chat-browse-item", type: "button", onclick: () => browseTo(d.path) },
-          xicon("folder", { size: 15 }), el("span", { class: "truncate" }, d.name || d.path), icon("chevron-right", { size: 14, cls: "faint" }))),
-        !items.length ? el("p", { class: "chat-browse-loading" }, here ? "这里没有子目录" : "没有可浏览的目录") : null);
-    }
-    const browse = el("button", { class: "btn", type: "button", "aria-expanded": "false", onclick: () => {
-      if (!c.device) { toast("先选要操作的设备", { type: "warn" }); return; }
-      browser.hidden = !browser.hidden;
-      browse.setAttribute("aria-expanded", String(!browser.hidden));
-      if (!browser.hidden) browseTo(c.workdir || null);
-    } }, icon("folder-open", { size: 15 }), "浏览");
-    deviceSelect.addEventListener("change", () => { if (!browser.hidden) browseTo(null); });
-    const warn = el("div", { class: "banner warn chat-ctx-banner" }, icon("triangle-alert", { size: 16 }),
-      el("div", { class: "banner-body" }, el("div", { class: "banner-title" }, "运行设备上没有检测到网关连接器"),
-        el("div", { class: "small" }, `经网关模式需要 ${deviceName()} 上的 ${kindLabel(S.kind)} 配置了 Agent Nexus MCP 连接器，否则 Agent 无法调用 use_device。`)));
-    const gatewayFields = el("div", { class: "stack lg" },
-      el("div", { class: "form-row" },
-        el("div", { class: "field" }, el("label", {}, "要操作的设备"), deviceSelect),
-        el("div", { class: "field" }, el("label", {}, "目录"), el("div", { class: "chat-ctx-dir" }, dirInput, browse))),
-      browser,
-      warn);
-    const paint = () => {
-      gatewayFields.hidden = c.mode !== "gateway";
-      warn.hidden = agentInfo()?.gateway_mcp !== false;
-    };
-    const body = el("div", { class: "stack lg" },
-      el("div", { class: "choices chat-ctx-choices" },
-        radio("direct", "同设备直接", `CLI 在 ${deviceName()} 的工作目录里直接用自己的工具工作（推荐）`, "laptop"),
-        radio("gateway", "经网关操作其他设备", `CLI 在 ${deviceName()} 上运行，通过网关工具操作另一台设备的目录`, "network", gatewayOff)),
-      gatewayFields);
-    paint();
-    modal({
-      title: "工作上下文", description: "Agent 要操作哪台设备、哪个目录。运行设备决定用哪里的 CLI 和登录态。", body,
-      actions: [
-        { label: "取消" },
-        { label: "保存", variant: "primary", onClick: () => {
-          if (c.mode === "gateway" && !c.device) { toast("选择要操作的设备", { type: "warn" }); return false; }
-          if (c.mode === "gateway" && !c.workdir) { toast("填写要操作的目录", { type: "warn" }); return false; }
-          S.context = c.mode === "gateway" ? c : { mode: "direct", device: "", workdir: "" };
-          persist(); renderBar();
-          return true;
-        } },
-      ],
-    });
   }
 
   // ============================================================ rendering: welcome + composer
@@ -1276,7 +1469,9 @@ export function mountChat(container, api, opts = {}) {
       el("div", { class: "chat-welcome-head" },
         el("h2", {}, "开始一个新对话"),
         el("p", {}, S.kind
-          ? ["在 ", el("strong", {}, deviceName()), " 上用 ", el("strong", {}, kindLabel(S.kind, info)), S.workdir ? ["，在 ", el("code", {}, shortPath(S.workdir)), " 里工作。"] : "。先选一个工作目录。"]
+          ? ["在 ", el("strong", {}, deviceName()), " 上用 ", el("strong", {}, kindLabel(S.kind, info)),
+            gatewayCtx() ? ["，经网关在 ", el("strong", {}, targetName(S.context.device)), " 的 ", el("code", {}, shortPath(S.context.workdir)), " 里工作。"]
+              : S.workdir ? ["，在 ", el("code", {}, shortPath(S.workdir)), " 里工作。"] : "。先选一个工作目录。"]
           : "先选一个 Agent。")),
       agents.length ? el("div", { class: "chat-welcome-agents", role: "radiogroup", "aria-label": "Agent" }, agents.map((a) => {
         const st = installStatus(a);
@@ -1307,7 +1502,9 @@ export function mountChat(container, api, opts = {}) {
     if (S.session?.cwd_missing && !S.rid) {
       return { text: "这个会话的目录已不存在，只能查看记录", action: { label: "在其他目录新开对话", icon: "folder-open", onClick: () => { newChat(); browseDirs(); } } };
     }
-    if (!S.workdir) return { text: "先选择工作目录", action: { label: "选择目录", icon: "folder-open", onClick: () => browseDirs() } };
+    const problem = contextProblem();
+    if (problem) return { text: problem, action: { label: `改用${deviceName()}上的目录`, icon: "folder-open", onClick: () => { S.context = directContext(); persist(); renderBar(); renderComposer(); renderWelcome(); } } };
+    if (!S.workdir && !gatewayCtx()) return { text: "先选择工作目录", action: { label: "选择目录", icon: "folder-open", onClick: () => browseDirs() } };
     return null;
   }
 
@@ -1333,7 +1530,7 @@ export function mountChat(container, api, opts = {}) {
       mount(composerNote,
         S.session && !S.rid ? el("span", { class: "chat-note-resume" }, canResume(S.session.kind)
           ? "将续接这个会话" : `${kindShort(S.session.kind, agentInfo(S.session.kind))} 不支持续接，发消息会开一个新对话`) : null,
-        S.context.mode === "gateway" && agentInfo()?.gateway_mcp === false
+        gatewayCtx() && agentInfo()?.gateway_mcp === false
           ? el("span", { class: "chat-note-warn", title: `经网关模式需要 ${name} 配置 Agent Nexus MCP 连接器，否则它调用不了 use_device` },
             icon("triangle-alert", { size: 13 }), `${name} 没有配置网关连接器`) : null);
     }
@@ -1723,7 +1920,12 @@ export function mountChat(container, api, opts = {}) {
     const gen = S.gen;
     stopConversation();
     Object.assign(S, { session: s, rid: null, cursor: 0, runState: "idle", sessionId: s.id, address: s.address || null, kind: s.kind || S.kind });
-    if (s.cwd && !s.cwd_missing) S.workdir = s.cwd;  // a dead folder never becomes the next chat's folder
+    // the session's context comes back with it: a gateway session works on its device's folder again (its cwd is
+    // only the run device's base then), a direct one on its folder -- a dead folder never becomes the next chat's
+    adoptContext(s.context);
+    // the run device's folder is the session's own in either mode (a gateway session's cwd is where its CLI ran):
+    // going back to direct mode then resumes it where Claude keeps it, never in the previous chat's folder
+    if (s.cwd && !s.cwd_missing) S.workdir = s.cwd;
     fitPermission({ quiet: true });
     persist();
     clearStream();
@@ -1772,6 +1974,15 @@ export function mountChat(container, api, opts = {}) {
       Object.assign(S, { session: S.sessions.find((x) => x.id === run.session_id) || null });
     }
     Object.assign(S, { rid: run.rid, cursor: 0, runState: run.state || "running", kind: run.kind || S.kind, address: run.address || S.address });
+    if (run.context) adoptContext({ ...run.context, name: run.context.name || run.context_device });
+    else if (run.mode === "direct") adoptContext(null);
+    else if (run.mode === "gateway") {
+      // an older AgentHub names the gateway run's device and folder but not the context: find the device by name,
+      // else keep a gateway context already shown, else show the run device's folder (sends go to the run anyway)
+      const t = run.context_device && run.context_workdir ? targets().find((x) => x.name === run.context_device || x.id === run.context_device) : null;
+      if (t) adoptContext({ mode: "gateway", device: t.id, workdir: run.context_workdir, name: t.name });
+      else if (!gatewayCtx()) adoptContext(null);
+    }
     if (run.workdir) S.workdir = run.workdir;
     toggleSide(false);
     renderSessions(); renderBar(); renderComposer(); renderWelcome();
@@ -1833,10 +2044,12 @@ export function mountChat(container, api, opts = {}) {
         await call("agent_run_send", { rid: S.rid, prompt: text });
       } else {
         const params = {
-          kind: S.kind, workdir: S.workdir, prompt: text, permission: S.permission, preset: S.preset,
+          // gateway mode: the folder is the other device's; the CLI starts in the session's own folder when resuming
+          // (Claude keys its sessions by folder), else in the run device's home (the hub's default)
+          kind: S.kind, workdir: gatewayCtx() ? S.session?.cwd || "" : S.workdir, prompt: text, permission: S.permission, preset: S.preset,
           resume_id: (S.session ? canResume(S.session.kind) : canResume(S.kind)) ? (S.session?.id || S.sessionId || undefined) : undefined,
           title: S.session ? sessionTitle(S.session) : text.replace(/\s+/g, " ").slice(0, 80),
-          context: S.context.mode === "gateway" ? { mode: "gateway", device: S.context.device, workdir: S.context.workdir } : { mode: "direct" },
+          context: gatewayCtx() ? { mode: "gateway", device: S.context.device, workdir: S.context.workdir } : { mode: "direct" },
         };
         const result = await call("agent_run_open", params);
         if (result.attached) {  // the session already runs (another tab / console): follow that run instead

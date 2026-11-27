@@ -19,6 +19,7 @@ import asyncio
 import base64
 from datetime import datetime, timezone
 import mimetypes
+import os
 import platform as host_platform
 import secrets
 import shutil
@@ -1730,7 +1731,9 @@ class DeviceServer:
         capabilities = await asyncio.to_thread(self.contract.describe)
         return {
             "contract": CONTRACT,
-            "hostname": socket.gethostname(),
+            # Android: the app passes the device's own name (gethostname() is always "localhost").
+            "hostname": (sys.platform == "android" and os.environ.get("ANX_ANDROID_DEVICE_NAME", "").strip())
+            or socket.gethostname(),
             "profile": "full",
             "form": module.form(),
             "platform": self.contract.platform,

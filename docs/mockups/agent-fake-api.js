@@ -10,11 +10,26 @@ const P = `${HOME}/projects`;
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const SLOW = params.get("slow") ? 4 : 1;
 
+// reachable / workdirs / files: what the 目录 menu needs to offer a device's folders through the gateway (§1).
+// 研发构建机 has no agents/1 (online: false with a hint) but is on the gateway: its folders come from workdirs + files/1.
 const DEVICES = [
-  { id: "dev-mbp", name: "林的 MacBook Pro", online: true, self: true },
-  { id: "dev-win", name: "工作电脑", online: true },
-  { id: "dev-nas", name: "家里的 NAS", online: false },
+  { id: "dev-mbp", gid: "dev-mbp", name: "林的 MacBook Pro", online: true, self: true },
+  { id: "dev-win", name: "工作电脑", online: true, reachable: true, files: true, workdirs: [{ name: "billing", path: "D:\\repos\\billing" }] },
+  { id: "dev-lab", name: "研发部共享 GPU 训练服务器（机房 B 区 3 号机柜）", online: true, reachable: true, files: true,
+    workdirs: [{ name: "train", path: "/data/train" }] },
+  { id: "dev-build", name: "研发构建机", online: false, hint: "客户端过旧或未开放 Agent", reachable: true, files: true,
+    workdirs: [{ name: "ci", path: "/srv/ci" }, { name: "artifacts", path: "/srv/artifacts" }] },
+  { id: "dev-nas", name: "家里的 NAS", online: false, hint: "离线", reachable: false, files: true },
 ];
+
+// each device's own folders (agent_dirs without a path)
+const DIRS = {
+  "dev-win": { home: "C:\\Users\\user", recent: ["D:\\repos\\billing", "D:\\repos\\infra-terraform"], workspaces: [{ name: "billing", path: "D:\\repos\\billing" }], roots: [{ name: "主目录", path: "C:\\Users\\user" }] },
+  "dev-lab": { home: "/home/user", recent: ["/data/train/llm-finetune-2026q4-experiments", "/home/user/notebooks"], workspaces: [], roots: [{ name: "主目录", path: "/home/user" }] },
+};
+const FILES = {
+  "/srv": ["ci", "artifacts", "www"], "/srv/ci": ["pipelines", "cache"], "/home/user": ["src", ".cache"],
+};
 
 function agentsFor(device) {
   return [
@@ -31,6 +46,8 @@ function agentsFor(device) {
 const SESSIONS = params.get("state") === "first" ? [] : [
   { kind: "claude", id: "c-7f3a", title: "登录后偶尔跳回登录页，帮我查一下原因并修复", alias: "修复登录页 OAuth 回调", cwd: `${P}/agent-nexus`, updated_at: NOW - 95, messages: 18, pinned: false, address: "claude-agent-nexus@林的 MacBook Pro" },
   { kind: "claude", id: "c-21bd", title: "给拓扑视图加地图模式，设备按地理位置分布", cwd: `${P}/agent-nexus`, updated_at: NOW - 3600 * 5, messages: 42, pinned: true },
+  { kind: "codex", id: "x-77gw", title: "清理 billing 仓库里过期的迁移脚本", cwd: HOME, updated_at: NOW - 3600 * 1.1, messages: 7,
+    context: { mode: "gateway", device: "dev-win", workdir: "D:\\repos\\billing" } },
   { kind: "codex", id: "x-9e01", title: "整理 CHANGELOG 并准备 0.3.0 发布说明", cwd: `${P}/agent-nexus`, updated_at: NOW - 3600 * 2.4, messages: 12 },
   { kind: "codex", id: "x-44c2", title: "排查 Windows 终端里中文乱码", cwd: `${P}/agent-nexus`, updated_at: NOW - 86400 * 1.2, messages: 27, pinned: true },
   { kind: "claude", id: "c-0a19", title: "把博客从 Hexo 迁移到 Astro", cwd: `${P}/website`, updated_at: NOW - 86400 * 2, messages: 64 },
@@ -257,7 +274,10 @@ export function createFakeApi({ activeRun = true } = {}) {
       if (!job) return { state: "done", progress: 100, lines: [], next: since };
       return { state: job.state, progress: job.progress, lines: job.lines.slice(since), next: job.lines.length, stage: job.progress < 40 ? "下载中" : job.progress < 80 ? "安装中" : "校验版本" };
     },
-    agent_dirs: ({ path } = {}) => {
+    agent_dirs: ({ path } = {}, device) => {
+      const own = device && device !== "dev-mbp" ? DIRS[device] : null;
+      if (own && !path) return own;
+      if (own) return { path, parent: null, dirs: [] };
       if (!path) return { recent: [`${P}/agent-nexus`, `${P}/website`, `${HOME}/notes`], workspaces: [{ name: "agent-nexus", path: `${P}/agent-nexus` }, { name: "billing-service", path: `${P}/billing-service` }], roots: [{ name: "主目录", path: HOME }], home: HOME };
       const kids = TREE[path] || [];
       return { path, parent: path === HOME ? null : path.split("/").slice(0, -1).join("/") || null, dirs: kids.map((name) => ({ name, path: `${path}/${name}` })) };
@@ -297,7 +317,18 @@ export function createFakeApi({ activeRun = true } = {}) {
       if (device === "dev-nas") return { error: "设备离线", code: "offline" };
       try { return await fn(p, device); } catch (error) { return { error: String(error.message || error), code: "internal" }; }
     },
-    async devices() { await wait(40); return DEVICES; },
+    // ?gw=off: 本机 not joined (the local console then lists only 本机 and says why)
+    async devices() { await wait(40); return params.get("gw") === "off" ? [{ ...DEVICES[0], gid: undefined }] : DEVICES; },
+    devicesNote: () => (params.get("gw") === "off" ? "加入网关后，也能在其他设备上运行 Agent" : ""),
+    // files/1 listings of another device (the local console's /api/remote/devices/{id}/files)
+    async files(device, path) {
+      await wait(120);
+      if (device === "dev-nas") throw new Error("设备离线");
+      const at = path || "/home/user";
+      if (!FILES[at] && path) throw new Error(`不是文件夹：${path}`);
+      return { path: at, parent: at === "/" ? "" : at.split("/").slice(0, -1).join("/") || "/", home: "/home/user", sep: "/",
+        entries: (FILES[at] || []).map((name) => ({ name, dir: true })) };
+    },
     // the ask arrives a moment after the run's events (as ask_user would, mid-run)
     async conversation(address) { await wait(80); return { messages: mails, asks: asks.filter((a) => Date.now() / 1000 >= a.visible_at) }; },
     async answerAsk(id, answer) {

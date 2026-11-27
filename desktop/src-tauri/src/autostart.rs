@@ -8,6 +8,9 @@
 //! space. The plugin is still registered, under the same value name, so its
 //! `is_enabled()` reports the same entry.
 //!
+//! macOS: a per-user LaunchAgent `~/Library/LaunchAgents/io.github.muxigame.agentnexus.plist`
+//! that runs `<app>/Contents/MacOS/agent-nexus --autostart --root <root>` at login.
+//!
 //! Autostart is turned on once, at the first run of a root
 //! (`.anx/desktop.json` gets `autostart_initialized`); after that the user's
 //! choice is respected, upgrades included.
@@ -16,16 +19,48 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 pub const VALUE_NAME: &str = "Agent Nexus";
 pub const MARKER_FILE: &str = ".anx/desktop.json";
 
 /// The Run value's command line. Trailing separators are dropped from the root:
 /// `"C:\x\"` would make the closing quote an escaped one.
+#[cfg(not(target_os = "macos"))]
 pub fn command(exe: &Path, root: &Path) -> String {
     let root = root.display().to_string();
     let root = root.trim_end_matches(['\\', '/']);
     format!("\"{}\" --autostart --root \"{}\"", exe.display(), root)
+}
+
+/// macOS: the whole LaunchAgent property list (compared as a whole, like the Run value).
+#[cfg(target_os = "macos")]
+pub fn command(exe: &Path, root: &Path) -> String {
+    fn xml(text: &str) -> String {
+        text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+    }
+    let root = root.display().to_string();
+    let root = root.trim_end_matches('/');
+    format!(r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>{label}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>{exe}</string>
+    <string>--autostart</string>
+    <string>--root</string>
+    <string>{root}</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Interactive</string>
+</dict>
+</plist>
+"#, label = registry::LABEL, exe = xml(&exe.display().to_string()), root = xml(root))
 }
 
 fn marker(root: &Path) -> Value {
@@ -67,7 +102,36 @@ mod registry {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "macos")]
+mod registry {
+    //! The "registry" is one LaunchAgent file; its content is the value.
+    use std::path::PathBuf;
+
+    pub const LABEL: &str = "io.github.muxigame.agentnexus";
+
+    fn plist() -> Option<PathBuf> {
+        std::env::var_os("HOME").map(|home| PathBuf::from(home).join("Library/LaunchAgents").join(format!("{LABEL}.plist")))
+    }
+
+    pub fn read(_name: &str) -> Option<String> { std::fs::read_to_string(plist()?).ok() }
+
+    pub fn write(_name: &str, value: Option<&str>) -> Result<(), String> {
+        let path = plist().ok_or("HOME is not set")?;
+        match value {
+            Some(value) => {
+                std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
+                // launchd reads the file at the next login; nothing is loaded now (the app runs).
+                std::fs::write(&path, value).map_err(|e| e.to_string())
+            }
+            None => match std::fs::remove_file(&path) {
+                Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.to_string()),
+                _ => Ok(()),
+            },
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 mod registry {
     // Linux uses a systemd user unit and XDG autostart (section 9.6), not built here yet.
     pub fn read(_name: &str) -> Option<String> { None }
@@ -104,12 +168,22 @@ pub fn on_start(exe: &Path, root: &Path) -> Result<Startup, String> {
     }
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn the_launch_agent_escapes_paths() {
+    let text = command(Path::new("/Applications/Agent Nexus.app/Contents/MacOS/agent-nexus"), Path::new("/Users/a&b/AgentNexus/"));
+    assert!(text.contains("<string>/Applications/Agent Nexus.app/Contents/MacOS/agent-nexus</string>"));
+    assert!(text.contains("<string>/Users/a&amp;b/AgentNexus</string>"));
+    assert!(text.contains("--autostart"));
+}
+
 pub fn exe() -> PathBuf { std::env::current_exe().unwrap_or_else(|_| PathBuf::from("agent-nexus.exe")) }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn the_run_value_quotes_paths_with_spaces() {
         let exe = Path::new(r"D:\Data A\Local\Agent Nexus\agent-nexus.exe");

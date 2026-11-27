@@ -99,6 +99,105 @@ def test_release_creates_a_draft_with_every_asset():
         assert needle in text, needle
 
 
+def test_release_builds_both_macos_architectures_and_one_feed_for_all():
+    yaml = pytest.importorskip("yaml")
+    text = (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
+    jobs = yaml.safe_load(text)["jobs"]
+    macos = jobs["macos"]
+    assert macos["needs"] == "version-gate"
+    assert {(entry["rid"], entry["arch"]) for entry in macos["strategy"]["matrix"]["include"]} == {
+        ("osx-arm64", "aarch64"), ("osx-x64", "x64")}
+    assert "TAURI_SIGNING_PRIVATE_KEY" in json.dumps(macos)
+    feed = json.dumps(jobs["feed"])
+    assert set(jobs["feed"]["needs"]) == {"windows", "macos"}
+    for needle in ("x64-setup.exe", "for arch in aarch64 x64", ".app.tar.gz", "--macos-bundle", "make_latest_json.py"):
+        assert needle in feed, needle
+    assert "make_latest_json.py" not in json.dumps(jobs["windows"])  # one latest.json, from the feed job
+    for job in ("publish-oss", "draft-release"):
+        assert {"windows", "macos", "linux", "feed"} <= set(jobs[job]["needs"])
+
+
+def test_a_failed_macos_build_does_not_hold_back_the_other_platforms():
+    """macOS is best effort: Windows, Linux, Android and the feed still publish without it."""
+    yaml = pytest.importorskip("yaml")
+    jobs = yaml.safe_load((WORKFLOWS / "release.yml").read_text(encoding="utf-8"))["jobs"]
+    assert jobs["macos"]["strategy"]["fail-fast"] is False
+    assert "ANX_RELEASE_MACOS" in jobs["macos"]["if"]
+    assert "!cancelled()" in jobs["feed"]["if"] and "needs.windows.result == 'success'" in jobs["feed"]["if"]
+    assert "needs.macos" not in jobs["feed"]["if"]
+    for job in ("publish-oss", "draft-release"):
+        condition = jobs[job]["if"]
+        assert "!cancelled()" in condition and "needs.macos" not in condition
+        for need in ("windows", "linux", "android", "feed"):
+            assert f"needs.{need}.result == 'success'" in condition, (job, need)
+    publish = jobs["publish-release"]["if"]
+    assert "needs.publish-oss.result == 'success'" in publish and "needs.draft-release.result == 'success'" in publish
+    assert "::warning::no macOS" in json.dumps(jobs["feed"])
+
+
+def test_release_builds_the_signed_android_app():
+    yaml = pytest.importorskip("yaml")
+    jobs = yaml.safe_load((WORKFLOWS / "release.yml").read_text(encoding="utf-8"))["jobs"]
+    android = json.dumps(jobs["android"])
+    assert jobs["android"]["needs"] == "version-gate"
+    for needle in ("ANDROID_KEYSTORE_BASE64", "build_android.py wheels", "build_android.py apk",
+                   "--rid linux-bionic-arm64", "ANX_ANDROID_P2P_TOOLS", "test_no_private_payload.py"):
+        assert needle in android, needle
+    for job in ("publish-oss", "draft-release"):
+        assert "android" in jobs[job]["needs"]
+
+
+def test_without_the_keystore_the_android_job_skips_instead_of_failing_the_release():
+    yaml = pytest.importorskip("yaml")
+    steps = yaml.safe_load((WORKFLOWS / "release.yml").read_text(encoding="utf-8"))["jobs"]["android"]["steps"]
+    names = [step.get("id") or step.get("name") or step.get("uses") for step in steps]
+    gate = names.index("keystore")
+    assert "exit 0" in steps[gate]["run"] and "present=false" in steps[gate]["run"]
+    for step in steps[gate + 1:]:
+        assert step.get("if") == "steps.keystore.outputs.present == 'true'", step
+
+
+def test_a_keystore_without_its_password_stops_the_android_job_early(tmp_path):
+    """Half-configured signing fails at once with an ::error:: (not after the long build, in Gradle)."""
+    yaml = pytest.importorskip("yaml")
+    import shutil
+    if sys.platform == "win32" or not shutil.which("bash"):
+        # the step runs on the ubuntu runner; Windows' bash (WSL) cannot read the Windows paths given here
+        pytest.skip("needs a POSIX bash")
+    steps = yaml.safe_load((WORKFLOWS / "release.yml").read_text(encoding="utf-8"))["jobs"]["android"]["steps"]
+    gate = next(step for step in steps if step.get("id") == "keystore")
+    assert "ANDROID_KEYSTORE_PASSWORD" in gate["env"]
+
+    def run(base64, password):
+        output = tmp_path / "output"
+        output.write_text("", encoding="utf-8")
+        env = {"PATH": os.environ.get("PATH", ""), "GITHUB_OUTPUT": str(output), "RUNNER_TEMP": str(tmp_path),
+               "ANDROID_KEYSTORE_BASE64": base64, "ANDROID_KEYSTORE_PASSWORD": password}
+        done = subprocess.run(["bash", "-c", gate["run"]], env=env, capture_output=True, text=True)
+        return done.returncode, done.stdout, output.read_text(encoding="utf-8")
+
+    code, out, result = run("", "")
+    assert code == 0 and "present=false" in result and "::warning::" in out
+    code, out, result = run("a2V5", "")
+    assert code == 1 and "::error::" in out and "present=true" not in result
+    code, out, result = run("a2V5", "secret")
+    assert code == 0 and "present=true" in result and (tmp_path / "release.keystore").read_bytes() == b"key"
+
+
+def test_macos_checks_its_executable_and_runtime_for_a_private_payload():
+    yaml = pytest.importorskip("yaml")
+    steps = yaml.safe_load((WORKFLOWS / "release.yml").read_text(encoding="utf-8"))["jobs"]["macos"]["steps"]
+    collect = next(step["run"] for step in steps if step.get("name") == "Collect")
+    assert "test_no_private_payload.py dist artifacts/agent-nexus-runtime.zip artifacts/agent-nexus" in collect
+
+
+def test_the_download_page_lists_the_android_app():
+    from agent_nexus import downloads
+    item = downloads.classify("agent-nexus_0.9.0_arm64.apk")
+    assert (item["platform"], item["arch"], item["kind"]) == ("android", "arm64", "desktop")
+    assert ".apk" in downloads.ARTIFACT_SUFFIXES
+
+
 def test_release_tags_publish_and_the_gateway_updates_itself():
     """CI publishes; nothing in it deploys. The gateway follows the releases (auto_update.py)."""
     yaml = pytest.importorskip("yaml")
@@ -151,6 +250,27 @@ def test_latest_json_points_at_the_release_asset(tmp_path):
     assert entry["signature"] == signature
     assert entry["url"] == "https://github.com/owner/agent-nexus/releases/download/v0.2.0/agent-nexus_0.2.0_x64-setup.exe"
     assert feed["pub_date"].endswith("Z")
+
+
+def test_latest_json_adds_the_macos_updater_bundles(tmp_path):
+    setup = tmp_path / "agent-nexus_0.2.0_x64-setup.exe"
+    setup.write_bytes(b"MZ installer")
+    signature = minisign_signature()
+    bundles = [tmp_path / "agent-nexus_0.2.0_aarch64.app.tar.gz", tmp_path / "agent-nexus_0.2.0_x64.app.tar.gz"]
+    for path in [setup, *bundles]:
+        path.write_bytes(b"x")
+        (tmp_path / (path.name + ".sig")).write_text(signature + "\n", encoding="utf-8")
+    out = tmp_path / "latest.json"
+    base = "https://example.com/agent-nexus/releases/0.2.0"
+    assert latest.main(["--setup", str(setup), "--macos-bundle", str(bundles[0]), "--macos-bundle", str(bundles[1]),
+                        "--tag", "v0.2.0", "--base-url", base, "--out", str(out)]) == 0
+    platforms = json.loads(out.read_text(encoding="utf-8"))["platforms"]
+    assert set(platforms) == {"windows-x86_64", "darwin-aarch64", "darwin-x86_64"}
+    assert platforms["darwin-aarch64"]["url"] == base + "/agent-nexus_0.2.0_aarch64.app.tar.gz"
+    assert platforms["darwin-x86_64"]["signature"] == signature
+    (tmp_path / (bundles[1].name + ".sig")).unlink()
+    assert latest.main(["--setup", str(setup), "--macos-bundle", str(bundles[1]), "--tag", "v0.2.0",
+                        "--out", str(tmp_path / "other.json")]) == 2
 
 
 def test_latest_json_rejects_a_missing_or_bogus_signature(tmp_path):

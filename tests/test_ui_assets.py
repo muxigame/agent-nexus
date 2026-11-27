@@ -151,3 +151,8 @@ def test_chat_layout_v3_assets():
     for selector in (".chat-chip-agent", ".chat-chip-dir", ".chat-chip-perm", ".chat-chip-device", ".chat-more"):
         assert selector in mockup, selector
     assert ".chat-bar" not in mockup and ".chat-pick" not in mockup
+    # the 目录 chip offers other devices' folders (gateway mode); the mockup shows several, one without agents/1
+    fake = (Path(__file__).resolve().parents[1] / "docs" / "mockups" / "agent-fake-api.js").read_text(encoding="utf-8")
+    assert "reachable: true" in fake and "async files(device, path)" in fake and 'mode: "gateway"' in fake
+    assert "?ctx=1" in mockup and "?gw=off" in mockup
+    assert "contextTargets(" in chat and "function dirMenu(" in chat and "其他设备 · 经网关" in chat

@@ -7,6 +7,12 @@ The public edition is a Tauri NSIS installer (design section 9.1):
 environment, the updater signature ``*-setup.exe.sig``. The private edition stays
 a single portable exe built with ``cargo build`` and never gets an installer or
 an updater signature (section 11.4).
+
+On macOS the public edition is ``cargo tauri build --bundles app,dmg``: the
+``.dmg`` people install from, and (signed) the updater's ``.app.tar.gz`` and
+``.app.tar.gz.sig``, published as ``agent-nexus_<version>_<arch>.dmg`` and
+``agent-nexus_<version>_<arch>.app.tar.gz`` (arch ``aarch64`` or ``x64``; one
+build per architecture, since the runtime carries native Python and packages).
 """
 from __future__ import annotations
 
@@ -15,9 +21,11 @@ import datetime as dt
 import json
 import os
 from pathlib import Path
+import platform
 import re
 import shutil
 import subprocess
+import sys
 import uuid
 import zipfile
 
@@ -38,6 +46,63 @@ SIGNING_PASSWORD_FILE = "updater.key.password"
 def installer_name(version):
     """Published installer name; no spaces, so release URLs stay predictable."""
     return f"agent-nexus_{version}_x64-setup.exe"
+
+
+#: Build the macOS app and disk image instead of the Windows installer (tests pin it).
+MACOS = sys.platform == "darwin"
+
+
+def mac_arch(triple=None):
+    """``aarch64`` or ``x64`` for a Cargo target triple (default: this machine)."""
+    if triple:
+        return "aarch64" if triple.startswith("aarch64") else "x64"
+    return "aarch64" if platform.machine() == "arm64" else "x64"
+
+
+def mac_names(version, arch):
+    """Published names of the macOS disk image and updater bundle."""
+    return f"agent-nexus_{version}_{arch}.dmg", f"agent-nexus_{version}_{arch}.app.tar.gz"
+
+
+def mac_icon(target):
+    """``icon.icns`` made from ``icons/icon.png`` (sips and iconutil ship with macOS); not kept in git."""
+    source = ROOT / TAURI_DIR / "icons" / "icon.png"
+    iconset = Path(target) / "icon.iconset"
+    shutil.rmtree(iconset, ignore_errors=True)
+    iconset.mkdir(parents=True)
+    for size in (16, 32, 128, 256, 512):
+        for scale in (1, 2):
+            name = f"icon_{size}x{size}{'@2x' if scale == 2 else ''}.png"
+            pixels = str(size * scale)
+            subprocess.run(["sips", "-z", pixels, pixels, str(source), "--out", str(iconset / name)],
+                           check=True, stdout=subprocess.DEVNULL)
+    icns = Path(target) / "icon.icns"
+    subprocess.run(["iconutil", "-c", "icns", str(iconset), "-o", str(icns)], check=True)
+    return icns
+
+
+def collect_macos(binary_dir, out, version, arch, signed):
+    """Publish ``bundle/dmg/*.dmg`` and ``bundle/macos/*.app.tar.gz`` (+ ``.sig``) to ``out``."""
+    bundle_dir = Path(binary_dir) / "release" / "bundle"
+    dmg_name, updater_name = mac_names(version, arch)
+    images = sorted(path for path in (bundle_dir / "dmg").glob("*.dmg") if f"_{version}_" in path.name)
+    if len(images) != 1:
+        raise RuntimeError(f"Expected exactly one disk image for {version} in {bundle_dir / 'dmg'}, found {len(images)}")
+    published = [Path(out) / dmg_name]
+    publish(images[0], published[0])
+    archive = Path(out) / updater_name
+    signature = archive.with_name(archive.name + ".sig")
+    if signed:
+        sources = sorted((bundle_dir / "macos").glob("*.app.tar.gz"))
+        if len(sources) != 1 or not sources[0].with_name(sources[0].name + ".sig").is_file():
+            raise RuntimeError("The signed updater bundle (.app.tar.gz and .sig) is missing")
+        publish(sources[0], archive)
+        publish(sources[0].with_name(sources[0].name + ".sig"), signature)
+        published += [archive, signature]
+    else:
+        archive.unlink(missing_ok=True)
+        signature.unlink(missing_ok=True)
+    return published
 
 
 def desktop_version(root=None):
@@ -144,10 +209,19 @@ def build(out, enrollment_file=None, runtime=None, uv="uv", cargo="cargo", targe
         if signing_key_dir is not None:
             env.update(signing_environment(signing_key_dir))
         signed = bool(env.get(SIGNING_KEY_ENV))
-        command = [str(cargo), "tauri", "build", "--bundles", "nsis", "--ci"]
+        command = [str(cargo), "tauri", "build", "--bundles", "app,dmg" if MACOS else "nsis", "--ci"]
+        if env.get("CARGO_BUILD_TARGET"):
+            command += ["--target", env["CARGO_BUILD_TARGET"]]
+        overrides = {}
+        if MACOS:
+            target.mkdir(parents=True, exist_ok=True)
+            icons = json.loads((ROOT / TAURI_DIR / "tauri.conf.json").read_text(encoding="utf-8"))["bundle"]["icon"]
+            overrides["icon"] = [*icons, str(mac_icon(target))]
         if not signed:
             print(f"warning: {SIGNING_KEY_ENV} is not set; building the installer without updater artifacts", flush=True)
-            command += ["--config", json.dumps({"bundle": {"createUpdaterArtifacts": False}})]
+            overrides["createUpdaterArtifacts"] = False
+        if overrides:
+            command += ["--config", json.dumps({"bundle": overrides})]
         command += ["--", "--locked", "--target-dir", str(target)]
         subprocess.run(command, cwd=ROOT / TAURI_DIR, env=env, check=True)
     else:
@@ -156,10 +230,19 @@ def build(out, enrollment_file=None, runtime=None, uv="uv", cargo="cargo", targe
                         "--target-dir", str(target)], cwd=ROOT, env=env, check=True)
     triple = env.get("CARGO_BUILD_TARGET")
     binary_dir = target / triple if triple else target
-    source = binary_dir / "release" / f"{CARGO_BIN}.exe"
+    source = binary_dir / "release" / (CARGO_BIN if MACOS else f"{CARGO_BIN}.exe")
     binary = source.read_bytes()
-    if not binary.startswith(b"MZ") or runtime.read_bytes() not in binary:
-        raise RuntimeError("The built Windows executable does not embed this build's runtime")
+    magic = (b"\xcf\xfa\xed\xfe", b"\xca\xfe\xba\xbe") if MACOS else (b"MZ",)
+    if not binary.startswith(magic) or runtime.read_bytes() not in binary:
+        raise RuntimeError("The built desktop executable does not embed this build's runtime")
+    if MACOS:
+        destination = out / (CARGO_BIN + ("-private" if private else ""))
+        publish(source, destination, private)
+        print("artifact:", destination, flush=True)
+        if bundle:
+            for path in collect_macos(binary_dir, out, desktop_version(), mac_arch(triple), signed):
+                print("artifact:", path, flush=True)
+        return destination
     destination = out / (PRIVATE_DESKTOP_EXE if private else DESKTOP_EXE)
     publish(source, destination, private)
     print("artifact:", destination, flush=True)
@@ -178,7 +261,7 @@ if __name__ == "__main__":
     parser.add_argument("--cargo", default="cargo")
     parser.add_argument("--target-dir", type=Path)
     parser.add_argument("--online", action="store_true", help="generated runtime skips the bundled Python and packages")
-    parser.add_argument("--no-installer", action="store_true", help="public edition: raw exe only (cargo build), no NSIS bundle")
+    parser.add_argument("--no-installer", action="store_true", help="public edition: raw exe only (cargo build), no NSIS/dmg bundle")
     parser.add_argument("--signing-key-dir", type=Path,
                         help=f"folder with {SIGNING_KEY_FILE} and {SIGNING_PASSWORD_FILE}; loaded into the build environment only")
     args = parser.parse_args()

@@ -35,7 +35,9 @@ from typing import Any
 
 from mcpkit.config import ConfigError
 
-ARTIFACT_SUFFIXES = (".exe", ".msi", ".deb", ".rpm", ".appimage", ".dmg", ".zip", ".tar.gz")
+ARTIFACT_SUFFIXES = (".exe", ".msi", ".deb", ".rpm", ".appimage", ".dmg", ".apk", ".zip", ".tar.gz")
+#: The macOS updater bundle (latest.json names it): not something people download and open.
+UPDATER_ONLY = (".app.tar.gz",)
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,199}")
 _VERSION = re.compile(r"(?<![0-9])(\d+\.\d+\.\d+(?:-(?:rc|beta|alpha|dev)[0-9.]*)?)", re.IGNORECASE)
 _HEX64 = re.compile(r"[0-9a-fA-F]{64}")
@@ -68,9 +70,13 @@ def classify(name: str) -> dict:
         package = "deb" if lower.endswith(".deb") else "rpm" if lower.endswith(".rpm") else "AppImage"
         return {"id": f"linux-{package.lower()}", "platform": "linux", "arch": arch, "kind": "desktop",
                 "label": f"Linux（.{package}）", "requirements": "Ubuntu 22.04+" if package == "deb" else "Linux"}
+    if lower.endswith(".apk"):
+        return {"id": f"android-{arch}", "platform": "android", "arch": arch, "kind": "desktop",
+                "label": "Agent Nexus for Android", "requirements": f"Android 10+ {arch}"}
     if lower.endswith(".dmg"):
+        chip = "Apple 芯片 / M 系列" if arch == "arm64" else "Intel 芯片"
         return {"id": f"macos-{arch}", "platform": "macos", "arch": arch, "kind": "desktop",
-                "label": "Agent Nexus for macOS", "requirements": "macOS"}
+                "label": f"Agent Nexus for macOS（{chip}）", "requirements": f"macOS 11+，{chip}"}
     if "gateway" in lower:
         return {"id": "gateway-zip", "platform": "linux", "arch": "any", "kind": "gateway",
                 "label": "网关（自托管）", "requirements": "Linux + systemd + uv"}
@@ -202,7 +208,7 @@ class Downloads:
         except OSError:
             entries = []
         for path in entries:
-            if self.file(path.name) is None:
+            if self.file(path.name) is None or path.name.lower().endswith(UPDATER_ONLY):
                 continue
             try:
                 stat = path.stat()
@@ -219,6 +225,8 @@ class Downloads:
         listed = {entry["filename"] for entry in remote}
         found = [item for item in found if item["filename"] not in listed]
         for entry in remote:
+            if entry["filename"].lower().endswith(UPDATER_ONLY):
+                continue
             match = _VERSION.search(entry["filename"])
             item = classify(entry["filename"])
             item.update(entry, version=match.group(1) if match else None)

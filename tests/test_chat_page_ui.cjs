@@ -157,10 +157,12 @@ test("the settings are one chip row inside the composer; a light head line repla
   }
   assert.match(chat, /mount\(chips, device, agent, dir, perm\)/);
   assert.match(chat, /`dot \$\{status\.tone/, "the Agent chip has a status dot");
-  // head line: session toggle · current title · ⋯ (the ⋯ menu keeps presets / context / temp dirs / 新对话)
+  // head line: session toggle · current title · ⋯ (the ⋯ menu keeps presets / temp dirs / 新对话; the work context
+  // moved into the 目录 chip)
   assert.match(chat, /const head = el\("div", \{ class: "chat-head" \}, sideBtn, headTitle, moreBtn\)/);
   assert.match(chat, /const main = el\("section", \{ class: "chat-main", "aria-label": "对话" \}, head, ctxLine,/);
-  for (const item of ["编辑提示词片段…", "工作上下文…", "临时目录…"]) assert.ok(chat.includes(item), item);
+  for (const item of ["编辑提示词片段…", "临时目录…"]) assert.ok(chat.includes(item), item);
+  assert.ok(!chat.includes("工作上下文…") && !chat.includes("contextDialog"), "no separate work-context dialog");
   const css = read("ui/ui.css");
   for (const rule of [".chat-head {", ".chat-chips {", ".chat-chip {", ".chat-chips.fade-end", ".chat-chip.danger", ".chat-chip-dir.no-dir"]) assert.ok(css.includes(rule), rule);
   assert.ok(!/\.chat-bar|\.chat-pick\b/.test(css), "no leftover toolbar rules");
@@ -217,4 +219,116 @@ test("a Codex session row shows its sub-agent count; the key hint is only for ke
   assert.match(chat, /s\.subagents > 0 \? el\("span", \{ class: "chat-sess-subagents", title: `\$\{s\.subagents\} 个子代理会话` \}, `子代理 \$\{s\.subagents\}`\) : null/);
   assert.ok(read("ui/ui.css").includes(".chat-sess-subagents {"));
   assert.ok(chat.includes('matchMedia?.("(pointer: fine)")'));
+});
+
+// ---------------------------------------------------------------- folders on any device of the network (§1 gateway)
+
+const DEVICES = [
+  { id: null, gid: "pc-self", name: "我的笔记本", online: true, self: true, workdirs: [{ name: "site", path: "/Users/me/site" }] },
+  { id: "pc-win", name: "工作电脑", online: true, reachable: true, files: true, workdirs: [{ name: "billing", path: "D:\\repos\\billing" }] },
+  { id: "pc-old", name: "构建机", online: false, hint: "客户端过旧或未开放 Agent", reachable: true, files: true, workdirs: [] },
+  { id: "pc-nas", name: "NAS", online: false, hint: "离线", reachable: false },
+];
+
+test("the 目录 menu's other devices: everyone but the runner, with its gateway id; 本机 by its gid", async () => {
+  const { contextTargets } = await load("ui/chat.js");
+  // runner = 本机 (the local console's null): the others, 本机 left out
+  const fromSelf = contextTargets(DEVICES, null);
+  assert.deepEqual(fromSelf.map((t) => [t.id, t.call, t.online, t.agents, t.files]),
+    [["pc-win", "pc-win", true, true, true], ["pc-old", "pc-old", true, false, true], ["pc-nas", "pc-nas", false, false, false]]);
+  // runner = 工作电脑: 本机 is a target under its gateway id; its own ops still go to the console (call null)
+  const fromWin = contextTargets(DEVICES, "pc-win");
+  assert.deepEqual(fromWin[0], { id: "pc-self", call: null, self: true, name: "本机（我的笔记本）", online: true, agents: true, files: false,
+    workdirs: [{ name: "site", path: "/Users/me/site" }], hint: "" });
+  assert.ok(!fromWin.some((t) => t.id === "pc-win"));
+  // 本机 without a gateway id (not joined): never a target; old device lists without `reachable` fall back to online
+  assert.deepEqual(contextTargets([{ id: null, name: "本机", online: true, self: true }, { id: "a", name: "A", online: true }], "a"), []);
+  assert.equal(contextTargets([{ id: "b", name: "B", online: true }], "a")[0].online, true);
+  assert.deepEqual(contextTargets(null, null), []);
+});
+
+test("a device's folders: used here first, then its own recent folders, workspaces and registered workdirs, each once", async () => {
+  const { targetFolders } = await load("ui/chat.js");
+  const target = { id: "pc-win", workdirs: [{ name: "billing", path: "D:\\repos\\billing" }, { name: "ops", path: "D:\\ops" }] };
+  const used = [{ device: "pc-other", workdir: "/x" }, { device: "pc-win", workdir: "D:\\repos\\infra" }];
+  const dirs = { recent: ["D:\\repos\\billing", { path: "D:\\tmp" }], workspaces: [{ name: "Billing", path: "D:\\repos\\billing" }] };
+  const folders = targetFolders(target, { used, dirs });
+  assert.deepEqual(folders.map((f) => [f.path, f.name, f.from]), [
+    ["D:\\repos\\infra", "infra", "used"], ["D:\\repos\\billing", "billing", "recent"], ["D:\\tmp", "tmp", "recent"], ["D:\\ops", "ops", "workspace"]]);
+  assert.equal(targetFolders(target, { used, dirs, limit: 2 }).length, 2);
+  assert.deepEqual(targetFolders({ id: "z" }).map((f) => f.path), []);
+});
+
+test("the 目录 chip reads <folder> · <device> in gateway mode, with the whole story in its title", async () => {
+  const { folderChip, rememberTarget } = await load("ui/chat.js");
+  const gw = folderChip({ workdir: "/Users/me/site", context: { mode: "gateway", device: "pc-win", workdir: "D:\\repos\\billing\\" }, runnerName: "本机", targetName: "工作电脑" });
+  assert.deepEqual(gw, { value: "billing", device: "工作电脑", gateway: true, title: "目录：工作电脑 上的 D:\\repos\\billing\\（经网关；CLI 在 本机 上运行）" });
+  assert.deepEqual(folderChip({ workdir: "/srv/app", context: { mode: "direct" }, runnerName: "X" }), { value: "app", device: "", gateway: false, title: "目录：/srv/app" });
+  assert.equal(folderChip({ workdir: "", context: null, runnerName: "X" }).value, "选择目录");
+  // the folders used through the gateway: newest first, each device+folder once
+  let list = rememberTarget([], "a", "/1");
+  list = rememberTarget(list, "b", "/2");
+  list = rememberTarget(list, "a", "/1");
+  assert.deepEqual(list, [{ device: "a", workdir: "/1" }, { device: "b", workdir: "/2" }]);
+  assert.equal(rememberTarget(Array.from({ length: 30 }, (_, i) => ({ device: "d", workdir: `/${i}` })), "e", "/e").length, 24);
+  // with the device's name, so it reads as that name while the device is not in the list
+  assert.deepEqual(rememberTarget(list, "a", "/1", { name: "工作电脑" })[0], { device: "a", workdir: "/1", name: "工作电脑" });
+  assert.equal(rememberTarget([], "a", "/1", { max: 0 }).length, 0);
+});
+
+test("picking a folder on another device is gateway mode; the run, the session and the stored state carry it", () => {
+  const chat = read("ui/chat.js");
+  const pick = chat.slice(chat.indexOf("function useTarget("), chat.indexOf("function loadTargetDirs("));
+  assert.ok(pick.includes('S.context = { mode: "gateway", device: t.id, workdir: path, name: t.name }') && pick.includes("rememberTarget(usedTargets(), t.id, path, { name: t.name })"));
+  assert.ok(chat.includes("function useDirect(path) {") && chat.slice(chat.indexOf("function useDirect(path) {"), chat.indexOf("function useTarget(")).includes("S.context = directContext()"));
+  // send: the context goes to agent_run_open; the runner's cwd is the session's when resuming, else the hub's default
+  assert.ok(chat.includes('context: gatewayCtx() ? { mode: "gateway", device: S.context.device, workdir: S.context.workdir } : { mode: "direct" }'));
+  assert.ok(chat.includes('workdir: gatewayCtx() ? S.session?.cwd || "" : S.workdir'));
+  // a session / run brings its context back; per-device prefs (§16.2) keep it
+  const open = chat.slice(chat.indexOf("async function openSession("), chat.indexOf("function attachRun("));
+  assert.ok(open.includes("adoptContext(s.context)"));
+  assert.ok(chat.includes("if (run.context) adoptContext({ ...run.context, name: run.context.name || run.context_device });"));
+  // the run device's folder is the session's in either mode: back in direct mode it resumes where Claude keeps it
+  assert.ok(open.includes("if (s.cwd && !s.cwd_missing) S.workdir = s.cwd;") && !open.includes("!gatewayCtx()) S.workdir"));
+  const attach = chat.slice(chat.indexOf("function attachRun("), chat.indexOf("async function poll("));
+  assert.ok(attach.includes("if (run.workdir) S.workdir = run.workdir;") && attach.includes('run.mode === "gateway"'));
+  assert.ok(chat.includes("adoptContext(prefs.context);") && /const prefs = \{ kind: S\.kind, workdir: S\.workdir, [^}]*context: S\.context/.test(chat));
+  // offline target / gateway out of reach: blocked with a way back to the run device's folders
+  const blocked = chat.slice(chat.indexOf("function blockedReason("), chat.indexOf("function renderComposer("));
+  assert.ok(blocked.includes("contextProblem()") && blocked.includes("directContext()"));
+  // browsing another device: its AgentHub, or files/1 for a device without agents/1
+  assert.ok(chat.includes('callOp(api, "agent_dirs", params, t.call)') && chat.includes("api.files(t.id"));
+  // the session row says whose folder a gateway session works on
+  assert.ok(chat.includes("whereText(s.context, s.cwd)") && chat.includes("whereText(run.context, run.workdir)"));
+});
+
+test("the 目录 menu redraws only a device's folder list, so typing and focus survive its folders arriving", () => {
+  const chat = read("ui/chat.js");
+  const menu = chat.slice(chat.indexOf("function dirMenu("), chat.indexOf("function browseDirs("));
+  const section = menu.slice(menu.indexOf("const section = (t) => {"), menu.indexOf("const info = agentInfo();"));
+  const paint = section.slice(section.indexOf("const paint = () => {"));
+  assert.ok(paint.includes("mount(list,") && !paint.includes("mount(box"), "only the list is remounted");
+  assert.ok(!paint.includes("pathField") && !paint.includes('"chat-dir-dev-head"'), "head and field are built once");
+  assert.ok(paint.includes("document.activeElement") && paint.includes("dataset.path"), "a focused folder row keeps its place");
+  assert.ok(section.includes('"aria-controls": fieldId') && section.includes("id: fieldId"), "the 输入路径 toggle names its field");
+  // offline devices with their reasons as text; a jump to the other devices; agent_dirs errors are shown
+  assert.ok(menu.includes("不可用：") && menu.includes("（${t.hint || \"离线\"}）") && !menu.includes('title: offline.map'));
+  assert.ok(menu.includes("chat-dir-jump") && menu.includes("读不到这台设备的目录"));
+  // the device list refresh keeps the folder lists (60 s throttle), dropping devices that went offline
+  assert.ok(!chat.includes("targetDirs.clear()"));
+  // the gateway out of reach is said directly, not through the devices note's pitch
+  const problem = chat.slice(chat.indexOf("function contextProblem("), chat.indexOf("function adoptContext("));
+  assert.ok(problem.includes("连不上网关") && !problem.includes("S.devicesNote}"));
+  const css = read("ui/ui.css");
+  assert.ok(/\.chat-ctx-run \{ display: none; \}/.test(css) && css.includes(".chat-ctx-target {"), "phones: the folder always shows");
+});
+
+test("both consoles give the chat what the gateway folders need", () => {
+  const wire = read("ui/agent-wire.js");
+  assert.ok(wire.includes('self.gid = me.device_id'), "本机's gateway id (local console)");
+  assert.equal((wire.match(/\.\.\.targetFacts\(d, /g) || []).length, 2, "reachable / workdirs / files in both device lists");
+  assert.ok(wire.includes('files: listFiles("/api/devices")') && wire.includes('files: listFiles("/api/remote/devices")'));
+  const css = read("ui/ui.css");
+  for (const rule of [".chat-chip-dir.via {", ".chat-dir-dev-head {", ".chat-dir-warn {", ".chat-ctx.warn {"]) assert.ok(css.includes(rule), rule);
+  assert.ok(!css.includes(".chat-ctx-choices") && !css.includes(".chat-ctx-browse"), "the old dialog's rules are gone");
 });

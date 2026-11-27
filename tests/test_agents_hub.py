@@ -296,6 +296,13 @@ async def test_gateway_mode_binds_the_context_device_and_renders_its_fragment(hu
         argv = json.loads(log.read_text().splitlines()[0])["argv"]
         text = json.loads(next(a for a in argv if a.startswith("developer_instructions=")).split("=", 1)[1])
         assert f'workspace_id="{opened["handle"]}"' in text and "/srv/app" in text
+        # the context travels with the run and its session (the chat restores it on reopen)
+        listed = next(r for r in (await handlers["agent_run_list"]({}))["runs"] if r["rid"] == opened["rid"])
+        assert listed["context"] == {"mode": "gateway", "device": "pc-2", "workdir": "/srv/app"}
+        session_id = listed["session_id"]
+        assert hub.meta.get("codex", session_id)["context"] == {"device": "pc-2", "workdir": "/srv/app"}
+        # the folder was the other device's: the runner's base folder is not a "recent" one
+        assert all(item["path"] != str(box["home"] / "proj") for item in (await handlers["agent_dirs"]({}))["recent"])
         await handlers["agent_run_close"]({"rid": opened["rid"]})
     finally:
         os.environ.pop("FAKE_ARGV_LOG", None)
@@ -331,6 +338,19 @@ async def test_gateway_mode_connector_warning_and_codex_auto_approve(hub, box):
         await handlers["agent_run_close"]({"rid": opened["rid"]})
     finally:
         os.environ.pop("FAKE_ARGV_LOG", None)
+
+def test_session_meta_keeps_a_gateway_context(box):
+    from agent_nexus.agents.sessions import SessionMeta
+    meta = SessionMeta(box["root"])
+    meta.set("codex", "s-1", context={"device": "pc-2", "workdir": "/srv/app"}, managed=True)
+    sessions = meta.apply([{"kind": "codex", "id": "s-1", "cwd": "/home/u"}, {"kind": "codex", "id": "s-2"}])
+    assert sessions[0]["context"] == {"mode": "gateway", "device": "pc-2", "workdir": "/srv/app"}
+    assert "context" not in sessions[1]
+    meta.set("codex", "s-1", context=None)  # resumed directly: cleared
+    assert "context" not in meta.get("codex", "s-1")
+    meta.set("codex", "s-1", context={"device": "", "workdir": "/x"})  # incomplete: not stored
+    assert "context" not in meta.get("codex", "s-1")
+
 
 async def test_open_refuses_bad_input_without_leaving_temp_folders(hub, box):
     handlers = hub.handlers()

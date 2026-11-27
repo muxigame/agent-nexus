@@ -1,9 +1,9 @@
 // The downloads page (docs/ui-spec.md §3.7), shared by the console (#/downloads) and the public /downloads.
 import { el, mount, icon, fetchJSON, tokenField, emptyState, errorState, bytes, skeletonRows } from "/ui/ui.js";
-import { ubuntuInstallCommand } from "/console/install-commands.js";
+import { ubuntuInstallCommand, featured } from "/console/install-commands.js";
 
 
-const PLATFORM_ICON = { windows: "monitor", linux: "terminal", macos: "laptop", any: "package" };
+const PLATFORM_ICON = { windows: "monitor", linux: "terminal", macos: "laptop", android: "smartphone", any: "package" };
 
 export async function renderDownloads(target, { inviteHref = "/#/devices?invite=1", publicPage = false } = {}) {
   mount(target, el("div", { class: "page-head" }, el("div", { class: "titles" }, el("h1", {}, "下载客户端"),
@@ -17,7 +17,7 @@ export async function renderDownloads(target, { inviteHref = "/#/devices?invite=
   }
   const items = data.items || [];
   const desktop = items.filter((item) => item.kind === "desktop" && item.latest);
-  const main = desktop.find((item) => item.platform === "windows") || desktop[0];
+  const main = featured(desktop);
   const others = items.filter((item) => item.latest && item !== main);
   const head = target.firstChild;
   const sections = [head];
@@ -55,7 +55,7 @@ export async function renderDownloads(target, { inviteHref = "/#/devices?invite=
   }
   const steps = el("section", { class: "card" }, el("div", { class: "card-head" }, el("h2", {}, "安装之后")),
     el("div", { class: "card-body" }, el("div", { class: "steps" },
-      step("运行安装包", el("span", {}, "Windows：运行 setup.exe，SmartScreen 提示时选择“更多信息 → 仍要运行”。Ubuntu：用上面的一键命令，然后从应用菜单启动（服务器见上面的无桌面命令）。安装后托盘出现 Agent Nexus 图标。")),
+      step("运行安装包", el("span", {}, "Windows：运行 setup.exe，SmartScreen 提示时选择“更多信息 → 仍要运行”。macOS：打开 .dmg，把 Agent Nexus 拖进“应用程序”（M 系列选 Apple 芯片版）；提示无法验证开发者时，到“系统设置 → 隐私与安全性”点“仍要打开”。Android（10 及以上）：在手机上下载 .apk 并允许浏览器安装应用，打开后允许通知。Ubuntu：用上面的一键命令，然后从应用菜单启动（服务器见上面的无桌面命令）。安装后托盘（Android 为通知栏）出现 Agent Nexus 图标；之后的新版本会自动更新（Android 会提示你确认安装）。")),
       step("用邀请码加入网关", el("span", {}, "在 ", el("a", { href: inviteHref }, "设备 → 邀请新设备"), " 生成邀请码，粘贴到客户端的“连接云端”页（或命令行 ", el("span", { class: "mono" }, "anx join <邀请码>"), "）。")),
       step("安装和启用插件", "在客户端“插件”页：标着“未安装”的插件点“安装”，选它的文件夹、Git 地址或压缩包；已安装的打开开关即可启动，需要配置的会提示你填写。"))));
   const otherCard = el("section", { class: "card" }, el("div", { class: "card-head" }, el("h2", {}, "其他平台与链接")),

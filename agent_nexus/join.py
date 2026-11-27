@@ -61,7 +61,8 @@ def hub_url(ingress: Any) -> str | None:
 
 
 def local_hostname() -> str:
-    return (platform.node() or socket.gethostname() or "device").strip()[:255]
+    from .android import device_name
+    return (device_name() or platform.node() or socket.gethostname() or "device").strip()[:255]
 
 
 def device_facts() -> dict:

@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +34,8 @@ def _display_manager() -> bool:
 
 
 def form() -> str:
+    if sys.platform == "android":  # the Android app (phone, tablet, headset)
+        return "mobile"
     if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")) and not _display_manager():
         return "server"
     if any(Path("/sys/class/power_supply").glob("BAT*")):

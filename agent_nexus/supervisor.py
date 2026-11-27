@@ -414,6 +414,10 @@ class Supervisor:
                 accounts.hand_over(account, self.cfg.root / "plugin-data" / name, Path(spec.dir) / "logs",
                                    self.cfg.root / "secrets" / name)
                 accounts.traversable(self.cfg.root / "secrets")
+            if sys.platform == "android":
+                # No uv on Android: the app's interpreter with the plugin's preinstalled packages.
+                from . import android
+                argv, env = android.plugin_command(argv, cwd, env)
             exe = resolve_executable(argv[0], env, self.cfg.root)
             if not Path(exe).exists():
                 raise SupervisorError(f"command not found: {argv[0]}")

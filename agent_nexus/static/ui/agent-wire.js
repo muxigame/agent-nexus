@@ -49,6 +49,20 @@ function deviceHint(device, locked) {
   return "";
 }
 
+/** What the chat's 目录 menu needs to offer a device's folders as a gateway context (§1, mode gateway):
+ *  reachable = online on the gateway (even without agents/1: use_device works on any device), its registered
+ *  workdirs, and whether its folders can be listed (files/1). */
+function targetFacts(d, locked) {
+  return { reachable: !!d.online && !d.revoked && !locked, workdirs: Array.isArray(d.workdirs) ? d.workdirs.filter((w) => w && w.path) : [],
+    files: Array.isArray(d.features) ? d.features.includes("files/1") : !!d.online };
+}
+
+/** A files/1 listing ({path, parent, entries, roots}) of another device's folder; throws on failure. */
+const listFiles = (base) => async (device, path) => {
+  if (!device) throw new Error("先选择一台设备");
+  return fetchJSON(`${base}/${enc(device)}/files?path=${enc(path || "")}`, { quiet: true });
+};
+
 export function cloudAgentApi() {
   return {
     call: (op, params, device) => (device
@@ -58,9 +72,10 @@ export function cloudAgentApi() {
       const list = await fetchJSON("/api/devices", { quiet: true });
       return (list.devices || []).filter((d) => !d.revoked).map((d) => {
         const hint = deviceHint(d, false);
-        return { id: d.device_id, name: d.display_name || d.device_id, online: !hint, hint, os: d.os_family || "" };
+        return { id: d.device_id, name: d.display_name || d.device_id, online: !hint, hint, os: d.os_family || "", ...targetFacts(d, false) };
       });
     },
+    files: listFiles("/api/devices"),
     ...inboxCalls(),
   };
 }
@@ -85,14 +100,19 @@ export function localAgentApi() {
       if (locked) note = "这台设备已锁定，解锁后才能用其他设备";
       const devices = list.devices || [];
       const me = devices.find((d) => d.self);
-      if (me) self.name = me.display_name || self.name;
+      if (me) {
+        self.name = me.display_name || self.name;
+        self.gid = me.device_id;   // 本机's id on the gateway: a run on another device can work on 本机's folders
+        self.workdirs = targetFacts(me, false).workdirs;
+      }
       const others = devices.filter((d) => !d.self && !d.revoked).map((d) => {
         const hint = deviceHint(d, locked);
-        return { id: d.device_id, name: d.display_name || d.device_id, online: !hint, hint };
+        return { id: d.device_id, name: d.display_name || d.device_id, online: !hint, hint, ...targetFacts(d, locked) };
       });
       return [self, ...others];
     },
     devicesNote: () => note,
+    files: listFiles("/api/remote/devices"),
     ...inboxCalls(),
   };
 }
