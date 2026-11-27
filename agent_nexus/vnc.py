@@ -677,7 +677,10 @@ class Session:
         self.raised_at = 0.0
         self.reopened_at = 0.0
         self.last_sent = 0.0
+        self.last_capture = 0.0
         self.changed_at = 0.0
+        #: the next picture, captured while the current one is encoded and sent: (started at, future)
+        self.prefetch: tuple[float, asyncio.Future] | None = None
 
     async def run(self) -> None:
         loop = asyncio.get_running_loop()
@@ -835,7 +838,9 @@ class Session:
         await self.pending.wait()
         await self.flow.wait()
         self._control()
-        wait = self._interval() - (time.monotonic() - self.last_sent)
+        # The interval counts from the last capture: a capture (~25 ms with GDI) and the encode are part
+        # of it, not added to it.
+        wait = self._interval() - (time.monotonic() - self.last_capture)
         if wait > 0:
             await asyncio.sleep(wait)
         if self.relayout or (self.screen.width, self.screen.height) != self._screen_size:
@@ -909,6 +914,14 @@ class Session:
         while True:
             try:
                 if raw:
+                    prefetch, self.prefetch = self.prefetch, None
+                    if prefetch is not None:
+                        started, future = prefetch
+                        picture = await future
+                        if time.monotonic() - started <= max(0.05, 2 * self._interval()):
+                            self.last_capture = started
+                            return picture  # fresh enough: captured while the last frame was encoded
+                    self.last_capture = time.monotonic()
                     return await loop.run_in_executor(self.capture, self.screen.grab_raw)
                 image = await loop.run_in_executor(self.capture, self.screen.grab)
                 if image.size != self.fb:
@@ -917,6 +930,13 @@ class Session:
                 return image
             except Exception as exc:  # lock screen / UAC (secure desktop), display change
                 await self._recapture(exc)
+
+    def _prefetch(self) -> None:
+        """Start capturing the next picture now (the capture thread is idle while this one is encoded)."""
+        if self.prefetch is None:
+            future = asyncio.get_running_loop().run_in_executor(self.capture, self.screen.grab_raw)
+            future.add_done_callback(lambda f: f.cancelled() or f.exception())
+            self.prefetch = (time.monotonic(), future)
 
     def _idle_poll(self) -> float:
         """Look again soon after a change; less often on a still screen (a capture costs ~20 ms of CPU)."""
@@ -1005,6 +1025,8 @@ class Session:
         self.pending.clear()
         self.full = False
         self.last_raw = raw
+        if changed:
+            self._prefetch()  # the screen is moving: the next picture is likely needed soon
 
         try:
             data = await loop.run_in_executor(None, encoder.encode, raw, size, keyframe)
@@ -1037,6 +1059,7 @@ class Session:
             self.announced.add("capture")
             log.warning("remote desktop: screen capture failed (%s); retrying", exc)
         await asyncio.sleep(0.5)
+        self.prefetch = None
         loop = asyncio.get_running_loop()
         with contextlib.suppress(Exception):
             await loop.run_in_executor(self.capture, self.screen.close)
