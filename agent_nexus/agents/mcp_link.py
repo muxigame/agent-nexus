@@ -442,6 +442,8 @@ LABELS = {
     "local": "已接入（{use}）",
     "gateway_config": "已通过云端网关接入（配置项 {use}），不重复添加",
     "gateway_account": "已通过云端网关接入（{account_label}），不重复添加",
+    "gateway_account_stale": "已通过云端网关接入（{account_label}），不重复添加；但它的工具列表过时（缺少 device_list、"
+                             "file_copy 等新工具），请在{vendor}的连接器设置里刷新它",
     "both": "已接入（{use}）；另有 {also}，对话里只用 {use}",
     "none": "未接入",
     "unknown": "无法确定",
@@ -456,13 +458,16 @@ def label(view: dict) -> str:
     state = "user_removed" if view.get("entry") == "user_removed" and view["state"] == "none" else view["state"]
     if view.get("too_old"):
         state = "too_old"
+    elif state == "gateway_account" and view.get("stale"):
+        state = "gateway_account_stale"
     use = view.get("use") or ""
     account_label = (f"Claude 账户连接器 {use.removeprefix('claude.ai ')}" if view.get("kind") == "claude"
                      else f"ChatGPT 账户连接器 {use}" if view.get("kind") == "codex" else use)
     if view.get("source") == "user":
         account_label = "你确认已连接"
     return LABELS.get(state, state).format(use=use, also="、".join(view.get("also") or []),
-                                           account_label=account_label, version=view.get("cli_version") or "")
+                                           account_label=account_label, version=view.get("cli_version") or "",
+                                           vendor="Claude" if view.get("kind") == "claude" else " ChatGPT ")
 
 
 def version_ok(kind: str, version: str | None) -> bool:

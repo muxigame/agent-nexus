@@ -92,7 +92,7 @@ export async function mcpCard() {
     const rows = (data.clis || []).map((cli) => el("div", { class: "list-item" },
       el("div", { class: "stack grow", style: { gap: 0 } },
         el("span", { class: "title" }, `${KIND_LABEL[cli.kind] || cli.kind}`, cli.account ? el("span", { class: "faint xs" }, ` · ${cli.account}`) : null),
-        el("span", { class: "sub" }, el("span", { class: `pill ${CLI_TONE[cli.state] || "neutral"}` }, cli.label || cli.state)),
+        el("span", { class: "sub" }, el("span", { class: `pill ${cli.stale ? "warn" : CLI_TONE[cli.state] || "neutral"}` }, cli.label || cli.state)),
         cli.backup ? el("span", { class: "faint xs mono truncate", title: cli.backup }, `备份：${cli.backup}`) : null,
         cli.entry === "user_removed" && markable(cli)
           ? el("span", { class: "faint xs" }, "账户里已经有 Agent Nexus 云端连接器？点“我已连接”，对话里就不会再临时接入本机 MCP。") : null),

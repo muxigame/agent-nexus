@@ -64,6 +64,20 @@ def tool_group(name: str) -> tuple[str, str]:
     return "", name
 
 
+#: Tools every current gateway lists: a connector without them was registered with an older gateway, and the
+#: vendor (ChatGPT) still serves that old tool list until the owner refreshes the connector.
+CURRENT_TOOLS = ("device_list", "file_copy")
+
+
+def stale_groups(names: list[str]) -> list[str]:
+    """The Agent Nexus connectors among ``names`` whose tool list is out of date."""
+    groups: dict[str, set[str]] = {}
+    for name in names:
+        server, tool = tool_group(str(name))
+        groups.setdefault(server, set()).add(tool)
+    return [g for g in nexus_groups(names) if not all(t in groups.get(g, set()) for t in CURRENT_TOOLS)]
+
+
 def nexus_groups(names: list[str]) -> list[str]:
     """The connectors among ``names`` (tool names) that carry the gateway's signature ("" = ungrouped tools)."""
     groups: dict[str, set[str]] = {}
@@ -286,8 +300,9 @@ def probe_claude(binary: str, env: dict, run_as: dict | None, gateway_host: str)
     return {"state": "present" if connectors else "absent", "connectors": connectors}
 
 
-def _codex_scan(value: Any, gateway_host: str) -> list[str]:
-    """Names of Agent Nexus apps / servers anywhere in an app-server answer."""
+def _codex_scan(value: Any, gateway_host: str, stale: set | None = None) -> list[str]:
+    """Names of Agent Nexus apps / servers anywhere in an app-server answer (``stale`` collects the ones whose
+    tool list is out of date)."""
     host = (gateway_host or "").lower()
     names: list[str] = []
     tools: set[str] = set()
@@ -307,8 +322,12 @@ def _codex_scan(value: Any, gateway_host: str) -> list[str]:
                 if key == "tools" and isinstance(child, (dict, list)):
                     listed = child.keys() if isinstance(child, dict) else [
                         t.get("name") for t in child if isinstance(t, dict)]
-                    for group in nexus_groups([str(t) for t in listed if t]):
+                    found = [str(t) for t in listed if t]
+                    old_ones = stale_groups(found)
+                    for group in nexus_groups(found):
                         names.append(group or label or owner or "codex_apps")
+                        if stale is not None and group in old_ones:
+                            stale.add(group or label or owner or "codex_apps")
                 walk(child, label or owner)
         elif isinstance(node, list):
             for item in node:
@@ -403,9 +422,10 @@ def probe_codex(binary: str, env: dict, run_as: dict | None, gateway_host: str,
     if not results:
         return {"state": "unknown", "connectors": [],
                 "error": "codex app-server 没有回答" if 1 not in answers else "codex app-server 不支持查询连接器"}
-    connectors = _codex_scan(results, gateway_host)
+    stale: set = set()
+    connectors = _codex_scan(results, gateway_host, stale)
     return {"state": "present" if connectors else "absent",
-            "connectors": [{"name": name, "prefix": ""} for name in connectors]}
+            "connectors": [{"name": name, "prefix": "", "stale": name in stale} for name in connectors]}
 
 
 # -- the cache ---------------------------------------------------------------------------------------------------
@@ -538,6 +558,7 @@ def resolve(kind: str, *, account: str | None, home: Path, env: dict, gateway_ho
     if use is not None:
         base.update(use=use[0], source=use[1])
         hit = next((h for h in account_hits if h.get("name") == use[0]), None)
+        base["stale"] = bool(use[2] == "account" and (hit or {}).get("stale"))
         base["tool_prefix"] = (hit or {}).get("prefix") or tool_prefix(kind, use[0])
         if kind == "codex" and use[2] == "account" and use[0] in ("codex_apps", "Agent Nexus"):
             base["tool_prefix"] = "codex_apps"  # the app's own name is not known: only the server that carries it

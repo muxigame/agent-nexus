@@ -1282,9 +1282,10 @@ details[open] > summary .chat-caret { transform: rotate(90deg); }
 
 /* ---------------------------------------------------------------- 对话 page, phase 2 (ui/chat-page.js, docs/agent-chat.md §16) */
 /* The chat fills the content area: viewport − top bar (− the tab bar on phones); the page itself does not scroll. */
-.page.page-chat { padding-top: var(--sp-2); padding-bottom: var(--sp-4); gap: 0; }
+/* edge to edge: the session list meets the left edge and the conversation's scroll bar the right edge, at any width */
+.page.page-chat { max-width: none; padding: 0; gap: 0; }
 .page-chat .chat-page { display: contents; }
-.page-chat .chat { --chat-h: calc(100dvh - var(--topbar-h) - var(--sp-2) - var(--sp-4)); min-height: 420px; }
+.page-chat .chat { --chat-h: calc(100dvh - var(--topbar-h)); min-height: 420px; }
 @media (max-width: 768px) {
   .page.page-chat { padding: 0 0 calc(var(--tabbar-h) + env(safe-area-inset-bottom, 0px)); }
   .page-chat .chat { --chat-h: calc(100dvh - 52px - var(--tabbar-h) - env(safe-area-inset-bottom, 0px)); min-height: 360px; margin-inline: 0; }
@@ -1309,6 +1310,14 @@ details[open] > summary .chat-caret { transform: rotate(90deg); }
 .chat-usage-bar { stroke: var(--text-2); stroke-linecap: round; transition: stroke-dasharray var(--dur) var(--ease); }
 .chat-usage.warn .chat-usage-bar { stroke: var(--warn); }
 .chat-usage.bad .chat-usage-bar { stroke: var(--bad); }
+.chat-usage-pop { width: 240px; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+.chat-usage-pop-head { display: flex; align-items: baseline; justify-content: space-between; font-size: var(--fs-sm); color: var(--text-2); }
+.chat-usage-pop-head strong { color: var(--text); font-variant-numeric: tabular-nums; }
+.chat-usage-pop-bar { height: 4px; border-radius: 2px; background: var(--surface-3); overflow: hidden; }
+.chat-usage-pop-bar > i { display: block; height: 100%; background: var(--text-2); border-radius: 2px; }
+.chat-usage-pop-bar.warn > i { background: var(--warn); }
+.chat-usage-pop-bar.bad > i { background: var(--bad); }
+.chat-usage-pop-text { margin: 0; font-size: var(--fs-xs); color: var(--text-3); line-height: 1.5; }
 .chat-usage-num { font: 500 11px/1 var(--font-mono); font-variant-numeric: tabular-nums; color: var(--text-3); }
 
 /* §16.6: level "notice" (a CLI's own config hints) is one grey line, expandable; "warn" is yellow, no level red */

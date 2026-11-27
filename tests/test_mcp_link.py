@@ -342,3 +342,15 @@ def test_gateway_connectors_are_known_by_their_tools_not_their_name_or_address()
              "lookalike.device_list", "lookalike.use_device",                                 # no federation tool: no
              "github.search"]
     assert sorted(mcp_probe.nexus_groups(names)) == ["anything", "gw", "workspace"]
+
+
+def test_an_account_connector_with_an_old_tool_list_is_used_but_marked_stale():
+    stale: set = set()
+    found = mcp_probe._codex_scan({"data": [{"name": "codex_apps", "tools": {
+        "workspace.workspace_list": {}, "workspace.set_workspace": {}, "workspace.mcplist": {},     # as on the work PC
+        "fresh.device_list": {}, "fresh.use_device": {}, "fresh.file_copy": {}, "fresh.toolsearch": {}}}]}, "", stale)
+    assert found == ["workspace", "fresh"] and stale == {"workspace"}
+    from agent_nexus.agents import mcp_link
+    view = {"kind": "codex", "state": "gateway_account", "use": "workspace", "stale": True}
+    assert "过时" in mcp_link.label(view) and "ChatGPT" in mcp_link.label(view)
+    assert "过时" not in mcp_link.label({**view, "stale": False})

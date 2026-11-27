@@ -163,6 +163,9 @@ export function nexusMcpNote(info) {
   if (!nx) { // an older device: only its config-file check
     return info.gateway_mcp === false ? { text: "未检测到网关连接器", down: "未检测到网关连接器", title: "在运行设备上添加网关 MCP（网关控制台 → 设置 → 在 AI 客户端中添加 Agent Nexus）" } : null;
   }
+  if (nx.state === "gateway_account" && nx.stale) {
+    return { text: "Agent Nexus 连接器过时", down: "连接器过时", title: nx.label || "账户里的 Agent Nexus 连接器工具列表过时：到它的连接器设置里刷新" };
+  }
   if (["gateway_config", "gateway_account", "both", "unknown", "name_taken"].includes(nx.state)) return null;
   const down = NEXUS_MCP_DOWN[nx.local_state] || (nx.state === "unsupported" && !nx.attach ? "这个 CLI 接不了" : "");
   if (!down) return null;
@@ -202,7 +205,8 @@ function usageRing(view) {
   track.setAttribute("class", "chat-usage-track");
   bar.setAttribute("class", "chat-usage-bar");
   bar.setAttribute("stroke-dasharray", `${(Math.min(1, view.ratio) * c).toFixed(2)} ${c.toFixed(2)}`);
-  bar.setAttribute("transform", "rotate(-90 9 9)");
+  // starts at 12 o'clock and fills counter-clockwise (mirrored), like the ring of the CLIs' own apps
+  bar.setAttribute("transform", "translate(18 0) scale(-1 1) rotate(-90 9 9)");
   svg.append(track, bar);
   return svg;
 }
@@ -219,7 +223,7 @@ if (typeof document !== "undefined") {   // (the module also loads without a DOM
   document.addEventListener("pointerdown", () => { keyboardUse = false; }, true);
 }
 
-function placePop(panel, anchor, align) {
+function placePop(panel, anchor, align, above = false) {
   const rect = anchor.getBoundingClientRect ? anchor.getBoundingClientRect() : { left: anchor.x, right: anchor.x, top: anchor.y, bottom: anchor.y };
   const vw = window.innerWidth, vh = window.innerHeight;
   panel.style.maxWidth = `${vw - 16}px`;
@@ -227,16 +231,16 @@ function placePop(panel, anchor, align) {
   let left = align === "end" ? rect.right - w : rect.left;
   left = Math.max(8, Math.min(left, vw - w - 8));
   let top = rect.bottom + 6;
-  if (top + h > vh - 8 && rect.top - h - 6 > 8) top = rect.top - h - 6;
+  if ((above || top + h > vh - 8) && rect.top - h - 6 > 8) top = rect.top - h - 6;
   top = Math.max(8, Math.min(top, vh - h - 8));
   Object.assign(panel.style, { position: "fixed", left: `${Math.round(left)}px`, top: `${Math.round(top)}px` });
 }
 
-function popover(anchor, content, { align = "start", role = "dialog", label = "", cls = "", onClose = null } = {}) {
+function popover(anchor, content, { align = "start", role = "dialog", label = "", cls = "", onClose = null, above = false } = {}) {
   closePop();
   const panel = el("div", { class: `menu chat-pop ${cls}`, role, "aria-label": label || null, tabindex: "-1" }, content);
   document.body.append(panel);
-  placePop(panel, anchor, align);
+  placePop(panel, anchor, align, above);
   const isEl = anchor instanceof Element;
   const outside = (event) => { if (!panel.contains(event.target) && !(isEl && anchor.contains(event.target))) close(); };
   const onKey = (event) => {
@@ -265,7 +269,7 @@ function popover(anchor, content, { align = "start", role = "dialog", label = ""
     if (openPop?.panel === panel) openPop = null;
     onClose?.();
   }
-  openPop = { close, panel, reposition: () => placePop(panel, anchor, align) };
+  openPop = { close, panel, reposition: () => placePop(panel, anchor, align, above) };
   const viaKeyboard = keyboardUse;
   requestAnimationFrame(() => {
     const first = viaKeyboard && (panel.querySelector("[aria-checked='true'], [aria-selected='true']") || panel.querySelector("button:not(:disabled), input"));
@@ -445,9 +449,21 @@ export function mountChat(container, api, opts = {}) {
   const stopBtn = el("button", { class: "btn chat-stop", type: "button", hidden: true, "aria-label": "停止", title: "停止这一轮", onclick: () => stop() }, icon("square", { size: 13 }), el("span", { class: "chat-stop-text" }, "停止"));
   const composerNote = el("div", { class: "chat-note", hidden: true });
   // a button: phones show no title tooltip, so a tap shows the figures
-  const usageNode = el("button", { class: "chat-usage", type: "button", hidden: true, onclick: () => {
+  let usageClosedAt = 0;
+  // a small floating layer next to the ring (no backdrop): the composer and its send button stay usable
+  const usageNode = el("button", { class: "chat-usage", type: "button", hidden: true, "aria-haspopup": "dialog", onclick: (event) => {
+    if (openPop?.panel?.classList.contains("chat-usage-pop")) { closePop(); return; }
+    if (Date.now() - usageClosedAt < 400) return; // this click's pointerdown just closed it: a toggle
     const view = usageView(S.usage);
-    if (view) toast(`上下文${view.title}`, { type: "info", timeout: 5000 });
+    if (!view) return;
+    const pct = view.pct === null ? null : Math.min(100, view.pct);
+    // placed above the whole composer, right-aligned with the ring: it never covers the input or the send button
+    const ring = event.currentTarget.getBoundingClientRect();
+    popover({ x: ring.right, y: composer.getBoundingClientRect().top }, [
+      el("div", { class: "chat-usage-pop-head" }, el("span", {}, "上下文"), pct === null ? null : el("strong", {}, `${pct}%`)),
+      pct === null ? null : el("div", { class: `chat-usage-pop-bar ${view.tone}` }, el("i", { style: `width:${pct}%` })),
+      el("p", { class: "chat-usage-pop-text" }, view.title),
+    ], { align: "end", label: "上下文占用", cls: "chat-usage-pop", above: true, onClose: () => { usageClosedAt = Date.now(); } });
   } });
   const composer = el("div", { class: "chat-composer" },
     composerNote,
