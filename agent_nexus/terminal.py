@@ -22,6 +22,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass, field
+from collections import deque
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -381,6 +382,8 @@ class _Session:
     #: numbered writes (term/2): the next number to apply, and the turn they wait for
     next_write: int = 0
     turn: asyncio.Condition = field(default_factory=asyncio.Condition)
+    #: reads waiting for output, oldest first (only the oldest takes it)
+    readers: deque = field(default_factory=deque)
 
 
 def available() -> bool:
@@ -562,17 +565,27 @@ class Terminals:
         session = self._session(params)
         wait = max(0.0, min(float(params.get("wait") or 0), MAX_WAIT_S))
         deadline = time.monotonic() + wait
-        # Several reads may wait at once (the gateway keeps one waiting while it forwards the last
-        # answer): the one that finds the output empty after a wake waits on instead of answering empty.
-        while not session.buffer and not session.exited:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            session.event.clear()
-            try:
-                await asyncio.wait_for(session.event.wait(), remaining)
-            except asyncio.TimeoutError:
-                break
+        # Several reads may wait at once (a term/2 gateway keeps one waiting while it forwards the last
+        # answer, and forwards the answers in the order it asked). Only the oldest waiting read takes
+        # output -- a newer one taking it first would put it out of order, or hold it back a whole poll.
+        me = object()
+        session.readers.append(me)
+        try:
+            while not (session.readers[0] is me and (session.buffer or session.exited)):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                session.event.clear()
+                try:
+                    await asyncio.wait_for(session.event.wait(), remaining)
+                except asyncio.TimeoutError:
+                    break
+            if session.readers[0] is not me:  # timed out behind an older read: nothing for this one
+                return {"data": "", "dropped": 0}
+        finally:
+            session.readers.remove(me)
+            if session.readers:
+                session.event.set()  # the next read in line looks again
         chunk = bytes(session.buffer[:MAX_READ_BYTES])
         del session.buffer[:len(chunk)]
         dropped, session.dropped = session.dropped, 0

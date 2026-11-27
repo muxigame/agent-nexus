@@ -300,6 +300,10 @@ class H264Encoder:
         context.time_base = __import__("fractions").Fraction(1, 1000)
         context.framerate = 60
         context.bit_rate = self.bitrate
+        if name == "libx264":
+            # x264 takes a new rate at run time only with VBV on from the start (plain ABR ignores it)
+            context.max_bit_rate = self.bitrate
+            context.rc_buffer_size = max(1, self.bitrate // 2)
         # no periodic key frames: the stream is reliable, a viewer that needs one asks (a full request)
         context.gop_size = 100000
         context.max_b_frames = 0
@@ -345,6 +349,9 @@ class H264Encoder:
             return False
         self.bitrate = bitrate
         self.context.bit_rate = bitrate
+        if self.name == "libx264":
+            self.context.max_bit_rate = bitrate
+            self.context.rc_buffer_size = max(1, bitrate // 2)
         return True
 
     def close(self) -> None:
@@ -681,6 +688,8 @@ class Session:
         self.changed_at = 0.0
         #: the next picture, captured while the current one is encoded and sent: (started at, future)
         self.prefetch: tuple[float, asyncio.Future] | None = None
+        #: how long a capture takes (moving average): a prefetch starts that much before the frame is due
+        self.capture_cost = 0.02
 
     async def run(self) -> None:
         loop = asyncio.get_running_loop()
@@ -689,7 +698,8 @@ class Session:
         self.fb = encoded_size(self.screen.width, self.screen.height, self.quality)
         if h264_available()[0]:
             # Opening a hardware encoder takes a few hundred ms: meanwhile the handshake runs.
-            self.warm = loop.run_in_executor(None, H264Encoder, *self.fb, self._bitrate())
+            # at the start rate (a viewer of this release answers fences); one without them gets a reopen
+            self.warm = loop.run_in_executor(None, H264Encoder, *self.fb, START_BITRATE)
             self.warm.add_done_callback(lambda f: f.cancelled() or f.exception())
         try:
             await self._handshake()
@@ -709,6 +719,8 @@ class Session:
                     with contextlib.suppress(BaseException):
                         await task
         finally:
+            if self.prefetch is not None:
+                self.prefetch[1].cancel()
             if self.warm is not None:
                 self.warm.add_done_callback(lambda f: f.cancelled() or f.exception() or f.result().close())
             if self.encoder is not None:
@@ -891,8 +903,12 @@ class Session:
             return
         if encoder.set_bitrate(self._bitrate()):
             return
+        # A fixed-rate encoder (Media Foundation, Quick Sync, AMF, VAAPI) has to be reopened -- a hitch and a
+        # key frame each time: promptly when the link got much thinner, rarely to climb.
+        lower = self._bitrate() < encoder.bitrate
         change = max(self._bitrate(), encoder.bitrate) / max(1, min(self._bitrate(), encoder.bitrate))
-        if change >= 1.5 and now - self.reopened_at > 5.0:
+        if (lower and change >= 1.5 and now - self.reopened_at > 5.0) or (
+                not lower and change >= 2.0 and now - self.reopened_at > 15.0):
             encoder.close()
             self.encoder = None  # reopened at the new rate (with a key frame) on the next frame
             self.reopened_at = now
@@ -917,13 +933,14 @@ class Session:
                 if raw:
                     prefetch, self.prefetch = self.prefetch, None
                     if prefetch is not None:
-                        started, future = prefetch
-                        picture = await future
+                        started, picture = await prefetch[1]
                         if time.monotonic() - started <= max(0.05, 2 * self._interval()):
                             self.last_capture = started
                             return picture  # fresh enough: captured while the last frame was encoded
                     self.last_capture = time.monotonic()
-                    return await loop.run_in_executor(self.capture, self.screen.grab_raw)
+                    picture = await loop.run_in_executor(self.capture, self.screen.grab_raw)
+                    self.capture_cost = 0.8 * self.capture_cost + 0.2 * (time.monotonic() - self.last_capture)
+                    return picture
                 image = await loop.run_in_executor(self.capture, self.screen.grab)
                 if image.size != self.fb:
                     from PIL import Image
@@ -933,11 +950,25 @@ class Session:
                 await self._recapture(exc)
 
     def _prefetch(self) -> None:
-        """Start capturing the next picture now (the capture thread is idle while this one is encoded)."""
-        if self.prefetch is None:
-            future = asyncio.get_running_loop().run_in_executor(self.capture, self.screen.grab_raw)
-            future.add_done_callback(lambda f: f.cancelled() or f.exception())
-            self.prefetch = (time.monotonic(), future)
+        """Capture the next picture while this one is encoded and sent, timed for the next frame
+        (started at once it would pace from a capture a few ms old: frames in pairs, twice the CPU)."""
+        if self.prefetch is not None:
+            return
+        slot = self.last_capture + self._interval()  # when the next frame is due
+        due = slot - self.capture_cost
+
+        async def later():
+            delay = due - time.monotonic()
+            if delay > 0:
+                await asyncio.sleep(delay)
+            started = time.monotonic()
+            picture = await asyncio.get_running_loop().run_in_executor(self.capture, self.screen.grab_raw)
+            # it counts as the frame of its slot: started early on purpose, by about one capture
+            return max(started, slot), picture
+
+        task = asyncio.ensure_future(later())
+        task.add_done_callback(lambda f: f.cancelled() or f.exception())
+        self.prefetch = (due, task)
 
     def _idle_poll(self) -> float:
         """Look again soon after a change; less often on a still screen (a capture costs ~20 ms of CPU)."""
@@ -955,6 +986,9 @@ class Session:
                 box = await asyncio.to_thread(lambda: ImageChops.difference(image, self.previous).getbbox())
             if box:
                 break
+            if self.relayout:
+                self.pending.set()
+                return
             await asyncio.sleep(self._idle_poll())
         self.changed_at = time.monotonic()
         self.pending.clear()
@@ -983,10 +1017,11 @@ class Session:
                 encoder.close()
                 encoder = None
         try:
+            if encoder is not None and encoder.bitrate != self._bitrate() and not encoder.set_bitrate(self._bitrate()):
+                encoder.close()  # a fixed-rate encoder opened at another rate
+                encoder = None
             if encoder is None:
                 encoder = await loop.run_in_executor(None, H264Encoder, *self.fb, self._bitrate())
-            elif encoder.bitrate != self._bitrate():
-                encoder.set_bitrate(self._bitrate())
         except Exception as exc:
             log.warning("remote desktop: H.264 unavailable (%s); using JPEG", exc)
             self.encoder_failed = True
@@ -1009,6 +1044,8 @@ class Session:
             if size != (self.screen.width, self.screen.height):
                 self.screen.width, self.screen.height = size
                 return  # the next _pace() lays the new size out
+            if self.relayout:
+                return  # a new quality: the next _pace() applies it, even on a still screen
             cursor = await self._cursor_rect()
             if self.full or raw != self.last_raw or self.settle > 0:
                 break
@@ -1035,6 +1072,8 @@ class Session:
         except Exception as exc:
             self.encode_failures += 1
             log.warning("remote desktop: %s failed (%s)", encoder.name, exc)
+            if H264Encoder.working == encoder.name:
+                H264Encoder.working = None  # the next encoder probes every candidate again
             encoder.close()
             self.encoder = None  # a fresh encoder (and key frame) next time
             if self.encode_failures >= 3:
@@ -1060,7 +1099,9 @@ class Session:
             self.announced.add("capture")
             log.warning("remote desktop: screen capture failed (%s); retrying", exc)
         await asyncio.sleep(0.5)
-        self.prefetch = None
+        if self.prefetch is not None:
+            self.prefetch[1].cancel()
+            self.prefetch = None
         loop = asyncio.get_running_loop()
         with contextlib.suppress(Exception):
             await loop.run_in_executor(self.capture, self.screen.close)

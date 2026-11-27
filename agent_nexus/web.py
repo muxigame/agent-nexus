@@ -1357,7 +1357,7 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
             hub.extra_features = (*hub.extra_features, RELAY_FEATURE)
             log.info("relay: forwarding other devices' streams (relay.mode = on)")
         if desktop_service is not None:
-            hub.extra_features = (*hub.extra_features, "desktop/1")
+            hub.extra_features = (*hub.extra_features, "desktop/1", "desktop/2")
         p2p_state["hub"] = remote_hub
         hub.handlers.update(remote_hub.handlers())
         hub.extra_features = (*hub.extra_features, REMOTE_HUB_FEATURE)

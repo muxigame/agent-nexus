@@ -255,3 +255,144 @@ def test_windows_system_update_picks_the_installer_and_schedules_it(tmp_path, mo
     assert create[create.index("/RU") + 1] == "SYSTEM"
     assert "/S /AllUsers /UPDATE" in create[create.index("/TR") + 1]
     assert any("/Run" in c for c in calls)
+
+
+# --------------------------------------------------------------------------- rate, pacing, quality
+
+def test_libx264_follows_a_new_bit_rate(monkeypatch):
+    """x264 takes a new rate at run time only with VBV on from the start."""
+    pytest.importorskip("av")
+    import os
+    import time as _time
+
+    from agent_nexus import vnc
+    monkeypatch.setenv("ANX_DESKTOP_ENCODER", "libx264")
+    width, height = 320, 240
+
+    def rate(encoder, seconds=1.2):
+        start, total = _time.monotonic(), 0
+        while _time.monotonic() - start < seconds:
+            total += len(encoder.encode(os.urandom(width * height * 4), (width, height)))
+            _time.sleep(1 / 30)
+        return total * 8 / (_time.monotonic() - start)
+
+    encoder = vnc.H264Encoder(width, height, 4_000_000)
+    rate(encoder, 0.6)
+    high = rate(encoder)
+    assert encoder.set_bitrate(500_000)
+    rate(encoder, 0.6)
+    low = rate(encoder)
+    assert low < high / 3, (high, low)
+    encoder.close()
+
+
+class NoisyScreen(FakeScreen):
+    """Changes on every capture, instantly."""
+
+    def __init__(self):
+        self.n = 0
+
+    def grab_raw(self):
+        self.n += 1
+        return bytes([self.n % 256]) * (64 * 48 * 4), (64, 48)
+
+    def cursor(self, known=None):
+        return None
+
+
+def _push_session(monkeypatch, screen):
+    from agent_nexus import vnc
+    monkeypatch.setattr(vnc, "Screen", screen)
+    monkeypatch.setattr(vnc, "make_input", lambda screen: None)
+    monkeypatch.setattr(vnc, "H264Encoder", FakeEncoder)
+    monkeypatch.setattr(vnc, "h264_available", lambda: (True, ""))
+    return vnc
+
+
+async def _frames(reader, seconds):
+    """Count FramebufferUpdates for ``seconds`` (answering nothing else)."""
+    import time as _time
+    count, end = 0, _time.monotonic() + seconds
+    while _time.monotonic() < end:
+        try:
+            head = await asyncio.wait_for(reader.readexactly(4), max(0.01, end - _time.monotonic()))
+        except asyncio.TimeoutError:
+            break
+        for _ in range(struct.unpack(">H", head[2:])[0]):
+            _x, _y, w, h, encoding = struct.unpack(">HHHHi", await reader.readexactly(12))
+            if encoding == 50:
+                length, _flags = struct.unpack(">II", await reader.readexactly(8))
+                await reader.readexactly(length)
+        count += 1
+    return count
+
+
+def test_frames_keep_to_the_frame_interval_with_the_prefetch(monkeypatch):
+    vnc = _push_session(monkeypatch, NoisyScreen)
+    monkeypatch.setattr(vnc, "FRAME_INTERVAL", 1 / 20)
+
+    async def scenario():
+        async def serve(reader, writer):
+            with pytest.raises((asyncio.IncompleteReadError, ConnectionError)):
+                await vnc.Session(reader, writer, "host").run()
+
+        server = await asyncio.start_server(serve, "127.0.0.1", 0)
+        reader, writer = await asyncio.open_connection("127.0.0.1", server.sockets[0].getsockname()[1])
+        await _handshake(reader, writer)
+        encodings = [vnc.H264, vnc.CONTINUOUS_UPDATES, vnc.QUALITY_BASE + 9]  # no fences: the cap, 60 fps rule
+        writer.write(struct.pack(">BxH", 2, len(encodings)) + struct.pack(f">{len(encodings)}i", *encodings))
+        assert await asyncio.wait_for(reader.readexactly(1), 5) == b"\x96"
+        writer.write(struct.pack(">BBHHHH", 150, 1, 0, 0, 64, 48))
+        await _frames(reader, 0.3)
+        count = await _frames(reader, 1.0)
+        assert 12 <= count <= 23, count  # about 20 a second, not twice that
+        writer.close()
+        server.close()
+
+    asyncio.run(scenario())
+
+
+def test_a_new_quality_takes_effect_on_a_still_screen(monkeypatch):
+    class Big(FakeScreen):
+        width, height = 2560, 1440
+
+        def grab_raw(self):
+            return b"\x10" * (2560 * 1440 * 4), (2560, 1440)
+
+        def cursor(self, known=None):
+            return None
+
+    vnc = _push_session(monkeypatch, Big)
+
+    async def scenario():
+        async def serve(reader, writer):
+            with pytest.raises((asyncio.IncompleteReadError, ConnectionError)):
+                await vnc.Session(reader, writer, "host").run()
+
+        server = await asyncio.start_server(serve, "127.0.0.1", 0)
+        reader, writer = await asyncio.open_connection("127.0.0.1", server.sockets[0].getsockname()[1])
+        await reader.readexactly(12)
+        writer.write(b"RFB 003.008\n")
+        await reader.readexactly(2)
+        writer.write(b"\x01")
+        await reader.readexactly(4)
+        writer.write(b"\x01")
+        width, height = struct.unpack(">HH", await reader.readexactly(4))
+        assert (width, height) == vnc.encoded_size(2560, 1440, vnc.DEFAULT_QUALITY) != (2560, 1440)
+        await reader.readexactly(16)
+        await reader.readexactly(struct.unpack(">I", await reader.readexactly(4))[0])
+        encodings = [vnc.H264, vnc.DESKTOP_SIZE, vnc.QUALITY_BASE + 6]
+        writer.write(struct.pack(">BxH", 2, len(encodings)) + struct.pack(f">{len(encodings)}i", *encodings))
+        writer.write(struct.pack(">BBHHHH", 3, 0, 0, 0, width, height))
+        await _frames(reader, 0.5)  # the first (key) frame; then the screen stands still
+        encodings[-1] = vnc.QUALITY_BASE + 9  # 原画
+        writer.write(struct.pack(">BxH", 2, len(encodings)) + struct.pack(f">{len(encodings)}i", *encodings))
+        writer.write(struct.pack(">BBHHHH", 3, 1, 0, 0, width, height))
+        head = await asyncio.wait_for(reader.readexactly(4), 3)
+        assert struct.unpack(">H", head[2:])[0] == 1
+        x, y, w, h, encoding = struct.unpack(">HHHHi", await reader.readexactly(12))
+        assert (encoding, w, h) == (vnc.DESKTOP_SIZE, 2560, 1440)
+        writer.close()
+        server.close()
+
+    asyncio.run(scenario())

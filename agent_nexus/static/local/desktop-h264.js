@@ -112,7 +112,7 @@ class Context {
         if (parser.profileIdc !== null) this.profile = [parser.profileIdc, parser.constraintSet, parser.levelIdc];
       }
     } catch (error) {
-      this.fail(this.decoder, error);
+      this.release();  // one failure, reported once
       this.owner.failed(error);
       return null;
     }

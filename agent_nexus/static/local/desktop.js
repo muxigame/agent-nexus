@@ -136,12 +136,16 @@ export async function desktopPage(ctx, { params }) {
     .catch((error) => ({ failed: error }));
   const h264Check = canDecodeH264();
   const prefs = { quality: DEFAULT_QUALITY, fit: true, ...loadPrefs(deviceId) };
+  /** 自动 (8) needs a device of this release (desktop/2: flow control, adaptive rate, scaling); an older
+   *  one would take 8 as a fixed 14 Mbps at full size, so it gets 均衡 (6), as the old viewer sent. */
+  const sentQuality = () => (prefs.quality === DEFAULT_QUALITY && !device?.desktop_auto ? 6 : prefs.quality);
   let failed = false;
   let leaving = false;
   fetchJSON("/api/devices", { quiet: true }).then((list) => {
     device = findDevice(list) || device;
     nameNode.textContent = device?.display_name || deviceId;
     drawMark();
+    if (rfb) rfb.qualityLevel = sentQuality();
     const why = refusal(list, findDevice(list));
     if (why && !connected && !leaving) fail(new Error(why));
   }, () => { /* the connection says what is wrong */ });
@@ -160,6 +164,8 @@ export async function desktopPage(ctx, { params }) {
   let connected = false;
   let rfb = null;
   let attempts = 0;
+  /** each connect() takes a number; one that a newer call overtook stops at its next step */
+  let connecting = 0;
   let retryTimer = null;
   let statsTimer = null;
 
@@ -178,7 +184,7 @@ export async function desktopPage(ctx, { params }) {
     onchange: () => {
       prefs.quality = Number(quality.value);
       savePrefs(deviceId, prefs);
-      if (rfb) rfb.qualityLevel = prefs.quality;
+      if (rfb) rfb.qualityLevel = sentQuality();
       quality.title = QUALITIES.find(([v]) => v === prefs.quality)?.[2] || "画质";
     } },
   QUALITIES.map(([v, label, hint]) => el("option", { value: v, selected: v === prefs.quality, title: hint }, `画质 · ${label}`)));
@@ -306,6 +312,7 @@ export async function desktopPage(ctx, { params }) {
   function setStatus(state, label) { mount(status, pill(state, label)); }
 
   async function connect() {
+    const turn = ++connecting;
     clearTimeout(retryTimer);
     clearInterval(statsTimer);
     if (rfb) { const old = rfb; rfb = null; try { old.disconnect(); } catch { /* already closed */ } }
@@ -327,20 +334,21 @@ export async function desktopPage(ctx, { params }) {
       routeTag.classList.toggle("is-p2p", !prepared.relayed);
       [RFB, h264] = await Promise.all([loadNoVNC(), h264Check.then((ok) => ok && !jpegOnly)]);
     } catch (error) {
-      if (leaving) return;
+      if (leaving || turn !== connecting) return;
+      if (attempts > 0) { scheduleRetry(error.message); return; }  // reconnecting: keep trying by itself
       setStatus("error", "无法直连");
       showOverlay("无法连接这台设备的桌面", { busy: false, hint: error.message,
         action: el("button", { class: "btn btn-primary", type: "button", onclick: () => { attempts = 0; connect(); } }, icon("refresh-cw", { size: 14 }), "重试") });
       return;
     }
-    if (leaving) return;
+    if (leaving || turn !== connecting) return;
     showOverlay("正在打开画面…");
     const session = new RFB(screen, desktopSocketURL(deviceId), { wsProtocols: ["binary"] });
     rfb = session;
     session.anxH264 = h264;
     session.scaleViewport = prefs.fit;
     session.resizeSession = false;
-    session.qualityLevel = prefs.quality;
+    session.qualityLevel = sentQuality();
     session.compressionLevel = 2;
     session.focusOnClick = true;
     session.background = "#000";

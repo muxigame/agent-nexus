@@ -418,3 +418,61 @@ def test_keystrokes_echo_in_about_one_round_trip_through_the_gateway(tmp_path, m
             assert b"".join(base64.b64decode(w["data"]) for w in writes).startswith(b"abcde")
         finally:
             ws.__exit__(None, None, None)
+
+
+def test_output_goes_to_the_oldest_waiting_read():
+    """A read that arrives with the output must not take it ahead of one that waits already: the gateway
+    forwards the answers in the order it asked, so that would reorder the output or hold it back."""
+    async def scenario():
+        terms, session = _terminals_with_session()
+        older = asyncio.create_task(terms.read({"sid": "s1", "wait": 2}))
+        await asyncio.sleep(0.05)
+        # in one go: output arrives and a newer read starts (same loop iteration on the device)
+        session.buffer += b"B"
+        session.event.set()
+        newer = asyncio.create_task(terms.read({"sid": "s1", "wait": 2}))
+        assert base64.b64decode((await older)["data"]) == b"B"
+        await asyncio.sleep(0.05)
+        assert not newer.done()
+        session.buffer += b"C"
+        session.event.set()
+        assert base64.b64decode((await newer)["data"]) == b"C"
+        # on exit the oldest read reports it
+        first = asyncio.create_task(terms.read({"sid": "s1", "wait": 2}))
+        second = asyncio.create_task(terms.read({"sid": "s1", "wait": 2}))
+        await asyncio.sleep(0.02)
+        session.buffer += b"bye"
+        session.exited, session.exit_code = True, 0
+        session.event.set()
+        result = await first
+        assert base64.b64decode(result["data"]) == b"bye" and result.get("exited")
+        assert (await second).get("data") == ""
+
+    asyncio.run(scenario())
+
+
+def test_resizes_are_coalesced_one_at_a_time():
+    from agent_nexus.terminal_bridge import _Resizer
+
+    class Peer:
+        def __init__(self):
+            self.calls, self.running = [], 0
+
+        async def call(self, method, params):
+            self.running += 1
+            assert self.running == 1, "one resize at a time"
+            await asyncio.sleep(0.05)
+            self.calls.append((params["cols"], params["rows"]))
+            self.running -= 1
+            return {"ok": True}
+
+    async def scenario():
+        peer = Peer()
+        resizer = _Resizer(peer, "s1")
+        for size in [(100, 30), (101, 30), (102, 31), (120, 40)]:
+            resizer.want(size)
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.3)
+        assert peer.calls[0] == (100, 30) and peer.calls[-1] == (120, 40) and len(peer.calls) <= 2
+
+    asyncio.run(scenario())

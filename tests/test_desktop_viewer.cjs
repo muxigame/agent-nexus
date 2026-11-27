@@ -108,9 +108,11 @@ test("a decoder that holds pictures too long counts as failed", async () => {
 });
 
 test("a corrupt payload does not throw into noVNC", async () => {
-  const { rect, events } = await setup();
+  const { decoder, rect, events } = await setup();
   assert.equal(rect(Uint8Array.from([1, 2, 3, 4, 5])), true);
   assert.equal(events.keyFrames, 1);
+  assert.equal(decoder.failures.length, 1, "one bad payload is one failure");
+  assert.equal(events.software, 0);
 });
 
 test("bit rates read like the bar shows them", async () => {

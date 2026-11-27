@@ -53,6 +53,30 @@ CLOSE_UNAVAILABLE = 4404
 _CLOSERS: set = set()
 
 
+class _Resizer:
+    """Window sizes for one terminal: not awaited where input is read (typing must not wait a round trip
+    behind a resize), one call at a time, and only the latest size (a window drag sends dozens)."""
+
+    def __init__(self, peer, sid: str):
+        self.peer, self.sid = peer, sid
+        self.latest: tuple[int, int] | None = None
+        self.task: asyncio.Future | None = None
+
+    def want(self, size: tuple[int, int]) -> None:
+        self.latest = size
+        if self.task is None or self.task.done():
+            self.task = asyncio.ensure_future(self._run())
+            _CLOSERS.add(self.task)
+            self.task.add_done_callback(_CLOSERS.discard)
+            self.task.add_done_callback(lambda done: done.cancelled() or done.exception())
+
+    async def _run(self) -> None:
+        while self.latest is not None:
+            (cols, rows), self.latest = self.latest, None
+            with contextlib.suppress(RoutingError):
+                await self.peer.call("term_resize", {"sid": self.sid, "cols": cols, "rows": rows})
+
+
 class TerminalBridge:
     def __init__(self, console, *, device_credential=None):
         self.console = console
@@ -160,7 +184,7 @@ class TerminalBridge:
         await socket.send_text(json.dumps({"type": "ready", "shell": opened.get("shell"), "cwd": opened.get("cwd")}))
         inputs: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=256)
         pipelined = PIPELINED in getattr(peer, "features", frozenset())
-        tasks = [asyncio.create_task(self._pump_output(socket, peer, sid)),
+        tasks = [asyncio.create_task(self._pump_output(socket, peer, sid, READS_IN_FLIGHT if pipelined else 1)),
                  asyncio.create_task(self._pump_input(peer, sid, inputs, pipelined)),
                  asyncio.create_task(self._receive(socket, peer, sid, inputs))]
         try:
@@ -204,14 +228,16 @@ class TerminalBridge:
             await socket.send_text(json.dumps({"type": "error", "error": message}, ensure_ascii=False))
             await socket.close(code=CLOSE_UNAVAILABLE)
 
-    async def _pump_output(self, socket: WebSocket, peer, sid: str) -> None:
+    async def _pump_output(self, socket: WebSocket, peer, sid: str, in_flight: int = 1) -> None:
         reads: deque = deque()
 
         def poll() -> None:
             reads.append(asyncio.ensure_future(peer.call("term_read", {"sid": sid, "wait": READ_WAIT_S})))
 
         try:
-            for _ in range(READS_IN_FLIGHT):
+            # two only for a term/2 device: it serves waiting reads oldest first; an older one could
+            # hand output to the newer read and the answers would arrive out of order
+            for _ in range(in_flight):
                 poll()
             while True:
                 try:
@@ -287,6 +313,7 @@ class TerminalBridge:
 
     @staticmethod
     async def _receive(socket: WebSocket, peer, sid: str, inputs: asyncio.Queue) -> None:
+        resizer = _Resizer(peer, sid)
         while True:
             try:
                 message = await socket.receive()
@@ -313,11 +340,7 @@ class TerminalBridge:
             elif payload.get("type") == "resize":
                 cols, rows = TerminalBridge._int(payload.get("cols"), 0), TerminalBridge._int(payload.get("rows"), 0)
                 if cols > 0 and rows > 0:
-                    # not awaited here: typing must not wait a round trip behind a resize
-                    resize = asyncio.ensure_future(peer.call("term_resize", {"sid": sid, "cols": cols, "rows": rows}))
-                    _CLOSERS.add(resize)
-                    resize.add_done_callback(_CLOSERS.discard)
-                    resize.add_done_callback(lambda done: done.cancelled() or done.exception())
+                    resizer.want((cols, rows))
 
     async def network_devices(self, request: Request) -> Response:
         """``GET /api/network/devices``: the device list for a device of the network (``anx term``)."""
