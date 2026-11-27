@@ -289,7 +289,10 @@ class Installs:
         if match and job["phase"] in ("prepare", "download"):
             pct = min(100.0, float(match.group(1)))
             self._phase(job, "download", 8 + 0.52 * pct)
-        if re.search(r"\breify\b|postinstall|\binstalling\b|extracting|setting up|linking|\bbuild\b", low):
+        if re.search(r"\breify\b|postinstall|extracting|linking", low) or (
+                # an official script opens with "==> Installing Codex CLI" before it downloads anything (seen on
+                # Windows): the generic words only count once the download has started
+                job["phase"] != "prepare" and re.search(r"\binstalling\b|setting up|\bbuild\b", low)):
             self._phase(job, "install", 64)
         if re.search(r"\badded \d+ packages?|\bchanged \d+ packages?|up to date|successfully installed|"
                      r"installation complete|installed successfully", low):

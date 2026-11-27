@@ -413,6 +413,19 @@ def test_progress_estimates():
     assert 88 <= jobs._progress(job) < 90
 
 
+
+def test_progress_official_script_header_is_not_the_install_phase():
+    # the official Codex PowerShell installer, as seen on a real Windows machine
+    jobs = Installs()
+    job = {"state": "running", "phase": "prepare", "progress": 0.0, "phase_at": time.time(), "fetches": 0,
+           "log": [], "log_base": 0}
+    jobs._estimate(job, "==> Installing Codex CLI")
+    assert job["phase"] == "prepare"
+    jobs._estimate(job, "==> Downloading Codex CLI")
+    assert job["phase"] == "download" and job["progress"] < 60
+    jobs._estimate(job, "Codex CLI 0.172.0 installed successfully.")
+    assert job["phase"] == "install" and job["progress"] == 88
+
 def test_writable_by_another_user(tmp_path):
     folder = tmp_path / "prefix"
     folder.mkdir()
