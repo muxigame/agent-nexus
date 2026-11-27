@@ -1,5 +1,20 @@
 #!/bin/sh
 set -e
+if [ "$1" = "remove" ]; then
+    # The running core removes the agent-nexus entries it wrote into the CLIs' own MCP config (as each CLI's
+    # user), so no CLI is left pointing at a dead http://127.0.0.1:<port>/mcp. Never fails the removal.
+    /usr/bin/python3 - <<'PY' >/dev/null 2>&1 || true
+import json, urllib.request
+try:
+    with open("/var/lib/agent-nexus/agent-nexus.json", encoding="utf-8") as handle:
+        port = int((json.load(handle).get("manager") or {}).get("port") or 8399)
+except Exception:
+    port = 8399
+request = urllib.request.Request(f"http://127.0.0.1:{port}/api/mcp/local/unlink", data=b"{}", method="POST",
+                                 headers={"X-ANX": "1", "Content-Type": "application/json"})
+urllib.request.urlopen(request, timeout=120).read()
+PY
+fi
 if [ "$1" = "remove" ] && [ -d /run/systemd/system ]; then
     systemctl disable --now agent-nexus.service >/dev/null 2>&1 || true
 fi

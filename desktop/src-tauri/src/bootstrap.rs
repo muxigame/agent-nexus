@@ -166,12 +166,17 @@ fn local_url(url: &Url) -> bool {
 }
 
 pub(crate) fn http(url: &Url, method: &str, path: &str) -> Option<(u16, Value)> {
+    http_with(url, method, path, 2)
+}
+
+/// [`http`] with a longer read timeout (`read_s` seconds): for requests whose answer takes a while.
+pub(crate) fn http_with(url: &Url, method: &str, path: &str, read_s: u64) -> Option<(u16, Value)> {
     if !local_url(url) { return None; }
     let host = url.host_str()?;
     let port = url.port_or_known_default()?;
     for address in (host, port).to_socket_addrs().ok()? {
         let Ok(mut stream) = TcpStream::connect_timeout(&address, Duration::from_millis(500)) else { continue; };
-        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(read_s)));
         let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
         // X-ANX for agent-nexus, X-MCPM for a legacy manager on the same root.
         let request = format!("{method} {path} HTTP/1.1\r\nHost: {host}:{port}\r\nX-ANX: 1\r\nX-MCPM: 1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
@@ -1016,6 +1021,20 @@ pub fn run() {
     if let Some(root) = &parsed.root {
         let root = if root.is_absolute() { root.clone() } else { env::current_dir().map(|cwd| cwd.join(root)).unwrap_or_else(|_| root.clone()) };
         let _ = ROOT_ARG.set(root);
+    }
+    if args.iter().any(|value| value == "--unlink-mcp") {
+        // The uninstaller, before the service / manager stops: the running core removes the agent-nexus entries
+        // it wrote into the CLIs' own config, as each CLI's user (docs/design.md "本机 MCP"). Never fails the
+        // uninstall: a core that is not running leaves the entries (`anx mcp unlink --all` removes them later).
+        if let Ok(root) = shutdown_root() {
+            if let Ok(url) = configured_url(&root) {
+                if ping(&url).is_some() {
+                    let answered = http_with(&url, "POST", "/api/mcp/local/unlink", 120).map(|(status, _)| status);
+                    say(&format!("unlink-mcp: HTTP {}", answered.map(|s| s.to_string()).unwrap_or_else(|| "-".into())));
+                }
+            }
+        }
+        std::process::exit(0);
     }
     if parsed.shutdown_manager {
         // Runs in this process, never forwarded: the installer waits for it.

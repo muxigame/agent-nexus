@@ -37,7 +37,8 @@ class AdapterOptions:
     permission: str = "ask"
     system_prompt: str = ""
     resume_id: str = ""
-    #: claude ``ask``: the path of the ``--mcp-config`` file holding anx's approval server
+    #: claude: the path of the per-run ``--mcp-config`` file (anx's approval server in ``ask``; the 本机 MCP as
+    #: ``agent-nexus`` when the run attaches it by flags, ``extra["mcp_attach"]``)
     mcp_config: str = ""
     #: The launcher is a ``.cmd``/``.bat`` shim that could not be resolved to the program behind it: every
     #: argument goes through cmd.exe, so free text (prompts, the system prompt) must avoid the command line.
@@ -181,8 +182,11 @@ class Adapter:
         return f"{self.opts.system_prompt}\n\n---\n\n{prompt}"
 
     def _values(self, prompt: str | None = None) -> dict[str, Any]:
+        attach = self.opts.extra.get("mcp_attach") if isinstance(self.opts.extra.get("mcp_attach"), dict) else {}
         values: dict[str, Any] = {"workdir": self.opts.workdir, "resume_id": self.session_id or "",
-                                  "prompt": prompt or "", "approval_tool": APPROVAL_TOOL}
+                                  "prompt": prompt or "", "approval_tool": APPROVAL_TOOL,
+                                  # custom CLIs (agents.custom): the 本机 MCP's URL, e.g. --mcp {mcp_url}
+                                  "mcp_url": str(self.opts.extra.get("mcp_url") or attach.get("url") or "")}
         if self._system_prompt_in_argv():
             values["system_prompt"] = self.opts.system_prompt
         return values
@@ -247,6 +251,43 @@ class Adapter:
         return []
 
 
+def _observe_claude_init(obj: dict, callback: Any, attach: Any) -> None:
+    """``system/init`` lists the servers and tools Claude Code really loaded. claude.ai account connectors that are
+    Agent Nexus are reported to ``callback`` (mcp_probe's passive, authoritative detection): one named like Agent
+    Nexus counts whatever its status (failed / pending / needs-auth: the gateway may just be down), as does one
+    offering both ``device_list`` and ``use_device``. "None" is reported only when every claude.ai connector is
+    connected; otherwise the cached answer is left alone. Config entries are read from the file anyway."""
+    if callback is None or not isinstance(obj.get("tools"), list) or not isinstance(obj.get("mcp_servers"), list):
+        return
+    from .mcp_probe import claude_prefix, fold
+    tools = [t for t in obj["tools"] if isinstance(t, str)]
+    servers = {t[:-len("device_list")] for t in tools if t.startswith("mcp__") and t.endswith("__device_list")}
+    servers = {prefix for prefix in servers if prefix + "use_device" in tools}
+    listed = [item for item in obj["mcp_servers"] if isinstance(item, dict) and item.get("name")]
+    account = [item for item in listed if str(item["name"]).startswith("claude.ai ")]
+    found: list[dict] = []
+    for item in account:
+        name = str(item["name"])
+        if "agentnexus" in fold(name[len("claude.ai "):]):
+            found.append({"name": name, "prefix": claude_prefix(name)})
+    names = [str(item["name"]) for item in listed]
+    for prefix in sorted(servers):
+        normal = prefix[len("mcp__"):-2]
+        if not normal.startswith("claude_ai_") or any(f["prefix"] == prefix for f in found):
+            continue
+        name = next((n for n in names if claude_prefix(n) == prefix), "claude.ai " + normal[len("claude_ai_"):])
+        found.append({"name": name, "prefix": prefix})
+    if not found and any(str(item.get("status") or "") != "connected" for item in account):
+        return  # a connector that did not load may be the Agent Nexus one: not a "none"
+    version = obj.get("claude_code_version") if isinstance(obj.get("claude_code_version"), str) else None
+    try:
+        callback(found, version)
+    except TypeError:
+        callback(found)
+    except Exception:  # noqa: BLE001, S110 - observation only
+        pass
+
+
 def _exit_text(label: str, code: int | None, stderr_tail: str) -> str:
     tail = stderr_tail.strip()
     head = f"{label} 意外退出" + (f"（退出码 {code}）" if code is not None else "")
@@ -282,11 +323,14 @@ class ClaudeStream(Adapter):
         values = self._values()
         argv = registry.command_argv(self.d, self.opts.binary, permission=self.opts.permission, values=values,
                                      template=template)
-        if self.opts.permission == "ask":
-            if self.opts.mcp_config:
-                argv += ["--mcp-config", self.opts.mcp_config]
-            else:  # no approval server: plain -p mode refuses what would need a prompt
-                argv = _drop_flag(argv, "--permission-prompt-tool")
+        if self.opts.mcp_config:  # merged with the user's own servers (never --strict-mcp-config)
+            argv += ["--mcp-config", self.opts.mcp_config]
+        elif self.opts.permission == "ask":  # no approval server: plain -p mode refuses what would need a prompt
+            argv = _drop_flag(argv, "--permission-prompt-tool")
+        allowed = [str(t) for t in self.opts.extra.get("mcp_allow") or [] if re.fullmatch(r"[A-Za-z0-9_.-]+", str(t))]
+        if allowed and self.opts.permission != "full":
+            # the Agent Nexus connector's tools without a prompt (-p mode refuses what it would ask about)
+            argv += ["--allowedTools", ",".join(allowed)]
         if self.opts.partial and "--include-partial-messages" not in argv:
             argv.append("--include-partial-messages")
         return argv
@@ -337,6 +381,8 @@ class ClaudeStream(Adapter):
             events.append({"type": "status", "state": "running" if self.turn_active else "idle",
                            "session_id": self.session_id})
         if kind == "system":
+            if obj.get("subtype") == "init":
+                _observe_claude_init(obj, self.opts.extra.get("on_mcp"), self.opts.extra.get("mcp_attach"))
             if obj.get("subtype") == "init" and isinstance(obj.get("model"), str) and obj["model"]:
                 self.model = obj["model"]
             if obj.get("subtype") == "init" and not events:
@@ -601,7 +647,9 @@ class CodexExec(Adapter):
         template = "resume_command" if self.session_id and self.d.resume_command else "command"
         argv = registry.command_argv(self.d, self.opts.binary, permission=self.opts.permission,
                                      values=self._values(text), template=template)
-        return _codex_mcp_approve(_codex_approval_flag(argv), self.opts.extra.get("mcp_approve") or [])
+        argv = _codex_mcp_attach(_codex_approval_flag(argv), self.opts.extra.get("mcp_attach"))
+        return _codex_mcp_approve(argv, self.opts.extra.get("mcp_approve") or [],
+                                  self.opts.extra.get("mcp_enabled_tools"))
 
     def turn_stdin(self) -> bytes | None:
         return self._stdin
@@ -694,6 +742,16 @@ class CodexExec(Adapter):
             return events
         if kind == "mcp_tool_call":
             server, tool = str(item.get("server") or ""), str(item.get("tool") or "")
+            if server == "codex_apps" and any(tool == sig or tool.endswith(("_" + sig, "." + sig))
+                                              for sig in ("use_device", "device_list")):
+                # an account (ChatGPT) connector reaching the gateway: passive detection (mcp_probe)
+                callback = self.opts.extra.get("on_mcp")
+                if callback is not None and not getattr(self, "_observed", False):
+                    self._observed = True
+                    try:
+                        callback([{"name": "codex_apps", "prefix": ""}])
+                    except Exception:  # noqa: BLE001, S110
+                        pass
             arguments = item.get("arguments")
             event = {"type": "tool", "id": item_id, "name": f"{server}.{tool}" if server else tool,
                      "title": tool_title(tool, arguments) if isinstance(arguments, dict) else tool,
@@ -826,16 +884,34 @@ def _codex_status(status: Any, exit_code: Any, done: bool) -> str:
     return "running"
 
 
-def _codex_mcp_approve(argv: list[str], names: list[str]) -> list[str]:
+def _codex_mcp_approve(argv: list[str], names: list[str], enabled: list[str] | None = None) -> list[str]:
     """Gateway mode: ``codex exec`` never asks, so calls to an MCP server whose tools need approval are refused
     (seen on a real device: "the tool needs approval but the approval policy is never"). For the Agent Nexus
-    connectors only, ``-c mcp_servers.<name>.default_tools_approval_mode="approve"`` right after ``exec``."""
+    connectors only, ``-c mcp_servers.<name>.default_tools_approval_mode="approve"`` right after ``exec``.
+    ``enabled``: the tools the run's permission mode allows; every other tool of the server is left out of this run
+    (``enabled_tools``), so approving the server never approves exec_command & co. outside ``full``."""
     if not names or "exec" not in argv:
         return argv
     flags: list[str] = []
     for name in names:
         key = name if re.fullmatch(r"[A-Za-z0-9_-]+", name) else json.dumps(name, ensure_ascii=False)
+        if enabled is not None:
+            tools = [t for t in enabled if re.fullmatch(r"[A-Za-z0-9_.-]+", str(t))]
+            flags += ["-c", f"mcp_servers.{key}.enabled_tools={json.dumps(tools)}"]
         flags += ["-c", f'mcp_servers.{key}.default_tools_approval_mode="approve"']
+    at = argv.index("exec") + 1
+    return argv[:at] + flags + argv[at:]
+
+
+def _codex_mcp_attach(argv: list[str], attach: Any) -> list[str]:
+    """The 本机 MCP for this run only (no config file touched): ``-c mcp_servers.<name>.url=...`` after ``exec``."""
+    if not isinstance(attach, dict) or not attach.get("url") or "exec" not in argv:
+        return argv
+    name = str(attach.get("name") or "agent-nexus")
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", name):
+        return argv
+    flags = ["-c", f"mcp_servers.{name}.url={json.dumps(str(attach['url']))}",
+             "-c", f"mcp_servers.{name}.tool_timeout_sec=900"]
     at = argv.index("exec") + 1
     return argv[:at] + flags + argv[at:]
 
@@ -885,6 +961,24 @@ class Acp(Adapter):
 
     def _system_prompt_in_argv(self) -> bool:
         return False  # ACP has no system prompt: it goes in front of the first message
+
+    def _mcp_servers(self) -> list[dict]:
+        """ACP's per-session MCP servers: the 本机 MCP when the run attaches it by flags and the agent takes HTTP
+        servers (``mcpCapabilities.http``); a stdio bridge is not offered (the run's context says so)."""
+        attach = self.opts.extra.get("mcp_attach")
+        if not isinstance(attach, dict) or not attach.get("url"):
+            return []
+        if not getattr(self, "mcp_http", False):
+            if not getattr(self, "_mcp_noted", False):
+                self._mcp_noted = True
+                text = f"{self.d.label} 不支持 HTTP 方式的 MCP 服务器，这次对话没有接入 Agent Nexus MCP"
+                if attach.get("gateway"):
+                    text = (f"{self.d.label} 无法接入 Agent Nexus MCP（它不支持 HTTP 方式的 MCP 服务器），"
+                            "经网关模式下它调用不了 use_device / 文件工具")
+                self.notices.append(text)
+            return []
+        return [{"type": "http", "name": str(attach.get("name") or "agent-nexus"), "url": str(attach["url"]),
+                 "headers": []}]
 
     def _call(self, method: str, params: dict) -> None:
         self._next_id += 1
@@ -966,15 +1060,17 @@ class Acp(Adapter):
             self.can_load = bool(isinstance(caps, dict) and caps.get("loadSession"))
             prompt_caps = caps.get("promptCapabilities") if isinstance(caps, dict) else None
             self.embedded_context = bool(isinstance(prompt_caps, dict) and prompt_caps.get("embeddedContext"))
+            mcp_caps = caps.get("mcpCapabilities") if isinstance(caps, dict) else None
+            self.mcp_http = bool(isinstance(mcp_caps, dict) and mcp_caps.get("http"))
             cwd = self.opts.workdir
             if self.session_id and self.can_load:
                 self._loading = True
-                self._call("session/load", {"sessionId": self.session_id, "cwd": cwd, "mcpServers": []})
+                self._call("session/load", {"sessionId": self.session_id, "cwd": cwd, "mcpServers": self._mcp_servers()})
             else:
                 if self.session_id:
                     self.notices.append(f"{self.d.label} 不支持续接旧会话，已开始一个新会话")
                     self.session_id = None
-                self._call("session/new", {"cwd": cwd, "mcpServers": []})
+                self._call("session/new", {"cwd": cwd, "mcpServers": self._mcp_servers()})
             return []
         if method in ("session/new", "session/load"):
             self._loading = False
@@ -983,7 +1079,7 @@ class Acp(Adapter):
                     self.notices.append(f"无法续接会话 {self.session_id}：{error.get('message') or '代理拒绝了'}；"
                                         "已开始一个新会话")
                     self.session_id = None
-                    self._call("session/new", {"cwd": self.opts.workdir, "mcpServers": []})
+                    self._call("session/new", {"cwd": self.opts.workdir, "mcpServers": self._mcp_servers()})
                     return self._drain_notices()
                 self.failed = str(error.get("message") or "无法创建会话")
                 return []

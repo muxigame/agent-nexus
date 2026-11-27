@@ -365,6 +365,10 @@ function showInvite(created) {
 
 // ---------------------------------------------------------------- settings
 
+const LOCAL_MCP_NOTE = "装了 Agent Nexus 客户端的电脑会在本机控制台端口的 /mcp（默认 http://127.0.0.1:8399/mcp）提供本机 MCP，"
+  + "并自动接入本机 CLI（需要下面的开关打开，且那台电脑没有关掉“自动写入 CLI 配置”），无需在那些电脑上填写网关地址或令牌。"
+  + "下面的方法用于没装客户端的电脑和网页版 AI 客户端。";
+
 const CLIENT_GUIDES = [
   { id: "chatgpt", label: "ChatGPT", steps: (url) => [
     ["打开连接器设置", "ChatGPT → 设置 → 应用与连接器（Apps & Connectors）→ 高级设置，打开“开发者模式”。"],
@@ -409,6 +413,15 @@ export async function settingsPage(ctx) {
       el("div", { class: "step" }, el("div", { class: "step-body" }, el("span", { class: "step-title" }, title), el("span", { class: "step-desc" }, desc))))));
   }
   showGuide("chatgpt");
+  const mcpDevicesBox = el("input", { type: "checkbox", role: "switch", checked: data.mcp_devices !== false,
+    onchange: async (event) => {
+      const box = event.currentTarget;
+      try {
+        const result = await fetchJSON("/api/settings", { method: "PUT", body: { mcp_devices: box.checked } });
+        box.checked = result.mcp_devices !== false;
+        toast(box.checked ? "已允许设备的本机 MCP 接入" : "已关闭设备的本机 MCP 接入");
+      } catch { box.checked = !box.checked; }
+    } });
   const looks = appearanceControls();
   const hours = (s) => (s % 86400 === 0 ? `${s / 86400} 天` : `${Math.round(s / 3600)} 小时`);
   mount(page,
@@ -426,7 +439,13 @@ export async function settingsPage(ctx) {
           el("dt", {}, "数据库"), el("dd", {}, gateway.db_mb == null ? "—" : `${gateway.db_mb} MB `, gateway.db_warning ? pill("needs_config", "超过警戒") : null),
           el("dt", {}, "安装包目录"), el("dd", { class: "mono" }, data.downloads.dir)))),
     el("section", { class: "card" }, el("div", { class: "card-head" }, el("h2", {}, "在 AI 客户端中添加 Agent Nexus")),
-      el("div", { class: "card-body stack lg" }, el("div", { class: "scroll-x" }, tabs), guideBody)),
+      el("div", { class: "card-body stack lg" },
+        el("p", { class: "muted small" }, LOCAL_MCP_NOTE),
+        el("div", { class: "setting" }, el("div", { class: "setting-text" },
+          el("span", { class: "setting-title" }, "允许已加入的设备用设备凭据接入 MCP（本机 MCP）"),
+          el("span", { class: "setting-desc" }, "关闭后各设备的本机 MCP 不再提供网关工具")),
+          el("label", { class: "switch" }, mcpDevicesBox, el("span"))),
+        el("div", { class: "scroll-x" }, tabs), guideBody)),
     el("section", { class: "card flush" }, el("div", { class: "card-head" }, el("h2", {}, "已授权的客户端")),
       data.clients.length ? el("div", { class: "list inset" }, data.clients.map((client) => el("div", { class: "list-item" },
         el("span", { class: "avatar" }, icon(client.kind === "gpt" || client.kind === "claude" ? "message-square" : "key-round", { size: 16 })),

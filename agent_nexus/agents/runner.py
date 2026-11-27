@@ -745,21 +745,30 @@ class Runs:
         except ConnectionError:
             pass
 
-    def _approval_files(self, run: Run, url: str) -> str:
-        """Write the run's ``--mcp-config`` (and a copy of the approval server the run-as account can read)."""
+    def _approval_files(self, run: Run, url: str | None, attach: dict | None = None) -> str:
+        """Write the run's ``--mcp-config``: anx's approval server (``url``, claude ``ask``; plus a copy of its script
+        the run-as account can read) and/or the 本机 MCP as ``attach["name"]`` (a run attached by flags). Only this
+        run's temp folder is written; the user's own config is never touched."""
         folder = Path(run.tmpdir)
-        script = folder / "anx_approve_mcp.py"
-        shutil.copyfile(Path(__file__).with_name("approve_mcp.py"), script)
-        python = sys.executable
-        if WINDOWS and python.lower().endswith("pythonw.exe"):
-            console = python[:-len("pythonw.exe")] + "python.exe"
-            python = console if os.path.isfile(console) else python
-        config = {"mcpServers": {"anx": {"type": "stdio", "command": python,
-                                         "args": ["-I", str(script), "--url", url],
-                                         "env": {"ANX_APPROVE_TOKEN": run.token}}}}
+        servers: dict = {}
+        written = []
+        if url:
+            script = folder / "anx_approve_mcp.py"
+            shutil.copyfile(Path(__file__).with_name("approve_mcp.py"), script)
+            written.append(script)
+            python = sys.executable
+            if WINDOWS and python.lower().endswith("pythonw.exe"):
+                console = python[:-len("pythonw.exe")] + "python.exe"
+                python = console if os.path.isfile(console) else python
+            servers["anx"] = {"type": "stdio", "command": python, "args": ["-I", str(script), "--url", url],
+                              "env": {"ANX_APPROVE_TOKEN": run.token}}
+        if isinstance(attach, dict) and attach.get("url"):
+            servers[str(attach.get("name") or "agent-nexus")] = {"type": "http", "url": str(attach["url"])}
+        config = {"mcpServers": servers}
         path = folder / "anx-mcp.json"
         path.write_text(json.dumps(config, ensure_ascii=False, indent=1), encoding="utf-8")
-        for item in (script, path):
+        written.append(path)
+        for item in written:
             try:
                 os.chmod(item, 0o600)
                 if run.run_as and "user" in run.run_as and not WINDOWS:
@@ -863,12 +872,20 @@ class Runs:
         run = Run(rid=rid, d=d, adapter=adapters.make(d, opts), opts=opts, workdir=workdir, env=run_env,
                   run_as=popen, prefix=prefix, batch=batch, permission=permission, address=address,
                   title=str(params.get("title") or "")[:200], tmpdir=str(tmpdir), own_tmpdir=own)
-        if d.adapter == "claude-stream" and permission == "ask":
+        attach = opts.extra.get("mcp_attach") if isinstance(opts.extra.get("mcp_attach"), dict) else None
+        if d.adapter == "claude-stream" and (permission == "ask" or attach):
+            url = None
+            if permission == "ask":
+                try:
+                    url = await self.approval_endpoint_url()
+                except OSError as exc:
+                    notices.append(f"审批服务没能启动（{exc}），需要权限的操作会被拒绝")
             try:
-                url = await self.approval_endpoint_url()
-                opts.mcp_config = self._approval_files(run, url)
+                if url or attach:
+                    opts.mcp_config = self._approval_files(run, url, attach)
             except OSError as exc:
-                notices.append(f"审批服务没能启动（{exc}），需要权限的操作会被拒绝")
+                notices.append(f"本次对话的 MCP 配置没能写入（{exc}）" if not url else
+                               f"审批服务没能启动（{exc}），需要权限的操作会被拒绝")
         if getattr(run.adapter, "in_process", False):
             run.adapter.attach(self, run)
         self.runs[rid] = run

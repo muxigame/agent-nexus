@@ -199,6 +199,9 @@ class ManagerConfig:
     files: bool = True
     #: ``files.jobs``: run file_copy jobs here (``fxjob/1``): the bytes go straight between devices (default on).
     files_jobs: bool = True
+    #: ``mcp_local``: the 本机 MCP on ``/mcp`` of this console (``{enabled, auto_config, peers}``, all optional;
+    #: see :func:`agent_nexus.local_mcp.settings_of` for the defaults).
+    mcp_local: dict = field(default_factory=dict)
 
     @property
     def path(self) -> Path:
@@ -245,6 +248,7 @@ def load_manager_config(root: Path) -> ManagerConfig:
         files = data.get("files") if isinstance(data.get("files"), dict) else {}
         cfg.files = files.get("enabled") is not False
         cfg.files_jobs = cfg.files and files.get("jobs") is not False
+        cfg.mcp_local = dict(data["mcp_local"]) if isinstance(data.get("mcp_local"), dict) else {}
     return cfg
 
 

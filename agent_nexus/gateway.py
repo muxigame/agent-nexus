@@ -142,6 +142,14 @@ def _client_id() -> str | None:
     return None
 
 
+def caller_device() -> str | None:
+    """The device id when the MCP caller is a joined device on ``/mcp/device`` (``client_id`` ``device:<id>``),
+    else None (the owner). Attribution only: a locked device never gets this far -- ``DeviceMcpAuth`` refuses
+    every request of a locked device with 423 before any routing, so no per-target lock check is needed here."""
+    client_id = _client_id()
+    return client_id[7:] if client_id and client_id.startswith("device:") else None
+
+
 def _session_meta(session_name, kind, resume_id, companion_route, wake) -> dict:
     """Optional identity parameters of use_device/set_workspace (design §8.2).
 
@@ -580,6 +588,9 @@ class Gateway:
             raise RoutingError("workspace context limit reached")
         handle = uuid4().hex
         client_id = _client_id()
+        via = caller_device()
+        if via:  # selected through a device's 本机 MCP: who asked, for the gateway's own records
+            meta = {**(meta or {}), "via": f"device:{via}"}
         self.store.put_handle(handle, agent_id, workspace, client_id=client_id, meta=meta or None)
         # Identity (design §8.2): every handle gets a mailbox address.
         kind_hint = client_name = None

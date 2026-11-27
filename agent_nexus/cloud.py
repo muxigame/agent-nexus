@@ -198,6 +198,16 @@ def build_cloud_app(config: dict, root: Path):
         server.auth = StaticBearer([env_secret(anx_env.resolve_token_env(config.get("token_env"), "SERVER_TOKEN"))],
                                    ["tools"], required_scopes=["tools"])
 
+    mcp_path = str(config.get("path", "/mcp")).rstrip("/") or "/mcp"
+
+    def devices_may_use_mcp() -> bool:
+        """The owner's switch ``mcp_devices`` (设置 → 在 AI 客户端中添加 Agent Nexus): joined devices may use the device MCP."""
+        try:
+            value = store.setting("mcp_devices")[0]
+        except Exception:  # noqa: BLE001 - a broken store reads as the default
+            return True
+        return value is not False
+
     def device_credential(agent_id: str, token: str) -> bool:
         """``token`` is ``agent_id``'s current, unrevoked credential (same rules as /ingress)."""
         if not token:
@@ -266,7 +276,8 @@ def build_cloud_app(config: dict, root: Path):
                                    version=peer.anx_version)
             # Legacy agents only check method == "ready"; params.anx is ignored.
             await peer.send({"method": "ready", "params": {
-                "agent_id": agent_id, "anx": anx_features.gateway_anx(facade.devices.display_name(agent_id))}})
+                "agent_id": agent_id, "anx": anx_features.gateway_anx(
+                    facade.devices.display_name(agent_id), mcp_path=mcp_path, device_mcp=devices_may_use_mcp())}})
             # on_device_online (design §8.7): its queued wakes go out now, after "ready".
             facade.wake.device_online(agent_id)
             # With p2p.reflector_hosts configured the reflector starts with the first device
@@ -394,6 +405,20 @@ def build_cloud_app(config: dict, root: Path):
     app = server.http_app(path=config.get("path", "/mcp"), stateless_http=bool(config.get("stateless", True)), session_idle_timeout=3600,
                           host_origin_protection=True, allowed_hosts=hosts,
                           allowed_origins=[config["public_url"]] if public.hostname else [])
+    # The device MCP (feature mcp_device/1): the same FastMCP app for a joined device with its own credential,
+    # which the device's 本机 MCP forwards to. The owner's /mcp route and server.auth stay as they are.
+    from .device_mcp import DeviceMcpAuth
+    for index, route in enumerate(app.router.routes):
+        if isinstance(route, Route) and route.path == config.get("path", "/mcp"):
+            inner = getattr(route.endpoint, "app", route.endpoint)
+            app.router.routes.insert(index, Route(
+                f"{mcp_path}/device", endpoint=DeviceMcpAuth(
+                    inner, check=device_credential, hub=hub, enabled=devices_may_use_mcp,
+                    scopes=list(getattr(server.auth, "required_scopes", None) or ["tools"])),
+                methods=["POST", "DELETE"]))
+            break
+    else:  # pragma: no cover - fastmcp changed its routes: the device MCP is simply absent
+        log.warning("device MCP unavailable: no %s route in the MCP app", config.get("path", "/mcp"))
     app.router.routes.insert(0, WebSocketRoute("/ingress/{agent_id}", ingress))
     app.router.routes.insert(0, Route("/media/{token}", media))
     app.router.routes.insert(0, Route("/healthz", health))

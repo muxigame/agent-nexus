@@ -53,9 +53,12 @@ class LocalOnly:
     matching Origin.
     """
 
-    def __init__(self, app: Any, host: str, port: int):
+    def __init__(self, app: Any, host: str, port: int, mcp_path: str | None = "/mcp"):
         self.app = app
         self.hosts = {f"{name}:{port}" for name in ("127.0.0.1", "localhost", "[::1]", host)}
+        #: the 本机 MCP's path: MCP clients send no X-ANX, so its own, stricter guard decides there
+        #: (agent_nexus.local_mcp.LocalMcp.guard: loopback peer, exact loopback Host, Origin, JSON only)
+        self.mcp_paths = {mcp_path, mcp_path + "/"} if mcp_path else set()
 
     async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
         if scope["type"] == "websocket":
@@ -64,7 +67,7 @@ class LocalOnly:
             if headers.get("host") not in self.hosts or (origin and origin.split("://", 1)[-1] not in self.hosts):
                 await send({"type": "websocket.close", "code": 1008})
                 return
-        if scope["type"] == "http":
+        if scope["type"] == "http" and scope.get("path") not in self.mcp_paths:
             headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope["headers"]}
             reason = self._reject(scope["method"], headers)
             if reason:
@@ -183,6 +186,7 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
             sup.cfg.root, busy=lambda: copy_jobs is not None and copy_jobs.running())))
         if lifecycle is not None:
             tasks.append(asyncio.create_task(lifecycle.beat_loop()))
+        mcp_link.start()  # the agent-nexus entries: shortly after start, then every 6 hours
         if agents_state.get("hub") is not None:
             agents_state["hub"].start()  # sweeps old temp folders now and every few hours
         if p2p_state.get("sessions") is not None:
@@ -210,6 +214,7 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
             if agents_state.get("hub") is not None:
                 with contextlib.suppress(Exception):
                     agents_state["hub"].close()  # no agent CLI outlives the manager
+            mcp_link.close()
             # No orphaned tunnel processes after the manager exits.
             if p2p_state.get("sidecar") is not None:
                 with contextlib.suppress(Exception):
@@ -284,6 +289,104 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
                 await hub.call("lock_report", {"locked": lock.locked}, timeout=10)
 
     hub.on_attach.append(report_lock)
+
+    # -- 本机 MCP (local_mcp.py) and the agent-nexus entry in the CLIs' own config (agents/mcp_link.py) --
+    from .local_mcp import LocalMcp, settings_of as mcp_settings_of
+    from .agents import mcp_link as mcp_link_mod
+    local_mcp = LocalMcp(sup.cfg, cloud_status, hub, lock)
+
+    def link_accounts() -> list:
+        from . import accounts as anx_accounts
+        if anx_accounts.switching_supported():
+            account = anx_accounts.effective(sup.cfg.root, "terminal")
+            return [account] if account is not None else [None]
+        return [None]
+
+    def link_definitions() -> dict:
+        from .agents import registry as agents_registry
+        try:
+            return agents_registry.definitions(agents_registry.load_config(sup.cfg.root))
+        except Exception:  # noqa: BLE001
+            return agents_registry.definitions()
+
+    def gateway_host() -> str:
+        from urllib.parse import urlsplit
+        cloud = joining.cloud_config(sup.cfg.root)
+        url = cloud.get("url") if isinstance(cloud.get("url"), str) else ""
+        with contextlib.suppress(Exception):
+            url = joining.hub_url(url) or url
+        return (urlsplit(url).hostname or "").lower() if url else ""
+
+    mcp_link = mcp_link_mod.MCPLink(sup.cfg.root, local_mcp=local_mcp, accounts=link_accounts,
+                                    definitions=link_definitions, gateway_host=gateway_host)
+    local_mcp.listeners.append(lambda: mcp_link.soon("local mcp state"))
+
+    async def link_on_attach() -> None:
+        mcp_link.soon("gateway connected")
+    hub.on_attach.append(link_on_attach)
+
+    async def mcp_local_api(request: Request) -> JSONResponse:
+        """``GET|PUT /api/mcp/local``: the 本机 MCP's switches, URL, state and each CLI's connector."""
+        if request.method == "PUT":
+            if local_mcp.settings["peers"] == "accounts" and \
+                    not await run_in_threadpool(local_mcp.peer_allowed, request.scope):
+                # "accounts" limits the 本机 MCP to some local accounts: another account must not just switch it
+                # back to "any" (the rest of the console stays open to every local account, docs/design.md)
+                return JSONResponse({"error": "这个账户不能修改本机 MCP 的设置（mcp_local.peers = accounts）",
+                                     "code": "forbidden_account"}, status_code=403)
+            body = await json_body(request)
+            if body is None:
+                return JSONResponse({"error": "body must be a JSON object"}, status_code=400)
+            changes = {}
+            for key in ("enabled", "auto_config"):
+                if key in body:
+                    if not isinstance(body[key], bool):
+                        return JSONResponse({"error": f"{key} must be true or false"}, status_code=400)
+                    changes[key] = body[key]
+            if "peers" in body:
+                if body["peers"] not in ("any", "accounts"):
+                    return JSONResponse({"error": "peers must be any or accounts"}, status_code=400)
+                changes["peers"] = body["peers"]
+
+            def save() -> dict:
+                from . import paths as anx_paths
+                data = anx_paths.read_config(sup.cfg.root) if sup.cfg.path.exists() else {}
+                section = dict(data.get("mcp_local") or {}) if isinstance(data.get("mcp_local"), dict) else {}
+                section.update(changes)
+                data["mcp_local"] = section
+                target = sup.cfg.write_path
+                temporary = target.with_suffix(".json.mcp.tmp")
+                temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                temporary.replace(target)
+                return section
+            try:
+                sup.cfg.mcp_local = await run_in_threadpool(save)
+            except OSError as exc:
+                return JSONResponse({"error": f"无法保存设置：{exc}"}, status_code=500)
+            mcp_link.soon("settings")
+        view = local_mcp.status()
+        try:
+            view["clis"] = await mcp_link.status()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("mcp link status failed: %s", exc)
+            view["clis"] = []
+        return JSONResponse(view)
+
+    async def mcp_local_unlink(_request: Request) -> JSONResponse:
+        """``POST /api/mcp/local/unlink``: the uninstaller -- remove every entry we wrote (as each CLI's user) and
+        add none again while this process runs."""
+        done = await mcp_link.unlink_all(suspend=True)
+        return JSONResponse({"removed": [{k: d.get(k) for k in ("kind", "ok", "path", "error")} for d in done]})
+
+    async def mcp_local_clis(request: Request) -> JSONResponse:
+        """``POST /api/mcp/local/clis {kind, account?, action, force?}``: 接入 / 移除 / 重新检测 / 我已连接."""
+        body = await json_body(request)
+        if body is None or not isinstance(body.get("kind"), str) or not isinstance(body.get("action"), str):
+            return JSONResponse({"error": "kind and action are required"}, status_code=400)
+        account = body.get("account") if isinstance(body.get("account"), str) else None
+        result = await mcp_link.action(body["kind"], account, body["action"], force=body.get("force") is True)
+        status = int(result.pop("status", 200)) if "error" in result else 200
+        return JSONResponse(result, status_code=status)
 
     def lock_error(exc: LockError) -> JSONResponse:
         return JSONResponse(exc.body(), status_code=exc.status)
@@ -1300,7 +1403,7 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
                     "name": joining.local_hostname()}
 
         agents = agents_hub_mod.AgentHub(sup.cfg.root, account=lambda: anx_accounts_agents.effective(sup.cfg.root, "terminal"),
-                                         gateway=agents_gateway, device=agents_device)
+                                         gateway=agents_gateway, device=agents_device, mcp_link=mcp_link)
         agents_state["hub"] = agents
         agents_state["handlers"] = agents.handlers()
         # Other devices and the cloud console only when allowed: an agent runs commands like a terminal does,
@@ -1871,6 +1974,12 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
     ]
     from starlette.routing import WebSocketRoute
     routes += [
+        # the 本机 MCP: no X-ANX (LocalOnly leaves /mcp to LocalMcp.guard)
+        Route("/mcp", local_mcp),
+        Route("/mcp/", local_mcp),
+        Route("/api/mcp/local", mcp_local_api, methods=["GET", "PUT"]),
+        Route("/api/mcp/local/clis", mcp_local_clis, methods=["POST"]),
+        Route("/api/mcp/local/unlink", mcp_local_unlink, methods=["POST"]),
         Route("/api/lock", lock_api, methods=["GET", "POST"]),
         Route("/api/accounts", accounts_api, methods=["GET", "PUT"]),
         Route("/api/lock/password", lock_api, methods=["PUT"]),
@@ -1895,4 +2004,6 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
     app.state.hub = hub
     app.state.lock = lock
     app.state.p2p = p2p_state
+    app.state.local_mcp = local_mcp
+    app.state.mcp_link = mcp_link
     return LocalOnly(app, sup.cfg.host, sup.cfg.port)

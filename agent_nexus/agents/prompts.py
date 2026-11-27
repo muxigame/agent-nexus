@@ -64,6 +64,12 @@ VARIABLES: tuple[tuple[str, str], ...] = (
     ("handle", "网关工作区句柄（仅经网关）"),
     ("context_device", "要操作的设备（经网关）"),
     ("context_workdir", "要操作的目录（经网关）"),
+    ("target_device", "工具要操作的设备（经网关时是目标设备，否则是运行设备）"),
+    ("target_workdir", "工具要操作的目录"),
+    ("mcp", "本次使用的 Agent Nexus MCP 连接器名"),
+    ("mcp_prefix", "该连接器的工具名前缀"),
+    ("mcp_state", "连接器状态（local / gateway_config / gateway_account / both / none / unknown）"),
+    ("mcp_hint", "已接入的 Agent Nexus MCP 和选好的工作区（一段说明）"),
 )
 VARIABLE_NAMES = tuple(name for name, _ in VARIABLES)
 _DESCRIPTIONS = dict(VARIABLES)
@@ -92,10 +98,11 @@ BUILTIN_FRAGMENTS: tuple[dict, ...] = (
         "- 动手做较大的改动前，用 mail_who 看看谁在线、在做什么，避免同时改同一批文件。\n"
         "- 需要别人配合时用 mail_send 发给对方的地址；确实需要所有人知道的事才发给 @all。\n"
         "- 工具结果末尾提示有未读邮件时，用 mail_inbox / mail_read 查看，回复里写清楚结论。")},
+    {"id": "nexus_mcp", "title": "Agent Nexus MCP 与工作区", "scope": "all", "kinds": [], "text": "$mcp_hint"},
     {"id": "gateway", "title": "网关工作方式", "scope": "gateway", "kinds": [], "text": (
         "这次要操作的是另一台设备：$context_device 上的 $context_workdir，不是你所在的 $device。\n"
-        "- 通过 Agent Nexus 网关的设备工具操作它（file_read、file_write、edit_file、file_grep、exec_command 等），"
-        "每次调用都带上 workspace_id=\"$handle\"，这个工作区已经为你选好。\n"
+        "- 通过上面说的 Agent Nexus MCP 的设备工具操作它（file_read、file_write、edit_file、file_grep、exec_command 等），"
+        "每次调用都带上 workspace_id=\"$handle\"。\n"
         "- 不要用 use_device 换到别的设备或目录，除非用户要求。workspace_id 失效时，"
         "调用 use_device(device=\"$context_device\", workdir=\"$context_workdir\") 重新获取。\n"
         "- 你自带的文件工具和 shell 只作用于 $device，不要用它们去改 $context_device 上的文件。\n"

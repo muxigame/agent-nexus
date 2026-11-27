@@ -148,6 +148,28 @@ function kindMark(kind, opts = {}) {
   return el("span", { class: `aa-mark ${opts.size || "sm"}`, dataset: { kind: "api" }, "aria-hidden": "true" }, "API");
 }
 
+// ---------------------------------------------------------------- 本机 MCP note
+
+// 本机 MCP (docs/design.md "本机 MCP"): a run gets the Agent Nexus connector by itself (the agent-nexus entry, the
+// user's own gateway connector, or per-run flags). Only when nothing can attach is there a note: which reason.
+const NEXUS_MCP_DOWN = {
+  off: "本机 MCP 已关闭", exposed: "本机 MCP 未开放", not_joined: "未加入网关", offline: "网关未连接",
+  revoked: "已被吊销", locked: "已锁定", gateway_old: "网关版本过旧",
+  device_access_off: "网关关闭了设备接入", rejected: "凭据不被网关接受",
+};
+export function nexusMcpNote(info) {
+  if (!info) return null;
+  const nx = info.nexus_mcp;
+  if (!nx) { // an older device: only its config-file check
+    return info.gateway_mcp === false ? { text: "未检测到网关连接器", down: "未检测到网关连接器", title: "在运行设备上添加网关 MCP（网关控制台 → 设置 → 在 AI 客户端中添加 Agent Nexus）" } : null;
+  }
+  if (["gateway_config", "gateway_account", "both", "unknown", "name_taken"].includes(nx.state)) return null;
+  const down = NEXUS_MCP_DOWN[nx.local_state] || (nx.state === "unsupported" && !nx.attach ? "这个 CLI 接不了" : "");
+  if (!down) return null;
+  const reason = NEXUS_MCP_DOWN[nx.local_state] ? nx.local_reason || down : nx.label || down;
+  return { text: `Agent Nexus MCP：${down}`, down, title: `${reason}（本机控制台 → 设置 → 本机 MCP）` };
+}
+
 // ---------------------------------------------------------------- context usage (§16.3)
 
 /** 872100 -> "872.1K", 1000000 -> "1M" (the ring's title and its no-limit count). */
@@ -1052,7 +1074,7 @@ export function mountChat(container, api, opts = {}) {
       el("button", { class: "btn btn-sm", type: "button", onclick: () => (S.devices.length ? selectDevice(S.device) : init()) }, "重试")) : null;
     // gateway mode: one line saying where the CLI runs and whose folder it works on (and what is in the way)
     const problem = contextProblem();
-    const mcpMissing = agentInfo()?.gateway_mcp === false;
+    const mcpNote = nexusMcpNote(agentInfo());
     const dirChip = () => chips.querySelector(".chat-chip-dir");
     const gateway = gatewayCtx() ? el("div", { class: `chat-ctx ${problem ? "warn" : ""}` }, icon(problem ? "triangle-alert" : "network", { size: 14 }),
       el("span", { class: "grow chat-ctx-text", title: `CLI 在 ${deviceName()} 上运行，经网关操作 ${targetName(c.device)} 上的 ${c.workdir}` },
@@ -1060,8 +1082,7 @@ export function mountChat(container, api, opts = {}) {
         el("span", { class: "chat-ctx-run" }, "CLI 在 ", el("strong", {}, deviceName()), " 上运行，"), "经网关操作 ",
         el("strong", { class: "chat-ctx-target" }, targetName(c.device)), " 的 ", el("code", {}, shortPath(c.workdir)),
         problem ? `（${problem}）` : ""),
-      mcpMissing ? el("span", { class: "chat-ctx-warn", title: `${kindShort(S.kind, agentInfo())} 没有配 Agent Nexus MCP 连接器，调用不了 use_device：在 ${deviceName()} 上添加网关 MCP（网关控制台 → 设置 → AI 客户端接入）` },
-        icon("triangle-alert", { size: 13 }), "未检测到网关连接器") : null,
+      mcpNote ? el("span", { class: "chat-ctx-warn", title: mcpNote.title }, icon("triangle-alert", { size: 13 }), mcpNote.text) : null,
       el("button", { class: "btn btn-ghost btn-sm", type: "button", onclick: () => { const anchor = dirChip(); if (anchor) dirMenu(anchor); } }, "更改"),
       el("button", { class: "btn btn-ghost btn-icon btn-sm", type: "button", "aria-label": `改回 ${deviceName()} 上的目录`, title: `改回 ${deviceName()} 上的目录`,
         onclick: () => { S.context = directContext(); persist(); renderBar(); renderComposer(); renderWelcome(); } }, icon("x", { size: 14 }))) : null;
@@ -1367,9 +1388,6 @@ export function mountChat(container, api, opts = {}) {
       return box;
     };
 
-    const info = agentInfo();
-    const mcpWarn = info?.gateway_mcp === false ? el("div", { class: "chat-dir-warn" }, icon("triangle-alert", { size: 13 }),
-      el("span", {}, `只影响其他设备上的目录：${kindShort(S.kind, info)} 要通过网关的 Agent Nexus MCP 才能操作别的设备，${deviceName()} 上的它还没配这个 MCP（网关控制台 → 设置 → AI 客户端接入）。本机目录不受影响。`)) : null;
     const content = el("div", { class: "chat-dirs" },
       all.length || S.devicesNote ? el("div", { class: "chat-dir-dev-head runner" }, icon(remote ? "monitor" : "laptop", { size: 14 }),
         el("span", { class: "chat-dir-dev-name truncate", title: deviceName() }, deviceName()), el("span", { class: "chat-dir-tag" }, "运行设备"),
@@ -1385,7 +1403,6 @@ export function mountChat(container, api, opts = {}) {
       all.length ? [
         el("div", { class: "menu-sep" }),
         el("div", { class: "chat-menu-heading chat-dir-others" }, icon("network", { size: 12 }), "其他设备 · 经网关"),
-        mcpWarn,
         online.map(section),
         !online.length ? el("p", { class: "chat-dirs-empty" }, "网关上没有其他在线设备。") : null,
         offline.length ? el("p", { class: "chat-dirs-empty chat-dir-offline" },
@@ -1561,9 +1578,9 @@ export function mountChat(container, api, opts = {}) {
       mount(composerNote,
         S.session && !S.rid ? el("span", { class: "chat-note-resume" }, canResume(S.session.kind)
           ? "将续接这个会话" : `${kindShort(S.session.kind, agentInfo(S.session.kind))} 不支持续接，发消息会开一个新对话`) : null,
-        gatewayCtx() && agentInfo()?.gateway_mcp === false
-          ? el("span", { class: "chat-note-warn", title: `经网关模式需要 ${name} 配置 Agent Nexus MCP 连接器，否则它调用不了 use_device` },
-            icon("triangle-alert", { size: 13 }), `${name} 没有配置网关连接器`) : null);
+        gatewayCtx() && nexusMcpNote(agentInfo())
+          ? el("span", { class: "chat-note-warn", title: nexusMcpNote(agentInfo()).title },
+            icon("triangle-alert", { size: 13 }), `${name} 无法使用 Agent Nexus MCP：${nexusMcpNote(agentInfo()).down}`) : null);
     }
     composerNote.hidden = !composerNote.childElementCount;
   }
