@@ -291,3 +291,44 @@ FEATURE = "agents/1"
   sessionListMetadata.val {blank, lastPromptAt}, sessionStats.val {turns, ...}, workingDirectory.val, sandboxMode.val, agentPreset.val, tokenUsage.val, ...}}}`。
   会话列表用这个索引（不需要解压 zstd）：标题 = `title.val` 或 `titleInput.val.first`；`blank: true` 的空会话默认隐藏。读历史需要 zstd（可选依赖，缺失时只显示元数据）。
 - 适配器选择：优先 `acp`（流式 + 审批）；ACP 初始化失败时退回 `headless --json`，续接用 `--session-id`。
+
+## 15. 实机核实（第二轮：新代码直接跑在真机上）
+
+在 Windows 工作电脑、4090 主机（Windows）、笔记本（Windows）、Mac mini、台式机（Windows）、一台 Linux 服务器上，把本分支的
+`agents/` 模块下到临时目录直接运行（只输出计数和字段名，不读会话内容；对话只在空临时目录里发测试句）。得到的事实与对应改动：
+
+**Codex**
+- 桌面版（originator `codex_work_desktop`）分叉 / 续接的会话：开头两条 `session_meta`，第三行是几 MB 的 `compacted`
+  （`payload.replacement_history` 里是之前的消息），会话自己的第一句在它之后。只读头尾时 167 个会话里 103 个没标题 →
+  头尾找不到时按行流式扫描（上限 `READ_BYTES`，结果随摘要缓存），再退回 compacted 历史里的第一句。修复后 165/168 有标题。
+- `session_index.jsonl` 只覆盖一部分会话（121 条里只匹配 25 个），不能只靠它。
+- `codex exec --json` 的非致命提示（如 config.toml 里有不认识的设置）会同时作为 `error` item 和顶层 `error` 事件出现 → 每轮去重、显示为警告；
+  真正失败时先来一个顶层 `error`、再来同文的 `turn.failed`（如账户不支持配置的模型）→ 顶层 `error` 暂存一行，后面是同文失败就只显示失败。
+- 官方安装脚本（Windows：`irm https://chatgpt.com/codex/install.ps1 | iex`）装到 `%LOCALAPPDATA%\Programs\OpenAI\Codex\bin\codex.exe`；
+  第一行就是 "==> Installing Codex CLI"（在下载之前），进度估计不能把它当作安装阶段。装完同一进程里就能找到（不依赖 PATH 刷新）。
+- npm 的 `.cmd` 启动器和原生 `codex.exe` 两种都跑通两轮对话。
+
+**DeepSeek Harness（dsh 0.2.2-rc.5）**
+- `session.v4.jsonl` 记录：`session`（id、createdAt、cwd）、`user/message`（`data.content[]`，只有 `data.source.kind == "user"` 是用户说的，
+  `runtime-context` / `skill-catalog` 是注入的）、`assistant/message`（`data.message.content[]`：`reasoning` / `text` / `tool-call {id,name,arguments(JSON 字符串)}`）、
+  `tool/call`、`tool/result`（`data.message.toolCallId`、`content[]`、`isError`）、`turn/start`、`turn/end`（`reason.kind`）、`session/title`（dsh 自己取的标题）、
+  `system/message`、`request/header` 等。读历史按这些解析。
+- ACP 的 `tool_call` 对内置读文件工具报 `kind: "other"`、`title: "read"` → 名字用 title。
+- dsh 不声明 `promptCapabilities.embeddedContext`，系统提示词只能拼在第一条消息前面，dsh 会用这段混合文字取标题 →
+  控制台记录自己发起的会话的第一句（`first_prompt`），列表里用它当标题。声明了 embeddedContext 的 ACP CLI 会改用独立的 `resource` 块传系统提示词。
+- dsh 机器上的 Python 有 `zstandard`，`.zstd` 记录能直接解压。
+
+**Claude Code**
+- 只装了 Claude 桌面版的机器上，桌面版自带完整的 Claude Code CLI：
+  macOS `~/Library/Application Support/Claude/claude-code/<版本>/<id>/claude.app/Contents/MacOS/claude`（见到 2.1.331），
+  Windows `%APPDATA%\Claude\claude-code\<版本>\claude.exe`（见到 2.1.275、2.1.280）。检测时取最新版本。
+  这个 CLI 单独登录（`claude auth status` → `loggedIn: false`，桌面版的登录不共享）。
+- 未登录时 `claude -p` 回一条 "Not logged in · Please run /login" 的回复，再给一个同文的失败 result → 不重复显示，改成指向「在终端登录」的提示。
+
+**运行环境**
+- Linux 服务器上 agent-nexus 以 root 运行且没有 `HOME` 环境变量：检测和会话发现正确落到 `/root`。
+- 没有 npm 时：Claude Code / Codex 自动改用官方安装脚本；dsh / Gemini 只能用 npm，给出需要的 Node.js 版本（dsh 另外建议装自带 dsh 的桌面版）。
+- 有的国内服务器访问 raw.githubusercontent.com 很慢或不通。
+
+**尚未在真机上验证**：经真实网关从云端控制台对话（需要网关和设备升级到本分支；同样的流程在本地真实网关 + 两台设备进程上已跑通）；
+Claude Code 的真实回复（几台机器上的 Claude Code 都未登录）。
