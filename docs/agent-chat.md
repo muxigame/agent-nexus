@@ -330,5 +330,11 @@ FEATURE = "agents/1"
 - 没有 npm 时：Claude Code / Codex 自动改用官方安装脚本；dsh / Gemini 只能用 npm，给出需要的 Node.js 版本（dsh 另外建议装自带 dsh 的桌面版）。
 - 有的国内服务器访问 raw.githubusercontent.com 很慢或不通。
 
-**尚未在真机上验证**：经真实网关从云端控制台对话（需要网关和设备升级到本分支；同样的流程在本地真实网关 + 两台设备进程上已跑通）；
-Claude Code 的真实回复（几台机器上的 Claude Code 都未登录）。
+**经网关（真机）**：在 Windows 工作电脑上用本分支起一个临时网关（loopback、独立数据目录）并让一个临时设备客户端加入，
+以网关主人身份通过 `/api/devices/{id}/agents/*` 驱动：设备宣告 `agents/1`；`agent_info` 看到 Codex 0.164.0、dsh 0.2.2-rc.5、Gemini 0.45.0；
+`agent_sessions` 按 CLI 分组（claude 168、codex 174、dsh 27、gemini 43）；Codex（codex-exec，只读）和 dsh（acp）各两轮对话都正常，
+之后会话出现在列表里（标题是第一句、managed），历史可读，改名 / 置顶 / 隐藏生效；`agent_dirs`、提示词预览正常。
+注意：网关主人的写请求需要 `X-ANX: 1` 头（浏览器控制台会带）；设备客户端被强杀时 muxi-p2p-agent 子进程会留下。
+
+**尚未在真机上验证**：Claude Code 的真实回复（几台机器上的 Claude Code 都未登录）；经网关模式让一台设备上的 CLI 操作另一台设备的目录
+（需要 CLI 配好 Agent Nexus MCP 连接器，本地真实网关 + 两台设备进程上已跑通）。
