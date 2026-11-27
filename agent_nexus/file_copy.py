@@ -560,8 +560,17 @@ class RelaySession(Session):
         # the source first: hashing a resumed prefix may take minutes, and an upload left idle
         # that long on the far device would be reaped
         reader = await open_source(offset)
+        beginning = asyncio.ensure_future(endpoint.rpc("fx_put_begin", params))
         try:
-            started = await endpoint.rpc("fx_put_begin", params)
+            started = await asyncio.shield(beginning)
+        except asyncio.CancelledError:
+            # cancelled while the far side opens the part: let it answer, then drop that part (else it stays)
+            with contextlib.suppress(BaseException):
+                opened = await asyncio.wait_for(asyncio.shield(beginning), 15)
+                if opened.get("id"):
+                    await _settled(endpoint.rpc("fx_put_abort", {"id": opened["id"], "discard": True}), 15)
+            await reader.aclose()
+            raise
         except BaseException:
             await reader.aclose()
             raise
@@ -605,8 +614,21 @@ class RelaySession(Session):
         finally:
             await reader.aclose()
             if not done:
-                with contextlib.suppress(BaseException):
-                    await asyncio.wait_for(endpoint.rpc("fx_put_abort", {"id": upload_id, "discard": discard}), 15)
+                await _settled(endpoint.rpc("fx_put_abort", {"id": upload_id, "discard": discard}), 15)
+
+
+async def _settled(call: Awaitable, timeout: float) -> None:
+    """Run a clean-up call to its end even while the caller is being cancelled (a cancelled job is
+    cancelled again by its own shutdown): the far side must hear it, or an abandoned part stays."""
+    task = asyncio.ensure_future(call)
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout)
+    except asyncio.CancelledError:
+        with contextlib.suppress(BaseException):
+            await asyncio.wait_for(asyncio.shield(task), timeout)
+        raise
+    except Exception:  # noqa: BLE001 - best effort: the far side reaps an idle part after 10 minutes
+        pass
 
 
 # -- the job ------------------------------------------------------------------------------------

@@ -179,8 +179,19 @@ class LinkSession(Session):
     async def _drop_stream(self) -> None:
         stream, self.stream = self.stream, None
         if stream is not None:
-            with contextlib.suppress(Exception):
-                await stream.close()
+            # A cancelled job closes its streams while being cancelled (twice: the job and its worker): the
+            # close must still finish, since it is what lets the far side discard an abandoned part.
+            closing = asyncio.ensure_future(stream.close())
+            try:
+                await asyncio.shield(closing)
+            except asyncio.CancelledError:
+                with contextlib.suppress(BaseException):
+                    await asyncio.wait_for(asyncio.shield(closing), 8)
+                self.holding.close()
+                self.holding = contextlib.ExitStack()
+                raise
+            except Exception:  # noqa: BLE001
+                pass
         self.holding.close()
         self.holding = contextlib.ExitStack()
 

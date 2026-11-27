@@ -130,6 +130,7 @@ class _Stream:
     def __init__(self):
         self.reader = self.writer = None
         self.broken = False
+        self.aborted = False  # a file was abandoned (cancel): only close() may follow, which waits for the far side
 
     async def _open(self, route, ticket: str, op: str) -> None:
         self.reader, self.writer, _ready = await _open(route, ticket, {"op": op})
@@ -206,7 +207,7 @@ class P2PPutStream(_Stream):
         Returns the result, or raises TransferError (422 = refused by the far side)."""
         import contextlib
         import time
-        if self.broken or self.writer is None:
+        if self.broken or self.aborted or self.writer is None:
             raise TransferError("连接已关闭")
         self.seq += 1
         seq = self.seq
@@ -229,10 +230,15 @@ class P2PPutStream(_Stream):
             await writer.drain()
             finished = True
         except asyncio.CancelledError:
-            # a cancelled job leaves no part behind
-            with contextlib.suppress(Exception):
+            # A cancelled job leaves no part behind. The far side reads frames in order, so the abort is
+            # handled before the end frame that close() sends; close() then waits for its answer, and the
+            # job only reports "cancelled" once the part is gone. A stream that just dies (no abort) keeps a
+            # keyed part for the next run instead: the far side cannot tell a cancel from a broken route.
+            try:
                 writer.write(rh.frame(rh.EXIT, {"seq": seq, "abort": True, "discard": True}))
-            self.broken = True
+                self.aborted = True
+            except Exception:  # noqa: BLE001
+                self.broken = True
             raise
         except (ConnectionError, OSError, asyncio.IncompleteReadError) as exc:
             self.broken = True
@@ -242,7 +248,8 @@ class P2PPutStream(_Stream):
         finally:
             if not finished:
                 self.pending.pop(seq, None)
-                self.broken = True  # the far side is in the middle of a file: this stream is done
+                if not self.aborted:
+                    self.broken = True  # the far side is in the middle of a file: this stream is done
         deadline = time.monotonic() + answer_timeout(meta.get("size"))
         while True:
             done, _ = await asyncio.wait({future}, timeout=5)
@@ -279,7 +286,7 @@ class P2PGetStream(_Stream):
     async def read(self, params: dict) -> tuple[dict, AsyncIterator[bytes], dict]:
         """(meta, chunks, final): ``final`` gets ``sha256`` / ``size`` / ``mtime_ns`` once the
         chunks are exhausted. Stopping early leaves the stream unusable (it is then closed)."""
-        if self.broken or self.writer is None:
+        if self.broken or self.aborted or self.writer is None:
             raise TransferError("连接已关闭")
         self.seq += 1
         seq = self.seq
