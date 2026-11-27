@@ -152,6 +152,18 @@ def test_locate_claude_bundled_with_the_desktop_app_newest_version(box, monkeypa
     assert old.exists()
     assert registry.locate(registry.definitions()["claude"], box["env"]) == str(new)
 
+
+def test_locate_claude_bundled_with_the_desktop_app_on_windows(box, monkeypatch):
+    monkeypatch.setattr(registry, "os_key", lambda platform=None: "windows")
+    monkeypatch.setattr(registry, "_usable", lambda path: os.path.isfile(path))
+    base = box["tmp"] / "Roaming" / "Claude" / "claude-code"
+    for version in ("2.1.275", "2.1.280", "2.1.99"):
+        (base / version).mkdir(parents=True)
+        (base / version / "claude.exe").write_text("")
+    env = {**box["env"], "APPDATA": str(box["tmp"] / "Roaming")}
+    found = registry.locate(registry.definitions()["claude"], env)
+    assert found is not None and found.replace("\\", "/").endswith("2.1.280/claude.exe")
+
 def test_expand_templates():
     env = {"HOME": "/h"}
     assert registry.expand("{DSH_HOME:.dsh}/.credentials.yaml", env) == os.path.join("/h", ".dsh") + "/.credentials.yaml"

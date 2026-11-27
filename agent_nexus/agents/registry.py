@@ -120,7 +120,8 @@ def builtin_definitions() -> dict[str, AgentDef]:
         system_prompt_args=["--append-system-prompt", "{system_prompt}"],
         # the Claude desktop app keeps its own Claude Code here (seen: 2.1.331 on macOS); it is a full CLI, signed
         # out until `claude auth login` -- found when no standalone claude is installed
-        extra_paths={"darwin": ["{HOME}/Library/Application Support/Claude/claude-code/*/*/claude.app/Contents/MacOS/claude"]},
+        extra_paths={"darwin": ["{HOME}/Library/Application Support/Claude/claude-code/*/*/claude.app/Contents/MacOS/claude"],
+                     "windows": ["{APPDATA}/Claude/claude-code/*/claude.exe"]},  # seen: 2.1.280 on Windows
         resume=True, approvals=True,
         # "ask": the runner adds --mcp-config with anx's approval server and fills {approval_tool} (§5).
         permission_flags={"ask": ["--permission-prompt-tool", "{approval_tool}"],
@@ -488,7 +489,7 @@ def _version_key(path: str) -> list:
 def _newest_glob(pattern: str) -> list[str]:
     """Paths matching ``pattern``, newest version first (``2.1.331`` before ``2.1.40``)."""
     import glob
-    return sorted(glob.glob(pattern), key=_version_key, reverse=True)
+    return [os.path.normpath(p) for p in sorted(glob.glob(pattern), key=_version_key, reverse=True)]
 
 
 def locate(d: AgentDef, env: dict) -> str | None:
