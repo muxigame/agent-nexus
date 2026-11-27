@@ -598,7 +598,8 @@ def test_codex_nonfatal_error_is_one_warning_per_turn():
     assert adapter.feed(json.dumps({"type": "error", "message": note})) == []
     adapter.feed('{"type": "turn.completed", "usage": {}}')
     adapter.feed('{"type": "turn.started"}')
-    assert adapter.feed(json.dumps({"type": "error", "message": note}))[0]["level"] == "warn"
+    assert adapter.feed(json.dumps({"type": "error", "message": note})) == []  # held for one line
+    assert adapter.feed('{"type": "turn.completed", "usage": {}}')[0]["level"] == "warn"
 
 def test_approve_mcp_protocol(monkeypatch, capsys):
     monkeypatch.setattr(approve_mcp, "decide", lambda url, token, arguments, **_: {"behavior": "allow",
@@ -724,3 +725,21 @@ def test_claude_error_said_as_reply_is_not_echoed():
     error = next(e for e in events if e["type"] == "error")
     assert error["text"] != note and "登录" in error["text"]
     assert events[-1]["state"] == "failed"
+
+
+def test_codex_error_then_turn_failed_with_the_same_message_shows_once():
+    # seen on a real device: an unsupported model is reported as an error event, then as turn.failed
+    adapter = adapters.make(registry.builtin_definitions()["codex"], adapters.AdapterOptions(binary="x", workdir="/w"))
+    adapter.argv("hi")
+    note = "The 'gpt-5.5' model is not supported when using Codex with a ChatGPT account."
+    adapter.feed('{"type": "turn.started"}')
+    assert adapter.feed(json.dumps({"type": "error", "message": note})) == []
+    events = adapter.feed(json.dumps({"type": "turn.failed", "error": {"message": note}}))
+    assert [(e["type"], e.get("level"), e.get("text")) for e in events if e["type"] == "error"] == [("error", None, note)]
+    # a notice that is not followed by the same failure still shows, as a warning
+    adapter.feed('{"type": "turn.started"}')
+    assert adapter.feed(json.dumps({"type": "error", "message": "config notice"})) == []
+    events = adapter.feed('{"type": "turn.completed", "usage": {}}')
+    assert events[0] == {"type": "error", "level": "warn", "text": "config notice"}
+    assert adapter.feed(json.dumps({"type": "error", "message": "last words"})) == []
+    assert adapter.exited(0, "") == [{"type": "error", "level": "warn", "text": "last words"}]

@@ -559,6 +559,19 @@ class CodexExec(Adapter):
         return self._stdin
 
     def feed(self, line: str) -> list[dict]:
+        """A top-level ``error`` is held for one line: when the next line is ``turn.failed`` with the same message
+        (seen on a real device: "The 'gpt-5.5' model is not supported ..."), only the failure is shown."""
+        events = self._feed(line)
+        held, self._held = getattr(self, "_held", None), None
+        if events and events[0].get("_hold"):
+            self._held = {k: v for k, v in events[0].items() if k != "_hold"}
+            events = events[1:]
+        if held and not any(e.get("type") == "error" and not e.get("level") and e.get("text") == held["text"]
+                            for e in events):
+            events = [held, *events]
+        return events
+
+    def _feed(self, line: str) -> list[dict]:
         obj = _json(line)
         if not isinstance(obj, dict):
             return []
@@ -583,7 +596,7 @@ class CodexExec(Adapter):
             return [{"type": "error", "text": str(error.get("message") or "Codex 这一轮失败了")},
                     {"type": "status", "state": "failed", "session_id": self.session_id}]
         if kind == "error":
-            return self._warn(str(obj.get("message") or "Codex 报告了一个错误"))
+            return [{**event, "_hold": True} for event in self._warn(str(obj.get("message") or "Codex 报告了一个错误"))]
         if kind in ("item.started", "item.updated", "item.completed") and isinstance(obj.get("item"), dict):
             return self._item(obj["item"], kind.split(".")[1])
         return []
@@ -693,9 +706,10 @@ class CodexExec(Adapter):
         return []
 
     def exited(self, code: int | None, stderr_tail: str) -> list[dict]:
+        held, self._held = getattr(self, "_held", None), None
         if self._turn_done:  # turn.completed / turn.failed already closed the turn
-            return []
-        return super().exited(code, stderr_tail)
+            return [held] if held else []
+        return ([held] if held else []) + super().exited(code, stderr_tail)
 
 
 def _codex_status(status: Any, exit_code: Any, done: bool) -> str:
