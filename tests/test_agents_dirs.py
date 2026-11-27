@@ -264,8 +264,8 @@ def test_readonly_files_removed(tmp_path):
 
 def test_create_with_account_where_chown_does_not_exist(tmp_path, monkeypatch):
     # Windows CI: os.chown is POSIX-only; an account without a Windows session must not crash hand_over
-    from agent_nexus.accounts import Account
+    from agent_nexus import accounts
     monkeypatch.delattr(os, "chown", raising=False)
-    tmp = T.TmpDirs(tmp_path)
-    path = tmp.create("r3", Account("me", 0, 0, str(tmp_path), "/bin/sh", []))
+    path = tmp_path / "run" / "r3"
+    accounts.hand_over(accounts.Account("me", 0, 0, str(tmp_path), "/bin/sh", []), path)
     assert path.is_dir()
