@@ -343,4 +343,7 @@ FEATURE = "agents/1"
 `mcp_servers.<name>.default_tools_approval_mode`（取值 auto / prompt / writes / approve，从 0.164 的二进制里查到）设为 `approve` 后正常 →
 经网关模式下非只读的 Codex 运行，对检测到的 Agent Nexus 连接器自动加这条覆盖；没有连接器时对话里给出提示，`agent_info.gateway_mcp` 报告检测结果。
 
-**尚未在真机上验证**：Claude Code 的真实回复（几台机器上的 Claude Code 都未登录）。
+**Claude Code（真机，Mac mini）**：桌面版自带的 Claude Code 2.1.331 需要单独 `auth login`（桌面版的登录不给命令行用；登录信息进钥匙串
+`Claude Code-credentials`）。登录后：`claude-stream` 两轮对话正常（第一轮用 `Read` 读测试文件并回复内容，第二轮续接）；会话出现在列表里，
+目录和标题正确，历史含工具调用；"需要审批"模式下 `echo` 这类只读命令 Claude Code 自己放行，`touch` 这类写操作经 anx 的审批 MCP
+发出审批请求，允许后执行。
