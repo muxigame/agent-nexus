@@ -9,7 +9,7 @@ from agent_nexus.web import build_app
 
 CORE = {"tokens.css": "text/css", "ui.css": "text/css", "icons.js": "text/javascript", "ui.js": "text/javascript",
         "appearance.js": "text/javascript", "style-pure.css": "text/css", "style-mica.css": "text/css",
-        "LICENSE-lucide.txt": "text/plain"}
+        "LICENSE-lucide.txt": "text/plain", "LICENSE-simple-icons.txt": "text/plain"}
 
 
 def gateway_client(monkeypatch, tmp_path):
@@ -82,7 +82,7 @@ def test_style_sheets_are_scoped():
                 assert f'[data-style="{name}"]' in selector, (name, selector)
 
 
-AGENT_CHAT = ("chat.js", "chat-page.js", "prompts.js", "agent-admin.js", "agent-wire.js", "api-admin.js")
+AGENT_CHAT = ("chat.js", "chat-page.js", "prompts.js", "agent-admin.js", "agent-wire.js", "api-admin.js", "kind-icons.js")
 
 
 @pytest.mark.parametrize("which", ["gateway", "local"])

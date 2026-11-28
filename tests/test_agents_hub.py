@@ -111,7 +111,7 @@ async def test_handlers_are_exactly_the_spec_ops_and_never_raise(hub):
         "agent_info", "agent_install", "agent_install_job", "agent_sessions", "agent_session_read",
         "agent_session_meta", "agent_run_open", "agent_run_send", "agent_run_read", "agent_run_answer",
         "agent_run_stop", "agent_run_close", "agent_run_list", "agent_dirs", "agent_prompts", "agent_prompt_save",
-        "agent_prompt_preview", "agent_tmp_list", "agent_tmp_clean",
+        "agent_prompt_preview", "agent_tmp_list", "agent_tmp_clean", "agent_models",
         # §16.4: API providers
         "agent_api_providers", "agent_api_provider_save", "agent_api_provider_delete", "agent_api_key_set",
         "agent_api_test", "agent_api_models"}
@@ -611,3 +611,210 @@ async def test_claude_gets_the_connector_allowed_and_the_flags_file_in_every_mod
     finally:
         os.environ.pop("FAKE_ARGV_LOG", None)
         hub.close()
+
+
+# ---------------------------------------------------------------------------------------------- codex account apps
+
+async def test_codex_with_an_account_connector_gets_the_local_mcp_and_is_told_not_to_use_the_app(box):
+    """The owner's report: Codex reached the gateway only through a ChatGPT account connector "workspace" (an app
+    under codex_apps), whose calls codex exec refuses ("requires approval, but approval policy is never")."""
+    hub, link = linked_hub(box)
+    link.account_name = lambda account: "user"
+    link.probe.put("user", "codex", {"state": "present", "source": "probe",
+                                     "connectors": [{"name": "workspace", "prefix": "", "stale": True}]})
+    handlers = hub.handlers()
+    log = box["tmp"] / "argv-account.jsonl"
+    os.environ["FAKE_ARGV_LOG"] = str(log)
+    try:
+        for permission in ("ask", "full"):
+            opened, events, argv = await open_and_argv(handlers, log, {
+                "kind": "codex", "workdir": str(box["home"] / "proj"), "prompt": "hi", "permission": permission})
+            assert 'mcp_servers.agent-nexus.url="http://127.0.0.1:8399/mcp"' in argv
+            assert 'mcp_servers.agent-nexus.default_tools_approval_mode="approve"' in argv
+            assert argv.index('mcp_servers.agent-nexus.url="http://127.0.0.1:8399/mcp"') < argv.index("--json")
+            enabled = [a for a in argv if a.startswith("mcp_servers.agent-nexus.enabled_tools=")]
+            if permission == "ask":
+                assert enabled and "exec_command" not in json.loads(enabled[0].split("=", 1)[1])
+            else:
+                assert not enabled  # full: every tool approved
+            text = codex_prompt(argv)
+            assert "临时接入了本机 Agent Nexus MCP（连接器 agent-nexus" in text
+            assert "不要调用 workspace.*" in text
+            assert not any(e["type"] == "error" and "无法审批" in e.get("text", "") for e in events)
+        assert not (box["home"] / ".codex" / "config.toml").exists()  # run-only: nothing written
+        # the 本机 MCP is down: the run is warned that it cannot use the Agent Nexus tools
+        link.local._state = "revoked"
+        opened, events, argv = await open_and_argv(handlers, log, {
+            "kind": "codex", "workdir": str(box["home"] / "proj"), "prompt": "hi"})
+        assert any(e["type"] == "error" and "codex exec 无法审批" in e.get("text", "") for e in events)
+        assert not any(a.startswith("mcp_servers.agent-nexus.url") for a in argv)
+    finally:
+        os.environ.pop("FAKE_ARGV_LOG", None)
+        hub.close()
+
+
+# ---------------------------------------------------------------------------------------------- work folders
+
+def codex_session_in(home: Path, folder: Path, session_id: str) -> None:
+    day = home / ".codex" / "sessions" / "2026" / "11" / "27"
+    day.mkdir(parents=True, exist_ok=True)
+    lines = [{"timestamp": "2026-11-27T10:00:00.000Z", "type": "session_meta",
+              "payload": {"id": session_id, "timestamp": "2026-11-27T10:00:00.000Z", "cwd": str(folder),
+                          "originator": "codex_cli_rs", "cli_version": "0.164.0"}},
+             {"timestamp": "2026-11-27T10:00:01.000Z", "type": "response_item",
+              "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "在外面的项目"}]}}]
+    (day / f"rollout-2026-11-27T10-00-00-{session_id}.jsonl").write_text(
+        "\n".join(json.dumps(line) for line in lines) + "\n", encoding="utf-8")
+
+
+async def test_a_folder_the_cli_already_ran_in_may_be_used_but_not_below_it(hub, box):
+    """The owner's D:\\CPN\\BMC5-workspace: a session Codex recorded outside the roots can be resumed (and that
+    exact folder used again); a folder below it, or anywhere else, is still refused."""
+    outside = box["tmp"] / "srv-app"
+    (outside / "sub").mkdir(parents=True)
+    session_id = "019b0000-0000-7000-8000-000000000001"
+    codex_session_in(box["home"], outside, session_id)
+    sessions.clear_cache()
+    handlers = hub.handlers()
+    assert await hub._workdir_ok(str(outside), "codex", session_id) is None
+    assert await hub._workdir_ok(str(outside), "codex") is None  # a discovered session's folder
+    refused = await hub._workdir_ok(str(outside / "sub"), "codex", session_id)
+    assert refused["code"] == "workdir_not_allowed" and "先登记为工作区" in refused["error"]
+    assert (await hub._workdir_ok(str(outside), "claude"))["code"] == "workdir_not_allowed"  # another CLI's: no
+    opened = await handlers["agent_run_open"]({"kind": "codex", "workdir": str(outside), "resume_id": session_id})
+    assert "error" not in opened, opened
+    await handlers["agent_run_close"]({"rid": opened["rid"]})
+    # a recent folder (it only gets there after a run opened in it) counts too
+    other = box["tmp"] / "recent-one"
+    other.mkdir()
+    assert (await hub._workdir_ok(str(other), "claude"))["code"] == "workdir_not_allowed"
+    hub.recent.add(str(other), kind="claude")
+    assert await hub._workdir_ok(str(other), "claude") is None
+    # Agent Nexus' own state is never a work folder, even inside an allowed root
+    (box["root"] / ".anx" / "keys").mkdir(parents=True, exist_ok=True)
+    hub.recent.add(str(box["root"] / ".anx"), kind="codex")
+    assert (await hub._workdir_ok(str(box["root"] / ".anx" / "keys"), "codex"))["code"] == "workdir_not_allowed"
+    assert (await hub._workdir_ok(str(box["root"] / ".anx"), "codex"))["code"] == "workdir_not_allowed"
+
+
+async def test_on_windows_every_drive_root_is_a_root(hub, box, monkeypatch):
+    from agent_nexus.agents import workdirs
+    drive = box["tmp"] / "D"
+    (drive / "CPN" / "BMC5-workspace").mkdir(parents=True)
+    monkeypatch.setattr(workdirs, "WINDOWS", True)
+    monkeypatch.setattr(workdirs, "drive_roots", lambda: [str(drive)])
+    roots = workdirs.default_roots(str(box["home"]), [])
+    assert [r["kind"] for r in roots] == ["home", "drive"]
+    assert workdirs.default_roots(str(box["home"]), [], drives=False)[-1]["kind"] == "home"
+    assert str(drive) in hub._roots()
+    assert await hub._workdir_ok(str(drive / "CPN" / "BMC5-workspace"), "codex") is None
+    listed = await hub.handlers()["agent_dirs"]({})
+    assert any(r["kind"] == "drive" for r in listed["roots"])  # the picker shows the drives without asking
+    assert not any(r["kind"] == "drive" for r in (await hub.handlers()["agent_dirs"]({"drives": False}))["roots"])
+    opened = await hub.handlers()["agent_run_open"]({"kind": "codex", "workdir": str(drive / "CPN" / "BMC5-workspace")})
+    assert "error" not in opened, opened
+    await hub.handlers()["agent_run_close"]({"rid": opened["rid"]})
+
+
+async def test_roots_state_ancestors_and_forged_transcripts_never_make_a_work_folder(hub, box, monkeypatch):
+    from agent_nexus.agents import workdirs
+    drive = box["tmp"] / "D"
+    (drive / "proj").mkdir(parents=True)
+    # Agent Nexus' root and the folder that contains it: a non-full run there could edit agent-nexus.json
+    hub.recent.add(str(box["root"]), kind="codex")
+    hub.recent.add(str(box["tmp"]), kind="codex")
+    assert (await hub._workdir_ok(str(box["root"]), "codex"))["code"] == "workdir_not_allowed"
+    refused = await hub._workdir_ok(str(box["tmp"]), "codex")
+    assert refused["code"] == "workdir_not_allowed" and "Agent Nexus" in refused["error"]
+    # a file system root or a system folder, even when a (forged) transcript or the recent list names it
+    hub.recent.add("/", kind="codex")
+    hub.recent.add("/etc", kind="codex")
+    assert (await hub._workdir_ok("/", "codex"))["code"] == "workdir_not_allowed"
+    assert (await hub._workdir_ok("/etc", "codex"))["code"] == "workdir_not_allowed"
+    # HOME itself stays the default work folder
+    assert await hub._workdir_ok(str(box["home"]), "codex") is None
+    # Windows: a drive root is a browse root, never a work folder; its sub-folders are
+    monkeypatch.setattr(workdirs, "WINDOWS", True)
+    monkeypatch.setattr(workdirs, "drive_roots", lambda: [str(drive)])
+    assert (await hub._workdir_ok(str(drive), "codex"))["code"] == "workdir_not_allowed"
+    assert await hub._workdir_ok(str(drive / "proj"), "codex") is None
+    assert any(r["kind"] == "drive" for r in (await hub.handlers()["agent_dirs"]({}))["roots"])
+
+
+def test_drive_roots_skip_network_and_cache(monkeypatch):
+    from agent_nexus.agents import workdirs
+    calls = []
+    monkeypatch.setattr(workdirs, "WINDOWS", True)
+    monkeypatch.setattr(workdirs, "_drives_cache", None)
+    monkeypatch.setattr(workdirs, "_list_drives", lambda: calls.append(1) or ["C:\\"])
+    assert workdirs.drive_roots() == ["C:\\"] and workdirs.drive_roots() == ["C:\\"]
+    assert calls == [1]  # cached: the picker and every open do not enumerate the drives again
+    assert workdirs._DRIVE_SKIP == {1, 4}  # DRIVE_NO_ROOT_DIR, DRIVE_REMOTE (a stale SMB mapping blocks isdir)
+
+
+# ---------------------------------------------------------------------------------------------- models (§16.7)
+
+async def test_the_model_reaches_the_cli_and_a_bad_one_is_refused_before_the_gateway(box):
+    gateway = FakeGateway()
+    hub = make_hub(box, gateway)
+    handlers = hub.handlers()
+    try:
+        for bad in ("-m", "a b", 'x"y', "%PATH%", 5, "x" * 101):
+            result = await handlers["agent_run_open"]({"kind": "codex", "workdir": str(box["home"] / "proj"),
+                                                       "prompt": "hi", "model": bad})
+            assert result["code"] == "bad_model", bad
+        assert gateway.calls == []  # refused before a handle was handed out
+        log = box["tmp"] / "argv-model.jsonl"
+        os.environ["FAKE_ARGV_LOG"] = str(log)
+        opened, _events, argv = await open_and_argv(handlers, log, {
+            "kind": "codex", "workdir": str(box["home"] / "proj"), "prompt": "hi", "model": "gpt-6.1-sol"})
+        assert opened["model"] == "gpt-6.1-sol"
+        assert argv[argv.index("-m") + 1] == "gpt-6.1-sol"
+        opened, _events, argv = await open_and_argv(handlers, log, {
+            "kind": "codex", "workdir": str(box["home"] / "proj"), "prompt": "hi"})
+        assert "-m" not in argv and opened["model"] is None  # no model: the CLI's own default
+        # a resumed session records the model of every open, the default (None) included
+        sid = "019a6f2e-3c4d-7e8f-9a0b-1c2d3e4f5a6b"
+        await open_and_argv(handlers, log, {"kind": "codex", "workdir": str(box["home"] / "proj"), "prompt": "hi",
+                                            "resume_id": sid, "model": "gpt-6.1-sol"})
+        assert hub.meta.get("codex", sid).get("model") == "gpt-6.1-sol"
+        await open_and_argv(handlers, log, {"kind": "codex", "workdir": str(box["home"] / "proj"), "prompt": "hi",
+                                            "resume_id": sid})
+        assert "model" not in hub.meta.get("codex", sid)
+        models = await handlers["agent_models"]({"kind": "claude"})
+        assert models["flag"] and any(m["id"] == "opus" for m in models["models"]) and models["source"] == "hints"
+        assert (await handlers["agent_models"]({"kind": "nope"}))["code"] == "unknown_kind"
+        info = await handlers["agent_info"]({})
+        claude = next(a for a in info["agents"] if a["kind"] == "claude")
+        assert claude["models"]["flag"] is True and claude["models"]["hints"]
+    finally:
+        os.environ.pop("FAKE_ARGV_LOG", None)
+        hub.close()
+
+
+async def test_codex_model_list_is_asked_once_at_a_time_and_a_failure_is_not_retried_at_once(hub, monkeypatch):
+    from agent_nexus.agents import hub as hub_module
+    calls = []
+
+    def failing(binary, env, popen):
+        calls.append(binary)
+        time.sleep(0.05)
+        return {"error": "app-server 没有回答"}
+
+    monkeypatch.setattr(hub_module, "codex_models", failing)
+    monkeypatch.setattr(hub_module, "codex_models_cache", lambda home, env: [])
+    handlers = hub.handlers()
+    results = await asyncio.gather(*(handlers["agent_models"]({"kind": "codex"}) for _ in range(4)))
+    assert len(calls) == 1 and all(r["source"] == "hints" for r in results)
+    assert results[0]["note"] == "app-server 没有回答"
+    await handlers["agent_models"]({"kind": "codex", "fresh": True})
+    assert len(calls) == 1  # fresh: not within MODELS_RETRY_S of the last ask
+    good = {"models": [{"id": "gpt-6", "label": "GPT-6"}]}
+    monkeypatch.setattr(hub_module, "codex_models", lambda binary, env, popen: calls.append(binary) or good)
+    key = next(iter(hub._models_cache))
+    stamp, payload, ok = hub._models_cache[key]
+    hub._models_cache[key] = (stamp - hub_module.MODELS_RETRY_S - 1, payload, ok)
+    listed = await handlers["agent_models"]({"kind": "codex"})
+    assert listed["source"] == "cli" and listed["models"][0]["id"] == "gpt-6" and len(calls) == 2
+    assert (await handlers["agent_models"]({"kind": "codex", "fresh": True}))["models"][0]["id"] == "gpt-6"
+    assert len(calls) == 2

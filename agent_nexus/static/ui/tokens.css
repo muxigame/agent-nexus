@@ -41,6 +41,9 @@
   --info: #0b62c4;    --info-bg: #e6f0fd;    --info-border: #bcd5f7;
   --neutral: #59616d; --neutral-bg: #eef0f3; --neutral-border: #d9dde3;
 
+  /* CLI marks (kind-icons.js): the vendors' brand colours, graphics only */
+  --kind-claude: #D97757; --kind-dsh: #5786FE; --kind-gemini: #8E75B2;
+
   /* code / logs */
   --code-bg: #f3f4f7;
   --log-bg: #0f1318;
@@ -106,6 +109,7 @@
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     color-scheme: dark;
+    --kind-claude: #E58B6D; --kind-dsh: #7FA2FF; --kind-gemini: #B39DDB;
     --bg: #0d1014;
     --surface: #14181d;
     --surface-2: #1a1f26;
@@ -138,6 +142,7 @@
 
 :root[data-theme="dark"] {
   color-scheme: dark;
+  --kind-claude: #E58B6D; --kind-dsh: #7FA2FF; --kind-gemini: #B39DDB;
   --bg: #0d1014;
   --surface: #14181d;
   --surface-2: #1a1f26;

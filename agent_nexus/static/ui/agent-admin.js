@@ -7,6 +7,7 @@
 
 import { el, icon, mount, toast, bytes, relTime, emptyState, skeletonRows, errorState, confirmDialog, copy } from "./ui.js";
 import { mountApiAdmin } from "./api-admin.js";
+import { kindGlyph, kindSvg } from "./kind-icons.js";
 
 /** Extra tabs of the 「Agent」 page (agent-wire.js agentPage): {id, label, mount(container, api, {device, local})}. */
 export const AGENT_PAGE_TABS = [{ id: "api", label: "API", mount: (container, api, options) => mountApiAdmin(container, api, options) }];
@@ -27,6 +28,7 @@ const EXTRA_ICONS = {
   lightbulb: '<path d="M15 14c.2-1 .7-1.7 1.5-2.5 1-.9 1.5-2.2 1.5-3.5A6 6 0 0 0 6 8c0 1 .2 2.2 1.5 3.5 .7.7 1.3 1.5 1.5 2.5"/><path d="M9 18h6"/><path d="M10 22h4"/>',
   "file-diff": '<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M9 10h6"/><path d="M12 13V7"/><path d="M9 17h6"/>',
   "shield-alert": '<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="M12 8v4"/><path d="M12 16h.01"/>',
+  cpu: '<rect width="16" height="16" x="4" y="4" rx="2"/><rect width="6" height="6" x="9" y="9" rx="1"/><path d="M15 2v2"/><path d="M15 20v2"/><path d="M2 15h2"/><path d="M2 9h2"/><path d="M20 15h2"/><path d="M20 9h2"/><path d="M9 2v2"/><path d="M9 20v2"/>',
   bot: '<path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/>',
 };
 
@@ -50,9 +52,17 @@ export const KIND_ORDER = ["claude", "codex", "dsh", "gemini"];
 
 export function kindLabel(kind, info) { return info?.label || KINDS[kind]?.label || kind || "Agent"; }
 export function kindShort(kind, info) { return KINDS[kind]?.short || info?.label || kind || "Agent"; }
-export function kindMark(kind, { size = "sm" } = {}) {
-  const text = KINDS[kind]?.mark || String(kind || "?").slice(0, 2).toUpperCase();
-  return el("span", { class: `aa-mark ${size}`, dataset: { kind: kind || "" }, "aria-hidden": "true" }, text);
+/** The CLI's mark (kind-icons.js) on a tinted tile: sm 22px, md 32px, xs the bare 16px glyph (the Agent chip). */
+export function kindMark(kind, { size = "sm", label = "" } = {}) {
+  const glyph = kindGlyph(kind);
+  const px = size === "md" ? 20 : size === "xs" ? 16 : 14;
+  const tpl = document.createElement("template");
+  tpl.innerHTML = kindSvg(kind, { size: px });
+  // an API model carries its provider's mark too: a small "API" corner tells it from that vendor's CLI (whale, sparkle)
+  const api = String(kind || "").startsWith("api:");
+  const attrs = { class: `aa-mark ${size}${api ? " is-api" : ""}`, dataset: glyph.vendor ? { kind: glyph.key, vendor: glyph.vendor } : { kind: glyph.key } };
+  if (label) Object.assign(attrs, { title: label, role: "img", "aria-label": label }); else attrs["aria-hidden"] = "true";
+  return el("span", attrs, tpl.content.firstElementChild);
 }
 export function loginCommand(kind, info) {
   const command = info?.login_command;

@@ -2208,8 +2208,9 @@ class SessionMeta:
                         entry["context"] = {"device": device.strip()[:200], "workdir": workdir.strip()[:1000]}
                     else:
                         entry.pop("context", None)
-                elif name in ("rid", "address") and (value is None or isinstance(value, str)):
-                    # rid: the console run using it; address: its mailbox address (§10), shown again on reopen
+                elif name in ("rid", "address", "model") and (value is None or isinstance(value, str)):
+                    # rid: the console run using it; address: its mailbox address (§10), shown again on reopen;
+                    # model: the model the console last asked for (§16.7)
                     if value:
                         entry[name] = value[:200]
                     else:

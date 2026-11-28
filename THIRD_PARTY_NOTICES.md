@@ -46,6 +46,17 @@ extracted from `lucide-react` v1.47.0, so the web consoles need no CDN at runtim
 - Project: https://lucide.dev
 - License: ISC; the icons derived from Feather are MIT (copy: `agent_nexus/static/ui/LICENSE-lucide.txt`)
 
+## Simple Icons (brand marks)
+
+`agent_nexus/static/ui/kind-icons.js` contains the SVG paths of four brand icons from Simple Icons
+v16.37.0 (npm `simple-icons`): `claude` (Claude Code), `deepseek` (DeepSeek Harness), `googlegemini`
+(Gemini CLI) and `anthropic` (API models of Anthropic). They only name the CLI or provider a chat
+session belongs to; the marks remain trademarks of their owners. The Codex mark and the generic CLI
+mark are original glyphs built from the Lucide icons above (OpenAI's mark is not used).
+
+- Project: https://simpleicons.org
+- License: CC0-1.0 (copy: `agent_nexus/static/ui/LICENSE-simple-icons.txt`)
+
 ## xterm.js (vendored)
 
 `agent_nexus/static/ui/xterm.js`, `xterm.css` and `addon-fit.js` are the unmodified browser builds of

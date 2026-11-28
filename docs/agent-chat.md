@@ -95,13 +95,13 @@ UI：侧栏顶部是 CLI 标签（Claude Code / Codex / DeepSeek / 全部），�
 
 `agent_nexus/agents/runner.py`。一个 run = 一个会话窗口，在运行设备上：
 
-- `agent_run_open {kind, workdir, resume_id?, prompt, permission, preset?, fragments?, context?}` → `{rid, session_id?}`
-- `agent_run_send {rid, prompt}`：发下一轮（claude-stream 写入 stdin；codex-exec 启动 `exec resume`）
+- `agent_run_open {kind, workdir, resume_id?, prompt, permission, preset?, fragments?, context?, model?}` → `{rid, session_id?, model}`
+- `agent_run_send {rid, prompt, model?}`：发下一轮（claude-stream 写入 stdin；codex-exec 启动 `exec resume`）；`model` 与当前不同时从这一轮起换模型（§16.7）
 - `agent_run_read {rid, cursor, wait≤20}` → `{events, cursor, state}`（长轮询，与 `term_read` 一样有上限，不取消进行中的调用）
 - `agent_run_answer {rid, approval_id, allow, remember?}`：回应审批
 - `agent_run_stop {rid}`：中断当前轮；`agent_run_close {rid}`；`agent_run_list {}`：在跑的 run
 
-进程一律以执行账户启动（`accounts.effective(root, "terminal")` 的 `popen_args` / env），工作目录必须存在且在允许范围内。
+进程一律以执行账户启动（`accounts.effective(root, "terminal")` 的 `popen_args` / env），工作目录必须存在且在允许范围内（§7）。
 事件缓冲每个 run 最多 2000 条 / 4 MB，超出丢最旧的并记录 `dropped`。run 空闲 30 分钟自动关闭进程（会话文件仍在，可续接）。
 
 **权限模式**（每个 CLI 映射到自己的参数）：
@@ -155,9 +155,26 @@ UI：侧栏顶部是 CLI 标签（Claude Code / Codex / DeepSeek / 全部），�
 
 ## 7. 工作目录
 
-- `agent_dirs {path?}`：列出 `path` 下的子目录（只列目录），根是执行账户的 HOME 和设备已登记的工作区；不允许 `..` 越界。
+- `agent_dirs {path?, drives?}`：列出 `path` 下的子目录（只列目录），根是执行账户的 HOME、设备已登记的工作区，Windows 上还有各磁盘的根
+  （`C:\`、`D:\`…，默认就有，旧控制台不用另外要；`drives: false` 去掉）；不允许 `..` 越界。
+- **能在哪里运行**（`AgentHub._workdir_ok`，`agent_run_open` 在找网关要 handle 之前检查）：上面这些根之下；或者**正好是**这台设备的 CLI
+  已经用过的目录——续接的会话自己记录的 cwd、这个 CLI 已发现会话的 cwd、「最近使用」里的目录（只有成功打开过才会进去）。
+  只认这个目录本身，不含它的子目录（子目录先把上级登记为工作区）。真机：Codex 在 `D:\CPN\BMC5-workspace` 里建的会话原来连续接都被拒绝。
+  POSIX 上不开放 `/`：服务常以 root 运行，`ask` 模式下 Codex 的 workspace-write 沙箱以工作目录为可写范围，选 `/` 等于整机可写。
+  **永远拒绝**（`workdirs.cwd_refused`，在上面所有放行规则之前，所以从会话记录里读到的 cwd 也绕不过去——记录文件在 HOME 里，谁能写 HOME
+  谁就能伪造）：文件系统或磁盘的根（`/`、`C:\`、`D:\`；磁盘根只是浏览的起点，选它下面的项目目录）、系统目录（POSIX 的 `/etc`、`/usr`、
+  `/bin` 等及其子目录，`/home`、`/var`、`/tmp` 等本身；Windows 的 `%SystemRoot%`、Program Files、ProgramData 及其子目录）、
+  Agent Nexus 的根目录本身和包含它的目录（如 `%LOCALAPPDATA%`；非完全信任的运行在那里能改 `agent-nexus.json` 给自己放开完全信任），
+  HOME 的上级目录。例外：执行账户的 HOME 本身仍可用（它是默认工作目录，而默认的根就在 HOME 下面；这是已知的残余风险，
+  要彻底关掉得把根移出 HOME 或给 CLI 加路径级的拒绝规则）。
+  根目录（磁盘枚举、realpath）在线程里算（`asyncio.to_thread`），磁盘列表缓存 10 秒，网络映射盘（`DRIVE_REMOTE`）和没有根目录的盘
+  （`GetDriveTypeW`）直接跳过：断开的 SMB 映射上 `isdir` 会卡几秒，不能卡住事件循环。
+  工作目录是 CLI 自己的沙箱和项目边界（Codex 沙箱、Claude 的项目、API 模型的文件工具），不是授权边界（同一凭据本来就能用终端和文件）。
+  Agent Nexus 自己的状态目录（`<root>/.anx`、`<root>/.mcp-manager`，含密钥和设备凭据）及其子目录永远不能当工作目录。
+  runner 不再重复检查 hub 放行的目录（`Runs.open(workdir_ok=True)`，只由 hub 传，控制台参数里的同名字段无效）。
+  拒绝时的提示写明可选范围：「工作目录不在允许的范围内：X（可选：执行账户的主目录、已登记的工作区[、各磁盘里的目录]，以及本机 CLI 用过的目录；其他位置请先登记为工作区）」。
 - 最近使用的目录存在 `<root>/.anx/agents/recent.json`，每个 CLI 也会从发现的会话里得到常用 cwd。
-- UI：目录选择器 = 最近使用 + 已登记工作区 + 浏览。
+- UI：目录选择器 = 最近使用 + 已登记工作区 + 浏览（起点里磁盘用硬盘图标；说明文字只在设备给出磁盘时写“和各磁盘里的目录”）。
 
 ## 8. 临时目录
 
@@ -174,7 +191,7 @@ UI：侧栏顶部是 CLI 标签（Claude Code / Codex / DeepSeek / 全部），�
 - 网关 op `agent_handle {device_id, workdir, kind, name}`：签发 workspace handle 并绑定邮箱地址（复用 `gateway.select` 的逻辑），供 run 注入。
 - 网关 op `agent_release {workspace_id}`：run 关闭（或打开失败）时由 AgentHub 调用，结束这个 handle，地址没有别的活跃 handle 时标记为已结束；
   下一个在同一目录开的对话因此拿回 `claude-proj`，而不是一路漂到 `-2`、`-3`……只接受 `agent_handle` 签发的 handle，且只能由申请它的设备、它指向的设备或 owner 释放。
-  AgentHub 在找网关要 handle 之前先做本地检查（目录在允许范围内、CLI 已安装、会话 ID 合法），失败的打开不占用地址。
+  AgentHub 在找网关要 handle 之前先做本地检查（目录在允许范围内（§7）、CLI 已安装、会话 ID 和模型名合法），失败的打开不占用地址。
 
 ## 10. 会话与 ask_user / 邮件打通
 
@@ -192,15 +209,22 @@ UI：侧栏顶部是 CLI 标签（Claude Code / Codex / DeepSeek / 全部），�
 🔍                  │       文件改动 / 审批卡片 / ask 卡片 / 邮件)
 ● 修复登录 bug  2m  │
   ~/proj            │      ┌ 给 Codex 发消息 ──────────────────────────────────────────┐
-                    │      │ 💻 本机  ● Codex  📁 proj  🛡 需要审批        ◔ [停止] [↑] │
+                    │      │ 💻 本机  >_ Codex  ▣ 默认模型  📁 proj  🛡 需要审批  ◔ [停止] [↑] │
                     │      └────────────────────────────────────────────────────────────┘
 ```
 
-- 头部是一行轻量标题（不是工具条）：侧栏开关、当前会话标题、⋯。运行设备 / Agent / 目录 / 权限是输入框里一排小标签（图标 + 简短值，
+- 头部是一行轻量标题（不是工具条）：侧栏开关、当前会话标题、⋯。运行设备 / Agent / 模型 / 目录 / 权限是输入框里一排小标签（图标 + 简短值，
   完整内容在 title / aria-label），点开是原来的菜单；宽屏时标签按需省略号收缩，手机上整排横向滚动。
   按键提示只在占位文字（有键盘时）和 title 里；输入框下的小字只在续接已有会话时显示「将续接这个会话」。
 - 对话区没有卡片外框：消息直接放在页面背景上，只有输入框是一块浮起的面；会话列表与对话之间只有一条细分隔线。
 
+- **CLI 图标**（`ui/kind-icons.js`，`kindMark`）：会话列表、CLI 标签页、Agent 标签、Agent 菜单、欢迎页、概览的对话卡片、Agent 页都用各 CLI 的图标：
+  Claude Code、DeepSeek Harness、Gemini CLI 用 Simple Icons（CC0）的品牌图标（只用来标明是哪个 CLI，商标仍归各自所有），Codex 用自绘的
+  「云 + >_」（不用 OpenAI 的标志），自定义 CLI 用终端图标；API 模型按服务商 id 显示（deepseek → 鲸鱼、gemini/google → Gemini、
+  anthropic/claude → Anthropic，其他 → 闪电）。图标用 currentColor 画，底色是同色的淡色块（`--kind-*` 令牌，深色模式另有一组）。
+  Agent 标签里图标代替原来的状态点；CLI 没就绪时图标右下角加一个小状态点（安装中蓝色、未登录等黄色、出错红色、其他灰色）。
+  会话列表里的图标带 CLI 名称（`title` 和 `aria-label`）；API 模型的图标右下角有一个小“API”角标，和同一家的 CLI（DeepSeek 鲸鱼、Gemini）区分开。
+- **“模型”标签**（§16.7）：在 Agent 和目录之间，CLI 能选模型时才显示（旧设备的 `agent_info` 没有 `models` 就不显示，API 模型本身就是模型）。
 - Agent 下拉里每个 CLI 显示状态：未安装（安装按钮 → 进度条）/ 安装中 xx% / 未登录（“在终端登录”按钮打开该设备终端并键入登录命令）/ 就绪。
 - **“目录”标签**（工作上下文就在这里选，原来 ⋯ 里的“工作上下文…”对话框已去掉）：菜单先列运行设备的目录（路径输入、最近使用、
   已登记的工作区、浏览），再按设备分组列出网络里其他在线设备的目录（“其他设备 · 经网关”）：本控制台在那台设备上用过的目录、
@@ -244,7 +268,12 @@ UI：侧栏顶部是 CLI 标签（Claude Code / Codex / DeepSeek / 全部），�
 ACP（Agent Client Protocol）：JSON-RPC 2.0，stdio 上每行一条。客户端（anx）流程：
 
 1. `initialize {protocolVersion: 1, clientCapabilities: {fs: {readTextFile: false, writeTextFile: false}, terminal: false}}`
-2. 新会话 `session/new {cwd, mcpServers: []}` → `{sessionId}`；续接 `session/load {sessionId, cwd, mcpServers: []}`（agentCapabilities.loadSession 为真时）
+2. 新会话 `session/new {cwd, mcpServers: []}` → `{sessionId}`；续接 `session/load {sessionId, cwd, mcpServers: []}`（agentCapabilities.loadSession 为真时），
+   否则声明了 `agentCapabilities.sessionCapabilities.resume` 时 `session/resume {sessionId, cwd, mcpServers}`（dsh 0.2.2：不重放历史；cwd 要和会话自己的目录一致）。
+   原来只认 `loadSession`，dsh 的续接都变成“不支持续接旧会话，已开始一个新会话”。
+   响应里的 `models`（Gemini：`{availableModels: [{modelId, name, description}], currentModelId}`）和 `configOptions` 里 id 为 `model` 的选项
+   （dsh：值是 JSON `["provider","model"]`）记下来，发 `model` 事件；要换模型时 `session/set_model {sessionId, modelId}` 或
+   `session/set_config_option {sessionId, configId: "model", value}`，第一轮消息等它的回答再发（§16.7）。
 3. 每轮 `session/prompt {sessionId, prompt: [{type: "text", text}]}` → `{stopReason}`；期间收到通知 `session/update {sessionId, update}`：
    `sessionUpdate` = `agent_message_chunk` / `agent_thought_chunk`（`content.text`）、`tool_call` / `tool_call_update`
    （`toolCallId, title, kind, status: pending|in_progress|completed|failed, content, rawInput`）、`plan`（`entries`）、`user_message_chunk`（加载历史时）。
@@ -391,6 +420,24 @@ ACP `mcpServers` 的 http 项、自定义 CLI 的 `{mcp_url}`）；检测结果�
 工具再加审批覆盖，Claude 用 `--allowedTools` 列出清单。`agent_info` 的 `nexus_mcp` 报告每个 CLI
 用哪个连接器（`gateway_mcp` 保留一版，只有什么都接不上时为 false）；“没有配置连接器”的提示已删除。
 
+**Codex 的 ChatGPT 账户连接器**（真机，codex-cli 0.164.0）：账户里的连接器是 `codex_apps` 下的 app（工具名 `<app>.<tool>`），`codex exec`
+固定以审批策略 never 运行，app 的工具调用一律被 Codex 自己拒绝（“MCP tool call requires approval, but approval policy is never”，完全信任的
+`--dangerously-bypass-approvals-and-sandbox` 也不例外）；`mcp_servers.<名字>.default_tools_approval_mode` 管不到 app，按运行批准 app 要
+`apps.<connector id>.…`，而 id 不是显示名（名字写错会被静默忽略）。所以 `for_run` 对 Codex 的 `gateway_account` 改为按运行临时接入本机 MCP
+（`attach: "flags"`、`use: agent-nexus`、`shadowed: <账户连接器名>`、`run_only: true`，`state` 不变，config.toml 仍不写条目），
+运行带 `-c mcp_servers.agent-nexus.url=…`、`default_tools_approval_mode="approve"` 和按权限模式的 `enabled_tools`；提示词写“临时接入了本机
+Agent Nexus MCP……不要调用 <名字>.*”（没有 handle 时也有这一句）。本机 MCP 提供不了网关工具（未加入、已吊销、关闭等）时保持原样并在对话里
+警告“codex exec 无法审批……本次对话调用不了 Agent Nexus 工具”。Agent 页的标签写成“ChatGPT 账户连接器 X（codex exec 无法审批它的工具）”，
+本机 MCP 能提供时接“；对话中临时接入本机 MCP（不写入配置）”，不能时接“；本机 MCP 不可用，对话里调用不了 Agent Nexus 工具，请先开启本机 MCP”；
+工具列表过时只作为交互式 Codex 的提醒放在最后（刷新它对对话没有用）。
+被动检测只看得到 `codex_apps`，不再用它覆盖检测到的连接器名和“过时”标记。
+
+**0.8.34 起（主人的决定）**：既然账户连接器在 `codex exec` 里批准不了、工具列表又是快照，Codex 只有账户连接器（`gateway_account`，或
+`both` 且另一个不是配置项）时，客户端照样把专用配置项永久写进 `~/.codex/config.toml`，并且无需审批：
+`[mcp_servers.agent-nexus]` 带 `url`、`tool_timeout_sec`、`default_tools_approval_mode = "approve"`（Gemini 的条目同理带 `"trust": true`）。
+之后状态是 `both`，对话里用 `agent-nexus`；主人手动删除的条目不再加回。早先写入的、缺少审批设置的条目会自动补上。上面“按运行临时接入”
+只在本机 MCP 当时提供不了网关工具、条目还没写入时才用得上。读取各 CLI 的配置文件时忽略 BOM（Windows 编辑器常带）。
+
 **Claude Code（真机，Mac mini）**：桌面版自带的 Claude Code 2.1.331 需要单独 `auth login`（桌面版的登录不给命令行用；登录信息进钥匙串
 `Claude Code-credentials`）。登录后：`claude-stream` 两轮对话正常（第一轮用 `Read` 读测试文件并回复内容，第二轮续接）；会话出现在列表里，
 目录和标题正确，历史含工具调用；"需要审批"模式下 `echo` 这类只读命令 Claude Code 自己放行，`touch` 这类写操作经 anx 的审批 MCP
@@ -444,3 +491,38 @@ ACP `mcpServers` 的 http 项、自定义 CLI 的 `{mcp_url}`）；检测结果�
 
 ### 16.6 Codex 配置警告
 - `Codex is ignoring … unrecognized configuration setting` 这类来自 CLI 自身配置的提示：适配器发 `{"type":"error","level":"notice",…}`；界面把 `notice` 显示成一行灰色小字（可展开），同一会话同一文本只显示一次。`warn` 仍为黄色，无 level 为红色。
+
+### 16.7 选择模型
+- **每个 CLI 怎么换**（registry `model_args` / `model_hints`，`agent_info` 和 `AgentDef.view()` 里是 `models: {flag, protocol, hints}`）：
+  - Claude Code：`--model <别名或全名>`（sonnet / opus / haiku / opusplan …），放在 `{options...}`，续接时也带；进程活着时换模型发
+    stream-json 控制请求 `{"type":"control_request","request":{"subtype":"set_model","model":…}}`，Claude 回答成功后才发 `model` 事件，
+    被拒绝时显示黄色警告并保持原来的模型。
+  - Codex：`codex exec -m <id>`，放在 `{options...}`，也就在 `resume` 之前；每轮一个进程，所以下一轮就用新模型；用量行和上下文上限按所选模型算。
+    `-m` 在 `exec resume` 上是否生效要在真机确认（不行就改 `-c model="<id>"`）。
+  - Gemini CLI：`-m <id>`（auto / pro / flash / flash-lite …），ACP 会话里再用 `session/set_model`。gemini-cli 0.71.1 的
+    `availableModels` 只列完整 id（`gemini-2.5-pro` 等），别名 pro / flash / flash-lite 对到该档最新的 `gemini-<版本>-<档>`；列表里没有的 id
+    也照发 `session/set_model`，由 Gemini 的回答决定（拒绝时警告并保持当前模型）。
+  - DeepSeek Harness：没有命令行参数，只能经 ACP 的 `model` 配置项换；请求的名字要和它列出的选项对上（`provider/model`、模型名或显示名），
+    对不上就提示“没有提供模型 X，沿用当前模型”（不改运行的模型）；ACP 起不来改用 headless 时不能选模型，给一行灰色提示。
+  - ACP 会话里切回“默认模型”：会话以默认模型开始时记下它报告的模型，切回时再请求它；以指定模型开始的会话不知道默认是哪个，
+    提示“这个会话没有报告默认模型，保持当前模型 X”，运行的模型不变。
+  - 自定义 CLI：`agents.custom.<kind>.model_args`（如 `["--model", "{model}"]`）和 `model_hints`；没有 `model_args` 又不是 ACP 时不能选。
+  - API 模型：kind 本身就是模型，不显示模型标签，`model` 被忽略。
+- **模型名**：`[A-Za-z0-9][A-Za-z0-9._:/@+=\[\]-]{0,99}`（不能以 `-` 开头，没有空格、引号、`%`、`!`），总是单独一个 argv，不拼进 shell 字符串；
+  不合法时 `agent_run_open` / `agent_run_send` 返回 `bad_model`（在找网关要 handle 之前）；空值或不传 = CLI 自己的默认模型。
+- **`agent_models {kind, fresh?}`** → `{models: [{id, label, desc?, default?}], default, source: cli|cache|session|hints, flag, protocol}`：
+  Codex 以执行账户启动 `codex app-server` 调 `model/list`（结果缓存 10 分钟；失败或空的结果缓存 60 秒，`fresh` 也要距上次询问 60 秒以上
+  才重问；同一账户同时只起一个 app-server，其他调用等它的结果——这个 op 远程也能调，而 app-server 会顺带启动用户配置的 stdio MCP；
+  账户能用哪些模型以它为准，真机上 ChatGPT 账户拒绝过 gpt-5.5），失败时读 `~/.codex/models_cache.json`，再不行用提示列表；ACP 代理用正在运行的会话报告的列表；其他用定义里的提示。
+  `default` 是 CLI 自己设置里的模型（Codex `config.toml` 的 `model`、Claude `~/.claude/settings.json` 的 `model`，都不是凭据文件）。
+  旧设备没有这个 op 时界面只用 `agent_info.models.hints`。
+- **事件**：`{"type":"model","model":X|null,"options"?:[{id,label,desc}]}`：换模型**确定之后**才发（每轮一个进程的 Codex、还没启动的进程：
+  立即；活着的 Claude / ACP 进程：CLI 回答成功后），ACP 会话开始时也发；界面在消息流里画一行“模型：X”，有 `options` 时更新菜单。
+  `Run.view()` 和 `agent_run_open` 的结果带 `model`；会话元数据记下控制台最后要的模型（续接时每次打开都记，默认模型记为空；运行中
+  `agent_run_send` 换的模型在运行关闭时记下），`agent_session_read` 返回 `model`。
+- **界面**：模型标签只在选了模型时显示模型名；没选时只有一个芯片图标（提示文字仍是“模型：默认模型”），手机上不把目录和权限标签挤出屏幕。
+  菜单：默认模型（“使用 {CLI} 自己的设置（X）”）、列出的模型（标签和 id 只差大小写时不重复写 id）、手动填过的、“这个会话上次用的”
+  （已在列表里就在那一项的说明后加“· 这个会话上次用的”；只取会话元数据，不取 ACP 会话开始时代理自己报告的模型）、
+  分隔线、“其他模型…”（输入框，同一个正则先在浏览器里检查，示例“opus、gpt-5.6-sol、gemini-2.5-pro”）。选择按 CLI 记在控制台存储的
+  `modelByKind` 里（别名到处一样，所以不按设备）；模型列表（`agent_models` 的结果、ACP 报告的选项）按“设备:CLI”缓存，换设备不串。打开对话时带上 `model`；已有对话里改了模型，下一次 `agent_run_send` 带上新的
+  `model`，正在运行时提示“下一轮起使用 X”。

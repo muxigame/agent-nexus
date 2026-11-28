@@ -39,6 +39,15 @@ PERMISSION_MODES = ("ask", "edits", "readonly", "full")
 LOGIN_STATES = ("ok", "missing", "unknown")
 _VERSION = re.compile(r"\d+\.\d+(?:\.\d+)?(?:[-+._][0-9A-Za-z.]+)?")
 _KIND = re.compile(r"[a-z][a-z0-9_-]{0,31}")
+#: A model name a console may ask for (``agent_run_open`` / ``agent_run_send`` ``model``): its own argv item, never a
+#: leading "-" (it must not read as an option), no spaces, quotes, ``%`` or ``!`` (cmd.exe shims).
+MODEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@+=\[\]-]{0,99}")
+MODEL_ERROR = "模型名只能包含字母、数字和 . _ - : / @ [ ] + =，最长 100 个字符"
+
+
+def model_ok(value: Any) -> bool:
+    """``value`` is a model name :data:`MODEL_RE` accepts."""
+    return isinstance(value, str) and bool(MODEL_RE.fullmatch(value))
 
 
 def os_key(platform: str | None = None) -> str:
@@ -82,9 +91,19 @@ class AgentDef:
     extra_paths: dict[str, list[str]] = field(default_factory=dict)
     builtin: bool = True
     docs_url: str = ""
+    #: How a model is chosen (§16.7): template pieces with ``{model}``, inserted at ``{options...}`` only when the
+    #: run asks for a model (empty: the adapter chooses it over its protocol, or the CLI cannot), and the models
+    #: the menu offers before the CLI tells (``[{id, label?, desc?}]``).
+    model_args: list[str] = field(default_factory=list)
+    model_hints: list[dict] = field(default_factory=list)
 
     def supports(self) -> dict[str, bool]:
         return {"resume": self.resume, "approvals": self.approvals, "stream": self.stream}
+
+    def models(self) -> dict[str, Any]:
+        """``{flag, protocol, hints}``: whether a model can be chosen by flag or over the CLI's protocol (ACP)."""
+        return {"flag": bool(self.model_args), "protocol": self.adapter == "acp",
+                "hints": [dict(h) for h in self.model_hints]}
 
     def view(self) -> dict[str, Any]:
         """What the console shows about the definition itself (no probing)."""
@@ -92,7 +111,7 @@ class AgentDef:
                 "builtin": self.builtin, "supports": self.supports(), "npm_package": self.npm_package,
                 "install_hint": self.install_hint, "login_command": list(self.login_command),
                 "permissions": [mode for mode in PERMISSION_MODES if mode in self.permission_flags],
-                "docs_url": self.docs_url}
+                "docs_url": self.docs_url, "models": self.models()}
 
 
 def _npm(package: str) -> dict[str, list[str]]:
@@ -134,6 +153,11 @@ def builtin_definitions() -> dict[str, AgentDef]:
                      "files": [".claude/.credentials.json"], "command_min_version": "2.1.0"},
         login_command=["claude", "auth", "login"],
         docs_url="https://docs.anthropic.com/en/docs/claude-code",
+        model_args=["--model", "{model}"],
+        model_hints=[{"id": "sonnet", "label": "Sonnet", "desc": "日常编码"},
+                     {"id": "opus", "label": "Opus", "desc": "更强，更慢"},
+                     {"id": "haiku", "label": "Haiku", "desc": "最快"},
+                     {"id": "opusplan", "label": "Opus Plan", "desc": "规划用 Opus，执行用 Sonnet"}],
     )
     codex = AgentDef(
         kind="codex", label="Codex", binaries=("codex",),
@@ -157,6 +181,8 @@ def builtin_definitions() -> dict[str, AgentDef]:
         login_probe={"method": "codex", "env": ["CODEX_API_KEY"]},
         login_command=["codex", "login"],
         docs_url="https://github.com/openai/codex",
+        # placed before `resume` by the template; the models come from the CLI itself (agent_models)
+        model_args=["-m", "{model}"],
     )
     dsh = AgentDef(
         kind="dsh", label="DeepSeek Harness", binaries=("dsh",),
@@ -197,6 +223,10 @@ def builtin_definitions() -> dict[str, AgentDef]:
                      "unknown_env": ["GOOGLE_GENAI_USE_VERTEXAI", "GOOGLE_CLOUD_PROJECT"]},
         login_command=["gemini"],
         docs_url="https://github.com/google-gemini/gemini-cli",
+        model_args=["-m", "{model}"],
+        model_hints=[{"id": "auto", "label": "自动", "desc": "Gemini CLI 按任务选择"},
+                     {"id": "pro", "label": "Pro"}, {"id": "flash", "label": "Flash"},
+                     {"id": "flash-lite", "label": "Flash Lite"}],
     )
     return {d.kind: d for d in (claude, codex, dsh, gemini)}
 
@@ -246,8 +276,18 @@ def _apply(base: AgentDef, spec: dict) -> AgentDef:
                 list(value) if isinstance(value, list) and all(isinstance(v, str) for v in value) else None)
             if items is not None:
                 changes[key] = tuple(items)
+        elif key == "model_hints":
+            if isinstance(value, list):
+                hints = []
+                for item in value:
+                    if isinstance(item, str):
+                        item = {"id": item}
+                    if isinstance(item, dict) and model_ok(item.get("id")):
+                        hints.append({k: str(item[k])[:200] for k in ("id", "label", "desc")
+                                      if isinstance(item.get(k), str) and item[k]})
+                changes[key] = hints
         elif key in ("command", "resume_command", "system_prompt_args", "fallback_command", "session_globs",
-                     "login_command"):
+                     "login_command", "model_args"):
             items = value if isinstance(value, list) and all(isinstance(v, str) for v in value) else None
             if items is not None:
                 changes[key] = list(items)
@@ -315,11 +355,14 @@ def load_config(root: Path) -> dict:
 def command_argv(d: AgentDef, binary: str, *, permission: str = "ask", values: dict[str, Any] | None = None,
                  template: str = "command") -> list[str]:
     """Fill a template (``command`` / ``resume_command`` / ``fallback_command``). ``{options...}`` becomes the
-    permission flags plus, when ``values["system_prompt"]`` is not empty, :attr:`AgentDef.system_prompt_args`.
+    permission flags, :attr:`AgentDef.model_args` when ``values["model"]`` is set, and, when ``values["system_prompt"]``
+    is not empty, :attr:`AgentDef.system_prompt_args`.
     Placeholders without a value are left for the caller (``{approval_tool}``)."""
     values = {key: "" if value is None else str(value) for key, value in (values or {}).items()}
     base = getattr(d, template, None) or d.command
     options: list[str] = list(d.permission_flags.get(permission, []))
+    if values.get("model"):
+        options += d.model_args
     if values.get("system_prompt"):
         options += d.system_prompt_args
     argv: list[str] = []
@@ -750,7 +793,7 @@ def _mcp_entries(kind: str, home: Path, env: dict) -> list[tuple[str, Any]] | No
         try:
             if path.stat().st_size > 32 * 1024 * 1024:
                 return None
-            return json.loads(path.read_text(encoding="utf-8", errors="replace"))
+            return json.loads(path.read_text(encoding="utf-8-sig", errors="replace"))
         except (OSError, ValueError):
             return None
 
@@ -772,7 +815,7 @@ def _mcp_entries(kind: str, home: Path, env: dict) -> list[tuple[str, Any]] | No
         import tomllib
         root = Path(env["CODEX_HOME"]) if env.get("CODEX_HOME") else home / ".codex"
         try:
-            data = tomllib.loads((root / "config.toml").read_text(encoding="utf-8", errors="replace"))
+            data = tomllib.loads((root / "config.toml").read_text(encoding="utf-8-sig", errors="replace"))
         except (OSError, ValueError):
             return []
         return servers(data.get("mcp_servers"))
@@ -811,4 +854,5 @@ def info(d: AgentDef, probed: dict, install: dict | None = None) -> dict:
             "login_detail": probed.get("login_detail", ""), "install": install, "supports": d.supports(),
             "adapter": d.adapter, "builtin": d.builtin, "login_command": list(d.login_command),
             "install_hint": d.install_hint,
-            "permissions": [mode for mode in PERMISSION_MODES if mode in d.permission_flags]}
+            "permissions": [mode for mode in PERMISSION_MODES if mode in d.permission_flags],
+            "models": d.models()}
