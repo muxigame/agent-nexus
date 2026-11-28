@@ -128,7 +128,15 @@
         "additionalProperties": false,
         "properties": {
           "workspace_id": {
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
           },
           "unread_only": {
             "default": true,
@@ -160,10 +168,7 @@
             ],
             "default": null
           }
-        },
-        "required": [
-          "workspace_id"
-        ]
+        }
       }
     },
     "mail_read": {
@@ -178,7 +183,15 @@
         "additionalProperties": false,
         "properties": {
           "workspace_id": {
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
           },
           "message_id": {
             "anyOf": [
@@ -206,10 +219,7 @@
             "default": true,
             "type": "boolean"
           }
-        },
-        "required": [
-          "workspace_id"
-        ]
+        }
       }
     },
     "mail_wait": {
@@ -224,7 +234,15 @@
         "additionalProperties": false,
         "properties": {
           "workspace_id": {
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
           },
           "timeout_s": {
             "default": 50,
@@ -241,10 +259,7 @@
             ],
             "default": null
           }
-        },
-        "required": [
-          "workspace_id"
-        ]
+        }
       }
     },
     "mail_who": {
@@ -310,12 +325,17 @@
         "additionalProperties": false,
         "properties": {
           "workspace_id": {
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
           }
-        },
-        "required": [
-          "workspace_id"
-        ]
+        }
       }
     },
     "mail_status": {
@@ -361,7 +381,15 @@
         "additionalProperties": false,
         "properties": {
           "workspace_id": {
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
           },
           "message_id": {
             "type": "string"
@@ -385,7 +413,6 @@
           }
         },
         "required": [
-          "workspace_id",
           "message_id"
         ]
       }

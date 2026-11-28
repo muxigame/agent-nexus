@@ -8,8 +8,9 @@ agent-nexus 唯一的内置插件，插件 id 为 `device`；旧 id `workspace` 
 
 | 工具 | 用途 |
 |---|---|
-| `exec_command` | 执行命令（Windows 上默认是 Git Bash）；在 `yield_time_ms`（最长 150 秒）内结束就直接返回，否则返回数字 `session_id` |
-| `write_stdin` | 向正在运行的命令写入字符，或用空字符串等待输出 |
+| `exec_command` | 在 shell 里执行命令：`shell` 取 `bash` / `sh` / `zsh` / `pwsh` / `powershell` / `cmd`（Windows 上默认是 Git Bash），设备没有时报错并列出可用的；可选 `stdin` 作为标准输入；在 `yield_time_ms`（最长 `limits.call_wait_max_s`，默认 50 秒）内结束就直接返回，否则返回数字 `session_id` |
+| `exec_wait` | 等待仍在运行的命令结束或超时（`timeout_ms` 默认 30 秒，最长 50 秒），返回新输出；超时后用同一个 id 再调 |
+| `write_stdin` | 向正在运行的命令写入字符（用空字符串等待输出仍然有效，等待请用 `exec_wait`） |
 | `file_read` | 按行读取文本文件；内容统一为 LF，`line_numbers=true` 带行号；GBK 文件自动识别 |
 | `file_glob` | 按文件名 / 相对路径的 glob 查找文件（`*.py`、`src/**/test_*.py`），新的在前 |
 | `file_grep` | 按正则搜索文件内容，返回 `文件:行号:内容`；有 ripgrep 时用 ripgrep |
@@ -18,7 +19,7 @@ agent-nexus 唯一的内置插件，插件 id 为 `device`；旧 id `workspace` 
 | `view_image` | 从本机文件系统读取图片给模型查看，并提供 3 天有效的临时 HTTPS 地址供需要时发给用户 |
 | `update_plan` | 保存当前多步任务计划 |
 | `curr_time` | 返回 UTC 时间 |
-| `sleep` | 等待指定毫秒数 |
+| `sleep` | 等待指定毫秒数（一次最多 50 秒，`remaining_ms` 说明还剩多少） |
 | `exec_kill` | 终止仍在运行的命令树 |
 | `exec_list` | 查看仍在运行的 exec session |
 | `companion_routes` | 查看 GPT Companion 的会话路由 |
@@ -372,7 +373,7 @@ request_user_input(question="这次部署到哪里？", title="部署方式",
 问题出现在 chatx 的「GPT 的提问」面板里（弹通知并提到前台），调用一直阻塞到有人回答。
 `kind` 取 `single` / `multi` / `text`；`allow_custom` 在选项旁边再加一个自由输入框。
 
-**超时不算失败**：等过 `ask_timeout_s`（默认 240 秒）还没人答，返回的是
+**超时不算失败**：等过 `ask_timeout_s`（默认 240 秒，但一次调用最多等 `limits.call_wait_max_s`，默认 50 秒；经网关时网关也按 `gateway.tool_wait_max_s` 限制）还没人答，返回的是
 `answered=false` 加一个 `question_id`，问题仍然挂在屏幕上，之后用
 `request_user_input_result(question_id, wait_s=…)` 接着取。这样调用方的 MCP 客户端
 自己的请求超时就不会把一个还有效的问题变成错误。用户点「跳过」则返回 `cancelled=true`，

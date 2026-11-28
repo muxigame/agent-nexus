@@ -200,6 +200,8 @@ class Hub:
         self.peers: dict[str, Peer] = {}
         self.default_workspace = default_workspace
         self.timeout = timeout
+        #: agent_id -> how errors name the device (the gateway sets the owner's alias).
+        self.display = lambda agent_id: agent_id
         #: Gateway-hosted connectors (design §7.1, decision D10): a peer-like
         #: ``ConnectorHost`` answering for the reserved agent_id ``hub``. It is
         #: never in ``peers`` (not a device) and is reachable with no device online.
@@ -260,10 +262,21 @@ class Hub:
         if selection is None:
             selection = self.default_workspace
         if selection is None:
-            choices = [(p.agent_id, key) for p in self.peers.values() for key in p.catalog["workspaces"]]
-            if len(choices) != 1:
-                raise RoutingError("select a workspace with set_workspace (or provide workspace_id)")
-            selection = {"agent_id": choices[0][0], "workspace": choices[0][1]}
+            peers = [p for p in self.peers.values() if p.catalog["workspaces"]]
+            if len(peers) != 1:
+                if not peers:
+                    raise RoutingError("no device is online")
+                names = ", ".join(sorted(self.display(p.agent_id) for p in peers)[:10])
+                raise RoutingError(f"no device selected and {len(peers)} devices are online ({names}): "
+                                   "call use_device(device_id) and pass the workspace_id it returns, "
+                                   "or pass workspace_id")
+            workspaces = peers[0].catalog["workspaces"]
+            # One device: its "default" workdir, or the only one.
+            name = "default" if "default" in workspaces else next(iter(workspaces))
+            if len(workspaces) > 1 and name != "default":
+                raise RoutingError(f"device {self.display(peers[0].agent_id)} has several workdirs "
+                                   f"({', '.join(sorted(workspaces))}): call use_device(device_id, workdir)")
+            selection = {"agent_id": peers[0].agent_id, "workspace": name}
         peer = self.peer(selection["agent_id"])
         name = selection["workspace"]
         workspace = peer.catalog["workspaces"].get(name)

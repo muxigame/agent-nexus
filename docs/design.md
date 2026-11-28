@@ -313,7 +313,7 @@ agent 在 `refresh()`（agent.py:317）里调用 device 插件的 `device_info` 
 | | `notify` | `notify(title, body, level="info"|"warn"|"urgent", actions?, dry_run?)` | 新增：Windows toast，失败时退回托盘气泡；Linux 用 notify-send |
 | | `files` | `file_list`、`file_read(path, offset, limit)`、`file_write(path, content, mode)`、`file_stat` | 新增：遵守 policy.py 的 `allowed_roots`；手机上限制在 App 沙箱内 |
 | | `time` | `curr_time`、`sleep` | 已有 |
-| 标准，可选 | `exec` | `exec_command`、`write_stdin`、`exec_kill`、`exec_list` | 已有 |
+| 标准，可选 | `exec` | `exec_command`、`write_stdin`、`exec_kill`、`exec_list`；可选 `exec_wait`（0.8.35，旧设备由网关代为提供） | 已有 |
 | | `edit` | `edit_file`、`patch_file` | 取代原 `apply_patch` |
 | | `search` | `file_glob`、`file_grep` | 新增。工具名沿用 `file_` 前缀而不是 `search_`，和 `file_read` 等排在一起 |
 | | `plan` | `update_plan` | 已有 |
@@ -361,7 +361,7 @@ agent 在 `refresh()`（agent.py:317）里调用 device 插件的 `device_info` 
 | `device_list(include_offline=false, capability=None, workspace_id=None)` | `workspace_list(workspace_id=None)` | 新工具返回 `{"devices":[{device_id, display_name, hostname, alias, profile, form, platform, online, capabilities, agent_runtimes, workdirs:[{name,path}], wakeable_kinds}]}`；旧工具返回原结构 `{"workspaces":[...]}`（gateway.py:150-154），每项只追加 `device_form`、`online`、`display_name` 三个字段 |
 | `use_device(device_id, workdir="default", session_name=None, kind=None, resume_id=None, companion_route=None, wake="auto", workspace_id=None)` | `set_workspace(agent_id, workspace, + 同样的可选参数)` | 共用同一个实现。`workspace_id` 是调用方已经持有的句柄（§8.2 第 3 层用它改名）。返回旧字段的超集 `{workspace_id, agent_id, workspace, path, mcp, address, name_source, renamed_from?, mail:{unread}, hint}` |
 
-- 配置开关 `gateway.legacy_tools`：`"listed"`（默认，新旧名都出现在 tools/list）| `"hidden"`（旧名不列出但可以调用，用 FastMCP `on_list_tools` 中间件过滤）| `"off"`。计划在切换稳定后改为 `"hidden"`，**永远不设为 `"off"`**。
+- 配置开关 `gateway.legacy_tools`：`"listed"`（默认，新旧名都出现在 tools/list）| `"hidden"`（旧名不列出但可以调用，用 FastMCP `on_list_tools` 中间件过滤）| `"off"`。0.8.35 起默认是 `"hidden"`（§20.1），**永远不设为 `"off"`**。
 - `RESERVED_TOOLS`（federation.py:13）新增：`device_list, use_device, mail_send, mail_inbox, mail_read, mail_wait, mail_who, mail_bye, mail_status, mail_recall, ask_user`。同步修改 `tests/test_cloud.py:165` 的断言。
 - **显示名（决策 D6）**：`display_name = alias or hostname or agent_id`。备注名存在网关 `devices.alias`，由网页控制台或本机控制台设备页（`hub_call device_admin {op:"set_alias"}`）设置。所有面向 agent 的输出（`device_list`、`workspace_list`、`mail_who`、`use_device` 返回值里的 `device_display`、未读提醒、唤醒提示词、系统邮件）都显示 `display_name`，并在第一次出现时附 `(<agent_id>)`；输入侧 `device_id`/`agent_id` 参数同时接受 agent_id 和 display_name（display_name 有重名时报错并列出候选）。地址仍是 `<name>@<agent_id>`，展示时写成 `<name>@<display_name>`。
 - 网关 instructions（gateway.py:142-147）改写：先介绍 `device_list`/`use_device` 和邮箱用法；说明旧名仍然可用；要求在 `use_device` 时带上 `session_name` 和 `kind`，并且每次调用都传 `workspace_id`；不带 `session_name` 时会得到自动名，之后带 `session_name` 和手上的 `workspace_id` 再调一次即可连同邮件改名（§8.2）。
@@ -1769,3 +1769,90 @@ docs/agent-chat.md §16 前的说明），条目写入前的对话按运行临�
 - `tests/test_local_mcp_review.py`：压缩的上游响应解码后转发、CLI 断开即关闭上游流、有状态会话的 404 原样转发、四元组对端匹配、整理期间的变化不丢、Windows 服务不为“没人”写入、Claude 项目级条目、外来主机的 `agent-nexus`、不能提供网关工具时不新增、旧 Codex、both 时改用另一个连接器、卸载、私密文件的权限和并发写入、权限模式的审批清单、文本 CLI / ACP、`system/init` 的 failed 连接器、API 模型的降级列表和单一会话。
 - `tests/test_agents_hub.py`、`tests/test_local_mcp_runs.py`：经网关和直接模式的提示词带连接器名、handle、目标设备、目录和地址；无法确定时用通用写法；Codex 审批覆盖只给这个连接器；按运行接入的 claude `--mcp-config`（每种权限模式）和 codex `-c`；Claude `--allowedTools`；ACP 只在支持 http 时传 `mcpServers`；`{mcp_url}`；API 模型合并本机 MCP 的工具。`tests/nexus_mcp_note.test.cjs`：对话页提示的映射。
 - 真机验证（在主人的 Windows 工作电脑上，由主会话做）：Codex 识别为 ChatGPT 账户连接器、`config.toml` 不写入、对话无警告；Claude 的 `agent-nexus` 写进 `C:\Users\<用户>\.claude.json`、属主是该用户、有备份；经网关对话第一次工具调用直接用 handle；锁定后只剩 `nexus_status`；网关关闭设备接入后一个请求内给出原因；Unity 的 8401 不受影响；`codex exec` 调用账户连接器的工具是否需要审批。
+
+## 20. 工具精简、等待上限、默认设备与 shell 选择（0.8.35）
+
+### 20.1 每轮上下文：tools/list 减半以上
+
+测量方法（与 `tests/test_tool_listing.py` 相同）：进程内启动网关，挂一台 Windows 平台的设备（`tests/fixtures/device_tools_0834_windows.json` 是 0.8.34 设备插件的 tools/list），用 FastMCP Client 取 tools/list，按紧凑 JSON 计字符数。
+
+| | 工具数 | tools/list 字符 | INSTRUCTIONS |
+| --- | --- | --- | --- |
+| 0.8.34 | 60 | 57,953 | 1,509 |
+| 0.8.35（默认 `compact`），0.8.34 设备 | 27 | 约 17,100 | 约 650 |
+| 0.8.35（默认 `compact`），0.8.35 设备 | 27 | 约 17,300 | 约 650 |
+
+没有删掉任何能力，做法是：
+
+- **少用的设备工具不直接列出**（`gateway.tool_listing = "compact"`，默认）：能力 `uia`、`screen`、`input`（桌面控制）、`watch`、`companion`（GPT Companion 的 watcher）、`ask`（request_user_input*）、`notify`、`agents`、`info`（device_info），以及 `sleep`、`curr_time`、`update_plan`。设备也可以在工具 `_meta` 里写 `"anx/listing": "search"` 自己声明。这些工具仍可**按名字直接调用**，也能用 `toolsearch` 找到、`tooluse` 调用，和插件工具一样。`"full"` 恢复 0.8.34 的完整列表。
+- **隐藏但可调用**：旧名 `workspace_list`、`set_workspace`（`gateway.legacy_tools` 的默认值改为 `"hidden"`），以及 `mail_bye`、`mail_recall`、`mail_status`、`file_copy_cancel`、`file_copy_list`、`mcpdetail`。后者在 toolsearch 里以 MCP `nexus` 出现。
+- **展示层压缩**（只在 compact 下，调用照旧按原 schema 校验）：`X | null` 且默认 null 的参数显示成 `X`（客户端传 null 时先丢弃）；不带 FastMCP 的空 `_meta.fastmcp.tags`；不带通用的 “任意对象” outputSchema；设备工具的 `_meta` 只保留 `anx/capability`；`workspace_id` 的说明缩成一句。
+- **说明文字变短**：设备插件的说明在 `builtins/device/src/server.py` 里改短；**还没升级的 0.8.34 设备**由 `schemas/tool-metadata.en.json` 按原文逐字映射成同样的短说明（`english_metadata`），所以网关升级后立即生效。长说明（file_copy 的全部行为、桌面控制的细节）在本文档和 `builtins/device/README.md`。
+- **INSTRUCTIONS** 缩到约 650 字符。
+
+插件（Unity、浏览器等）仍然只在 `mcplist` / `toolsearch` / `tooluse` 后面，不直接列出，但现在两步就能用：
+
+- `toolsearch(query)` 的每个命中只有 `name`、`mcp_id`、`title`、`description`、压缩过的 `inputSchema` 和 `score`（连接器另带 `kind`、`auth_state`），默认 8 条。同一个设备工具在多台设备上只出一条：当前设备的那条，其余设备写在 `also_on`，每项是 `{device, mcp_id}`，旧流程 `tooluse(mcp_id=..., tool=...)` 照样能指定另一台设备。
+- `tooluse(tool, arguments)`：`tool` 可以是裸名（唯一时），也可以是 `"server.tool"`（如 `"unity.get_scene"`、`"pc-a/unity.get_scene"`、`"nexus.mail_recall"`），从右往左按已知 MCP 名切分，因为 MCP 名和工具名都允许带点；前缀也可以是设备的显示名或 id（`"PC-B.screenshot"`）。toolsearch 里 `mcp_id` 为 `nexus` 的命中可以按原样 `tooluse(mcp_id="nexus", tool=...)`，`mcpdetail(mcp_id="nexus")` 列出这些网关工具。多处同名时优先当前设备，仍不唯一就报错并列出候选。`mcp_id` 变为可选，旧客户端照旧传 `mcp_id`、`tool`、`arguments` 不受影响。`mcpdetail` 仍可用，只是不再必须。
+
+**结果也更省**：
+
+- `exec_command`、`write_stdin`、`exec_wait`、`exec_kill` 的结果在网关处改成纯文本：一行头加原样输出，不再是换行被转义的 JSON。头的格式如 `[exit 0 · 1.2s · PC-A · bash]`，或 `[running · session 1004 · 50.0s · PC-A · bash] exec_wait(session_id=1004) to continue`；失败是 `isError` 加 `[error · PC-A] …`。原来的字段放进 `_meta["anx/exec"]`，没有 structuredContent，tools/list 里这几个工具也不再声明 outputSchema。不加 structuredContent 是有意的：Codex 只要结果里有 structuredContent 就只把它（JSON 字符串）交给模型、丢掉文本（codex-rs `CallToolResult::as_function_call_output_payload`），只放字段会让 Codex 看不到输出，放完整副本又回到转义的 JSON，而 ChatGPT 两份都读，等于翻倍。**升级须知**：升级网关前就列过工具的 MCP 会话还记着 0.8.34 的 outputSchema，Python / TypeScript SDK 的客户端会在命令已经执行之后把没有 structuredContent 的结果当错误；升级网关后请重连所有 MCP 客户端（Claude Code 里 `/mcp` 重连，ChatGPT 刷新连接器，正在跑的 API 运行重新开始）。设备插件本身的返回值契约不变（wake 等程序化调用方不受影响），所以对 0.8.34 设备同样生效。
+- 未读邮件提醒默认只在未读集合变化时出现（`mailbox.notice.repeat` 默认改为 `"on_change"`），不再每个结果都带。
+- 有两台以上设备在线时，其他设备工具的结果末尾带一行 `[device: <名字>]`，选错设备一眼能看出来。
+
+已知代价：被延迟的工具（如 `curr_time`、`device_info`）在 Claude / Codex 的只读或逐项审批模式里只能经 `tooluse` 调用，而 `tooluse` 不在免审批清单里，所以每次会弹审批（agent-chat §19 的清单按工具名列出）。直接按名字调用不受影响。
+
+### 20.2 等待上限：每次调用最多阻塞 50 秒
+
+MCP 客户端自己会在约 60 秒时切断一次工具调用（Claude Code 实测 “exec_command timed out after 60s”），而 0.8.34 允许 `yield_time_ms` 到 150 秒。现在：
+
+- 网关配置 `gateway.tool_wait_max_s`（默认 50，范围 5 到 `rpc_timeout_s - 10`）。网关对**设备工具**（包括还没升级的设备）在转发前把阻塞参数压到上限：`exec_command` / `write_stdin` 的 `yield_time_ms`、`exec_wait` 的 `timeout_ms`、`sleep` 的 `duration_ms`、`request_user_input` 的 `timeout_s`（未给时设为上限，因为设备默认 240 秒，比网关的 180 秒预算还长，这是 0.8.34 的旧问题）、`request_user_input_result` 的 `wait_s`。大值照收、静默压低，不报错。`sleep` 被压低时结果说明还剩多少。网关原生的 `mail_wait`、`ask_user(blocking=true)`、`file_copy_status(wait_ms)` 同样以它为上限，超时时返回可继续的句柄（`timed_out`、`ask_id`、`job_id`）。
+- 设备设置 `limits.call_wait_max_s`（默认 50）在设备上做同样的限制，直连设备 MCP 的客户端也安全。
+- 新工具 `exec_wait(session_id, timeout_ms=30000)`：等一个仍在运行的命令结束或超时，返回这段时间的新输出；超时后用同一个 id 再调。`write_stdin(chars="")` 仍然有效。没有 `exec_wait` 的 0.8.34 设备由网关提供它，转成 `write_stdin(chars="", yield_time_ms=timeout_ms)`。模型不需要定时器或轮询。
+- 客户端带了 `progressToken` 时，网关在等待设备、邮件、提问回答和复制状态期间每 10 秒发一次 MCP progress 通知（有的客户端会因此延长超时）；不带就什么都不发。只是锦上添花，从不依赖它。
+- 设备上 exec 会话在进程启动后立即登记：调用中途被取消（客户端放弃）时，进程仍在 `exec_list` 里，可以 `exec_wait` 或 `exec_kill`。POSIX 上命令在自己的进程组里运行，`exec_kill` 和 `\u0003` 能结束孙进程。
+- 插件和 hub 连接器的工具不能安全地中途返回，不做限制；它们仍受 `rpc_timeout_s`（默认 180 秒）约束。
+
+### 20.3 默认设备
+
+`workspace_id` 在所有工具上仍是可选参数（无会话的客户端、在两台设备之间交替时需要它）。不传时按顺序：
+
+1. 本次调用所在 MCP 会话里 `use_device` 选的设备（只对有会话的传输有效：网关 `/mcp` 默认 `stateless`，本机 MCP 也是无会话的，每个请求都是新会话，此时这一步拿不到东西）；
+2. 经设备的本机 MCP（`/mcp/device`，`client_id = device:<id>`）调用时，就是这台设备自己（默认工作目录），即使没调用过 `use_device`；
+3. 网关配置的 `default_workspace`；
+4. 只有一台设备在线时就是它（有多个工作目录时用 `default`）；
+5. 否则返回明确的错误，列出在线设备，提示 `use_device` 或传 `workspace_id`，**从不随机选设备**。
+
+因为默认的传输都不保留会话，INSTRUCTIONS 和 `use_device` 的 `hint` 不再说“当前设备”，而是无条件要求：之后凡是发给这台设备的调用（包括 `mail_*`、`ask_user`）都带上返回的 `workspace_id`，并写明不带时会去哪里（本机 MCP：这台设备自己；否则：默认设备，多台在线时被拒绝）。没有把选择按设备或 client_id 存到网关：同一台电脑上经本机 MCP 的多个会话（Claude Code、Codex 同时开着）共用同一个身份，存下来会让一个会话的 `use_device` 把另一个会话的命令改道到别的设备，这比报错更糟。
+
+不带句柄的调用不再用每个请求新生成的 session id 作为上游插件会话的作用域（无会话传输下这会让每次调用都新开一个插件会话，一小时内约 256 次就会撞上 `max_sessions`），而是用 `device:<id>` 或 `default`。
+
+邮箱身份不受第 2 步影响：没有 `use_device` 就没有邮箱地址。`mail_inbox`、`mail_read`、`mail_wait`、`mail_bye`、`mail_recall` 的 `workspace_id` 也改为可选（`schemas/mail-tools.v1.json` 同步），能从有会话的选择中取到地址时可以不传，取不到时报错提示先 `use_device`。
+
+### 20.4 shell：执行的是命令，由模型选 shell
+
+`exec_command` 用来在 shell 里执行**命令**，不是跑脚本：没有 python 解释器模式，也没有脚本参数。模型自己选 shell：
+
+- `shell` 取 `bash`、`sh`、`zsh`、`pwsh`、`powershell`、`cmd`（大小写不限，可带 `.exe`）。不传时仍是原来的默认 shell（Windows 上有 Git Bash 用 Git Bash，否则 PowerShell；其他系统 `/bin/bash`）。传一个已存在的路径照旧可用（向后兼容，不写进说明）。
+- 每台设备自己检测有哪些 shell（在设备插件里、以执行命令的账户检测，5 分钟缓存），通过 `device_info` 的 `shells`（默认在前）、`shell_default` 和 Windows 上的 `shell_paths` 上报；`device_list` 和 `use_device` 的结果里都有 `shells`，exec 结果头里写着实际用的 shell。
+- Windows 上的 `bash` 只会是真的 bash：配置的 `bash_path`、`git` 所在的 Git、`Program Files` / `LOCALAPPDATA` 下的 Git、`C:\msys64`（MSYS2）、`C:\cygwin64`（Cygwin），最后才是 WSL（`wsl -l -q` 有发行版，且不是 SYSTEM 账户）。**从不用 `System32\bash.exe`**（WSL 启动器，CreateProcess 会先于 PATH 找到它），名字一律先解析成绝对路径，工作目录里的同名 exe 也劫持不了。Git Bash 存在时模型在 Windows 上也可以一直用 bash 语法。
+- 设备没有所请求的 shell 时返回错误：`shell 'zsh' is not available on <主机名>; available: powershell, pwsh, cmd, bash (default: bash)`。
+- 设备设置 `shells`（如 `{"bash": "D:\\Git\\bin\\bash.exe"}`）可以覆盖检测结果。
+- 可选参数 `stdin`：作为命令的标准输入写入，然后关闭（EOF），相当于 `cmd < file`。要交互输入时不传它，改用 `write_stdin`。
+
+Windows 上不再多一层转义（POSIX 上 execve 没有命令行解析，原样不变）：
+
+- bash / sh / zsh（Git Bash、MSYS2、Cygwin、WSL）：命令放在环境变量 `ANX_EXEC_CMD` 里，argv 是固定脚本 `eval "unset ANX_EXEC_CMD; $ANX_EXEC_CMD"`，用户的文本不经过 Cygwin 的命令行解析和通配符展开，命令里也看不到多出来的 shell 变量或环境变量。WSL 另加 `WSLENV=ANX_EXEC_CMD/u`；配置的 `bash_path`、`shells` 覆盖或显式路径指向 WSL 启动器（`System32\bash.exe`、`wsl.exe`、`WindowsApps\bash.exe`）时同样加，否则 Linux 一侧拿到空命令、什么都不做却返回 0。
+- cmd：`"<cmd.exe>" /d /s /c "<命令>"` 原样交给 CreateProcess（不经过 `list2cmdline`），和人在提示符里敲的一样；`/d` 与 0.8.34 一致，注册表里的 AutoRun（conda init、clink）不会在每条命令前运行。0.8.34 经 `list2cmdline` 把 `"` 转成 `\"`，cmd 不认，`echo "a b"`、`dir "C:\Program Files"` 都会坏，这是修复。asyncio 的公开接口做不到“原样命令行 + /d”，所以这里用 `loop._make_subprocess_transport` 传字符串参数。
+- PowerShell：仍是 `-Command`，和以前一样。
+
+其他细节：
+
+- WSL 的 bash 只有在发行版里真有 `/bin/bash` 时才上报（`wsl -d <名> -e test -x /bin/bash`，随检测缓存）；`docker-desktop`、`docker-desktop-data` 不算。只装了 Docker Desktop 的电脑不会被说成有 bash。
+- 检测（可能要启动 `wsl.exe`，首次几秒）在线程里跑，不阻塞设备的事件循环；缓存命中时直接返回。
+- `stdin` 在后台写入：命令不读输入、输入又大于管道缓冲时，调用仍在 `yield_time_ms` 内返回 session_id。
+- `device_list`、`use_device` 带 `shell_default`；网关列出的 `exec_command` 说明不写某一台设备的默认 shell（多台设备共用一份列表），写“默认是该设备自己的，见 device_list 的 shells 第一个”；只有本机 MCP 列出的是这台设备的“default here”。
+- 0.8.34 的 Windows 设备没有 Git Bash 时，说明映射成 `shell: powershell|cmd (… no bash on this machine)`，网关直接拒绝发给它的 `shell="bash"`（否则 CreateProcess 会找到 `System32\bash.exe` 跑进 WSL）。
+
+需要在真实 Windows 上确认的：cmd 的引号修复与 `/d`、Git Bash 下单引号与通配符、WSL 在 SYSTEM 账户下不出现、只有 Docker Desktop 时不报 bash。

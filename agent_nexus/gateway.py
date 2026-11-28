@@ -15,7 +15,7 @@ from fastmcp.server.dependencies import get_access_token, get_context
 from fastmcp.server.middleware import Middleware
 from fastmcp.server.providers import Provider
 from fastmcp.tools.base import ToolResult
-from mcp_types import CallToolResult, ToolAnnotations
+from mcp_types import CallToolResult, TextContent, ToolAnnotations
 from mcpkit.tools import SchemaTool, ToolFailure
 from jsonschema import Draft202012Validator
 
@@ -104,34 +104,202 @@ MAX_HANDLES = 10000
 API_CONFIG_SETTING = "agents.api.providers"
 _SESSION_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
 
+#: ``gateway.tool_listing``: ``compact`` lists the everyday tools and keeps the
+#: rarely used ones (desktop control, watchers, asks, ...) behind toolsearch /
+#: tooluse, still callable by name; ``full`` lists every tool as before 0.8.35.
+TOOL_LISTING_MODES = ("compact", "full")
+#: Device tool groups found through toolsearch instead of tools/list (compact).
+DEFERRED_CAPABILITIES = frozenset({"uia", "screen", "input", "companion", "watch", "ask", "notify",
+                                   "agents", "info"})
+DEFERRED_TOOLS = frozenset({"sleep", "curr_time", "update_plan"})
+#: A device may also mark a tool itself: ``_meta["anx/listing"] = "search"``.
+META_LISTING = "anx/listing"
+#: Gateway-native tools that are rarely needed: unlisted (compact) but callable,
+#: by name or through tooluse (they appear in toolsearch as MCP "nexus").
+HIDDEN_GATEWAY_TOOLS = frozenset({"mail_bye", "mail_recall", "mail_status", "file_copy_cancel",
+                                  "file_copy_list", "mcpdetail"})
+NEXUS_MCP = "nexus"
+#: ``gateway.tool_wait_max_s``: the longest one tool call blocks before it returns
+#: a resumable handle. MCP clients (Claude Code: 60 s) cut a call themselves.
+DEFAULT_TOOL_WAIT_MAX_S = 50.0
+#: Device exec tools whose results reach the model as plain text with a header.
+EXEC_TEXT_TOOLS = frozenset({"exec_command", "write_stdin", "exec_wait", "exec_kill"})
+#: Blocking arguments the gateway caps for device tools (old devices included):
+#: tool -> (argument, unit factor to seconds).
+WAIT_ARGUMENTS = {"exec_command": (("yield_time_ms", 1000),), "write_stdin": (("yield_time_ms", 1000),),
+                  "exec_wait": (("timeout_ms", 1000),), "sleep": (("duration_ms", 1000),),
+                  "request_user_input": (("timeout_s", 1),), "request_user_input_result": (("wait_s", 1),)}
+PROGRESS_INTERVAL_S = 10.0
+WORKSPACE_ID_SCHEMA = {"type": "string", "description": "Device handle from use_device; default: current device."}
+EXEC_WAIT_DESCRIPTION = ("Wait for a command exec_command left running: returns its new output, and exit_code "
+                         "once it exits. timeout_ms default 30000, max 50000; still running after it: call "
+                         "exec_wait again with the same session_id.")
+
 INSTRUCTIONS = (
-    "Use device_list, then use_device to choose a computer (device) and one of its workdirs. "
-    "device_list shows each device's display name (the owner's alias or its hostname) and its id; "
-    "either one is accepted wherever a device is expected. "
-    "The older names workspace_list and set_workspace still work and return the same handle. "
-    "Device tools are exposed directly. Other MCPs are accessed through mcplist, mcpdetail, "
-    "toolsearch and tooluse. Keep the workspace_id returned by use_device and pass it to every call "
-    "for explicit routing, especially with sessionless clients; it stays valid across gateway restarts. "
-    "When calling use_device, pass session_name and kind so the session keeps a stable identity; "
-    "without session_name the session gets an automatic name from its client and workdir "
-    "(such as claude-myproject), and a later use_device or set_workspace with session_name and the "
-    "workspace_id you hold renames it, mail included. "
-    "Each session then has a mailbox address (name@device): mail_who lists addresses, mail_send sends "
-    "(to another session, a group such as @all, or to 'me', the owner), mail_inbox and mail_read read. "
-    "Every tool result ends with a notice when you have unread mail. ask_user asks the owner a question. "
-    "Third-party MCP connectors added by the owner run on the gateway as hub/<name> (mcplist, toolsearch, "
-    "tooluse) and work even when no device is online. "
-    "file_copy copies files or folders between devices as a background job (poll file_copy_status). "
-    "Tool execution is never retried automatically."
+    "Agent Nexus runs tools on the owner's devices. device_list lists them (with their shells, default "
+    "first); use_device(device_id, session_name, kind) returns a workspace_id: pass it on every call meant "
+    "for that device, mail_* and ask_user included. Without workspace_id a call goes to this device "
+    "(local MCP) or the default device (several online and no default: refused). "
+    "exec_command runs a shell command; when it returns a session_id, call exec_wait. "
+    "Desktop control, watchers, plugins and connectors: toolsearch(query), then tooluse(tool, arguments). "
+    "mail_* exchange mail with other sessions; ask_user asks the owner. Nothing is retried automatically."
 )
 
 
-class HideLegacyTools(Middleware):
-    """``legacy_tools = "hidden"``: drop the old names from tools/list only; calls still work."""
+class HiddenTools(Middleware):
+    """Drop ``names`` from tools/list only; calling them still works."""
+
+    def __init__(self, names):
+        super().__init__()
+        self.names = frozenset(names)
 
     async def on_list_tools(self, context, call_next):
         tools = await call_next(context)
-        return [tool for tool in tools if tool.name not in LEGACY_TOOL_NAMES]
+        return [tool for tool in tools if tool.name not in self.names]
+
+
+class HideLegacyTools(HiddenTools):
+    """``legacy_tools = "hidden"``: drop the old names from tools/list only; calls still work."""
+
+    def __init__(self):
+        super().__init__(LEGACY_TOOL_NAMES)
+
+
+GENERIC_OUTPUT_SCHEMA = {"additionalProperties": True, "type": "object"}
+
+
+class NexusServer(FastMCP):
+    """FastMCP with a leaner tools/list (compact): no empty ``_meta.fastmcp.tags`` on every tool,
+    ``X | null`` parameters shown as ``X``, and no generic "any object" output schema.
+
+    Overrides FastMCP's private list handler (pinned by uv.lock; a test checks
+    the result still has every tool)."""
+
+    lean_meta = False
+
+    async def _on_list_tools(self, ctx, params):
+        result = await super()._on_list_tools(ctx, params)
+        if self.lean_meta:
+            for tool in result.tools:
+                meta = getattr(tool, "meta", None)
+                if isinstance(meta, dict) and meta.get("fastmcp") in ({"tags": []}, {}):
+                    rest = {key: value for key, value in meta.items() if key != "fastmcp"}
+                    tool.meta = rest or None
+                # Presentation only: FastMCP validates the call against the function itself,
+                # which accepts an omitted optional argument exactly like an explicit null.
+                tool.input_schema = compact_schema(tool.input_schema)
+                if tool.output_schema == GENERIC_OUTPUT_SCHEMA:
+                    tool.output_schema = None
+        return result
+
+
+def compact_schema(schema: Any) -> Any:
+    """A smaller presentation of an input schema: ``X | null`` (default null) becomes ``X``.
+
+    Used where the gateway presents device and plugin tools; the call itself is
+    still validated against the original schema (nulls are dropped first)."""
+    if isinstance(schema, list):
+        return [compact_schema(item) for item in schema]
+    if not isinstance(schema, dict):
+        return schema
+    result = {}
+    for key, value in schema.items():
+        if key == "properties" and isinstance(value, dict):
+            result[key] = {name: compact_schema(prop) for name, prop in value.items()}
+        elif key in ("items", "additionalProperties", "$defs", "anyOf", "oneOf", "allOf"):
+            result[key] = compact_schema(value) if not isinstance(value, dict) or key != "$defs" else \
+                {name: compact_schema(item) for name, item in value.items()}
+        else:
+            result[key] = value
+    options = result.get("anyOf")
+    if isinstance(options, list) and len(options) == 2 and {"type": "null"} in options:
+        other = next(item for item in options if item != {"type": "null"})
+        if isinstance(other, dict):
+            merged = {k: v for k, v in result.items() if k != "anyOf"}
+            if merged.get("default", 0) is None:
+                merged.pop("default")
+            merged = {**other, **merged}
+            result = merged
+    if result.get("title") and set(result) - {"title"} and "properties" not in result:
+        result.pop("title")  # pydantic's per-property title repeats the name
+    return result
+
+
+_DEFAULT_HERE = re.compile(r"\(default here: [^)]*\)")
+EXEC_SHELL_DEFAULT = "(default: the device's own, first in its device_list / use_device shells)"
+
+
+def neutral_exec_description(text: str) -> str:
+    """exec_command's description without the one device's "(default here: ...)" clause."""
+    return _DEFAULT_HERE.sub(EXEC_SHELL_DEFAULT, text, count=1)
+
+
+def deferred(descriptor: dict) -> bool:
+    """Whether a device tool is found through toolsearch instead of tools/list (compact)."""
+    meta = device_contract.tool_meta(descriptor)
+    if meta.get(META_LISTING) == "search":
+        return True
+    name = descriptor.get("name")
+    if name in DEFERRED_TOOLS:
+        return True
+    capability = device_contract.tool_capability(descriptor) or device_contract.standard_capability(name)
+    return capability in DEFERRED_CAPABILITIES
+
+
+def exec_wait_descriptor() -> dict:
+    """exec_wait for a device that predates it (0.8.34): the gateway maps it to write_stdin(chars='')."""
+    return {"name": "exec_wait", "title": "Wait for a running command", "description": EXEC_WAIT_DESCRIPTION,
+            "inputSchema": {"type": "object", "required": ["session_id"], "properties": {
+                "session_id": {"type": "integer"}, "timeout_ms": {"type": "number"},
+                "max_output_tokens": {"type": "number"}}},
+            "annotations": {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False},
+            "_meta": {device_contract.META_CAPABILITY: "exec"}}
+
+
+def device_tools(peer: Peer, mcp_name: str, *, is_device: bool) -> list[dict]:
+    """A device MCP's tool descriptors, plus exec_wait for a device that only has write_stdin."""
+    tools = peer.catalog["mcps"].get(mcp_name, {}).get("tools", [])
+    if is_device:
+        names = {tool.get("name") for tool in tools}
+        if "write_stdin" in names and "exec_wait" not in names:
+            source = next(tool for tool in tools if tool.get("name") == "write_stdin")
+            synthetic = exec_wait_descriptor()
+            capability = device_contract.tool_capability(source)
+            if capability:
+                synthetic["_meta"] = {device_contract.META_CAPABILITY: capability}
+            tools = [*tools, synthetic]
+    return tools
+
+
+def _fmt_seconds(value: Any) -> str:
+    try:
+        return f"{float(value):.1f}s"
+    except (TypeError, ValueError):
+        return ""
+
+
+def exec_text(data: dict, device: str) -> tuple[str, bool]:
+    """A device exec result as one header line plus the raw output; (text, is_error)."""
+    shell = data.get("shell") if isinstance(data.get("shell"), str) else None
+    output = data.get("output") if isinstance(data.get("output"), str) else ""
+    if data.get("status") == "error":
+        return f"[error · {device}] {data.get('error') or 'failed'}", True
+    session = data.get("session_id")
+    code = data.get("exit_code")
+    wall = _fmt_seconds(data.get("wall_time_seconds"))
+    if code is None and data.get("error"):
+        return f"[error · {device}{' · ' + shell if shell else ''}] {output or data['error']}", True
+    if code is None and session is not None:
+        parts = ["running", f"session {session}", wall, device, shell]
+        head = "[" + " · ".join(part for part in parts if part) + f"] exec_wait(session_id={session}) to continue"
+    else:
+        parts = [f"exit {code}", wall, device, shell]
+        head = "[" + " · ".join(part for part in parts if part) + "]"
+    if "[output truncated" in output and data.get("original_token_count"):
+        head += f" (truncated from ~{data['original_token_count']} tokens)"
+    if isinstance(data.get("note"), str) and data["note"]:
+        head += f" ({data['note']})"
+    return head + "\n" + (output if output else "(no output)"), False
 
 
 def _client_id() -> str | None:
@@ -200,17 +368,57 @@ def client_kind_from_name(name: Any) -> str | None:
     return None
 
 
+@contextlib.asynccontextmanager
+async def progress_heartbeat(label: str, interval: float | None = None):
+    """MCP progress notifications every few seconds while a call waits, when the client sent a
+    progressToken (some clients then keep the call open longer). Never relied upon: without a
+    token nothing is sent, and a failed notification (client gone) is ignored."""
+    context = None
+    with contextlib.suppress(Exception):
+        candidate = get_context()
+        request_context = candidate.request_context
+        meta = request_context._srctx.meta if request_context is not None else None
+        if meta is not None and meta.get("progress_token") is not None:
+            context = candidate
+    if context is None:
+        yield
+        return
+    started = time.monotonic()
+    every = PROGRESS_INTERVAL_S if interval is None else interval
+
+    async def beat() -> None:
+        while True:
+            await asyncio.sleep(every)
+            elapsed = round(time.monotonic() - started)
+            with contextlib.suppress(Exception):
+                await context.report_progress(progress=elapsed, total=None, message=f"{label}: {elapsed}s")
+
+    task = asyncio.create_task(beat())
+    try:
+        yield
+    finally:
+        task.cancel()
+
+
 class Gateway:
     def __init__(self, hub: Hub, store: GatewayStore | None = None, *, legacy_tools: str = "listed",
-                 mailbox: dict | None = None):
+                 mailbox: dict | None = None, tool_listing: str = "full",
+                 tool_wait_max_s: float = DEFAULT_TOOL_WAIT_MAX_S):
         if legacy_tools not in LEGACY_TOOLS_MODES:
             raise ValueError(f"gateway.legacy_tools must be one of {', '.join(LEGACY_TOOLS_MODES)}")
+        if tool_listing not in TOOL_LISTING_MODES:
+            raise ValueError(f"gateway.tool_listing must be one of {', '.join(TOOL_LISTING_MODES)}")
         self.hub = hub
+        self.tool_listing = tool_listing
+        #: Never more than the device call budget allows (rpc_timeout_s - 10).
+        self.tool_wait_max_s = max(1.0, min(float(tool_wait_max_s), hub.timeout - 10))
         # Handles are application-level workspace contexts, also usable by
         # clients using the sessionless MCP transport. They are persisted
         # (design §8.1) so a gateway restart does not invalidate them.
         self.store = store if store is not None else GatewayStore(None)
         self.devices = Devices(hub, self.store)
+        # Hub's routing errors name devices the way the owner sees them.
+        hub.display = self.devices.display_name
         self.legacy_tools = legacy_tools
         self.mailbox_config, self.mailbox_warnings = mailbox_config(mailbox)
         self.mailbox = Mailbox(self.store, self.mailbox_config, display_device=self.devices.display_name,
@@ -236,17 +444,35 @@ class Gateway:
         # file_copy (docs/design.md §18): who moves the bytes, and the jobs the gateway pumps itself.
         from .file_copy_gateway import FileCopyService
         self.file_copy = FileCopyService(hub, self.devices)
+        # file_copy_status(wait_ms): the same per-call wait limit (the last device ask adds a 5 s grace).
+        self.file_copy.wait_max_ms = int(min(50.0, self.tool_wait_max_s) * 1000)
 
     async def selection(self, workspace_id: str | None = None) -> dict | None:
+        """Where a call without mcp_id goes: its workspace_id, else the session's use_device choice,
+        else (a call through a device's 本机 MCP) that device itself."""
         if workspace_id:
             record = self.store.touch_handle(workspace_id) if isinstance(workspace_id, str) else None
             if record is None:
                 raise RoutingError("workspace_id is unknown or expired; call use_device (or set_workspace) again")
             return {"agent_id": record["agent_id"], "workspace": record["workspace"], "scope": workspace_id}
-        try:
-            return await get_context().get_state("mcpm_workspace")
-        except RuntimeError:
+        selected = None
+        with contextlib.suppress(RuntimeError):
+            selected = await get_context().get_state("mcpm_workspace")
+        return selected if selected is not None else self.local_selection()
+
+    def local_selection(self) -> dict | None:
+        """The calling device's own default workdir when the caller is its 本机 MCP (``device:<id>``).
+
+        Routing only: the mailbox identity still needs use_device (caller_address ignores this)."""
+        via = caller_device()
+        peer = self.hub.peers.get(via) if via else None
+        if peer is None:
             return None
+        workspaces = peer.catalog.get("workspaces") or {}
+        name = "default" if "default" in workspaces else next(iter(workspaces), None)
+        if name is None:
+            return None
+        return {"agent_id": via, "workspace": name, "scope": f"device:{via}"}
 
     async def caller_address(self, workspace_id: str | None) -> str | None:
         """The mailbox address of the caller: its handle, else the stateful session's selection."""
@@ -287,7 +513,7 @@ class Gateway:
             requested = float(timeout_s)
         except (TypeError, ValueError):
             raise RoutingError("timeout_s must be a number") from None
-        return max(0.0, min(requested, self.hub.timeout - 10))
+        return max(0.0, min(requested, self.tool_wait_max_s, self.hub.timeout - 10))
 
     async def caller_handle(self, workspace_id: str | None) -> str | None:
         """The handle a mail tool call acts through: its workspace_id, else the session's selection."""
@@ -311,18 +537,19 @@ class Gateway:
         """
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.wait_budget(timeout_s)
-        with self.mailbox.in_use(handle):
-            while True:
-                event = self._event()
-                if handle is not None:
-                    address = self._address_of(handle) or address  # displaced: RoutingError; renamed: follows
-                view = self.mailbox.inbox(address, unread_only=True, thread_id=thread_id)
-                remaining = deadline - loop.time()
-                if view["messages"] or remaining <= 0:
-                    view["timed_out"] = not view["messages"]
-                    return view
-                with contextlib.suppress(asyncio.TimeoutError):
-                    await asyncio.wait_for(event.wait(), remaining)
+        async with progress_heartbeat("mail_wait"):
+            with self.mailbox.in_use(handle):
+                while True:
+                    event = self._event()
+                    if handle is not None:
+                        address = self._address_of(handle) or address  # displaced: RoutingError; renamed: follows
+                    view = self.mailbox.inbox(address, unread_only=True, thread_id=thread_id)
+                    remaining = deadline - loop.time()
+                    if view["messages"] or remaining <= 0:
+                        view["timed_out"] = not view["messages"]
+                        return view
+                    with contextlib.suppress(asyncio.TimeoutError):
+                        await asyncio.wait_for(event.wait(), remaining)
 
     async def wait_for_answer(self, ask_id: str, timeout_s: Any) -> dict | None:
         """``ask_user(blocking=True)``: the answer, or ``None`` when the budget runs out."""
@@ -334,7 +561,8 @@ class Gateway:
             if current["state"] == "answered":
                 return current["answer"]
             try:
-                answered = await asyncio.wait_for(asyncio.shield(future), budget)
+                async with progress_heartbeat("ask_user"):
+                    answered = await asyncio.wait_for(asyncio.shield(future), budget)
             except asyncio.TimeoutError:
                 return None
             # The caller has the answer in hand: its answer mail needs no notice.
@@ -506,15 +734,33 @@ class Gateway:
             # workspace_id only identifies the caller, it never routes.
             if workspace_id:
                 await self.selection(workspace_id)
-            return await self.hub.connectors.call_tool(mcp_id[4:], tool, arguments)
+            async with progress_heartbeat(f"{mcp_id}/{tool}"):
+                return await self.hub.connectors.call_tool(mcp_id[4:], tool, arguments)
         peer, name, mcp = self.hub.mcp(mcp_id)
+        is_device = self.is_device_mcp(peer, name)
         descriptor = next((entry for entry in mcp.get("tools", []) if entry["name"] == tool), None)
+        upstream_tool, arguments = tool, dict(arguments or {})
+        if descriptor is None and is_device and tool == "exec_wait":
+            # A device older than exec_wait (0.8.34): the same wait through write_stdin(chars='').
+            fallback = next((entry for entry in mcp.get("tools", []) if entry["name"] == "write_stdin"), None)
+            if fallback is not None:
+                problems = list(Draft202012Validator(exec_wait_descriptor()["inputSchema"]).iter_errors(arguments))
+                if problems:
+                    raise RoutingError("invalid tool arguments: " + "; ".join(e.message for e in problems[:3]))
+                timeout_ms = arguments.get("timeout_ms", 30000)
+                arguments = {"session_id": arguments["session_id"], "chars": "", "yield_time_ms": timeout_ms,
+                             **({"max_output_tokens": arguments["max_output_tokens"]}
+                                if arguments.get("max_output_tokens") is not None else {})}
+                descriptor, upstream_tool = fallback, "write_stdin"
         if descriptor is None:
-            missing = self.missing_capability(peer, tool) if self.is_device_mcp(peer, name) else None
+            missing = self.missing_capability(peer, tool) if is_device else None
             raise missing or RoutingError(f"unknown tool {mcp_id}/{tool}")
         problems = list(Draft202012Validator(descriptor["inputSchema"]).iter_errors(arguments))
         if problems:
             raise RoutingError("invalid tool arguments: " + "; ".join(error.message for error in problems[:3]))
+        if is_device and tool == "exec_command":
+            self.check_old_device_shell(peer, descriptor, arguments)
+        clamped = self.clamp_waits(upstream_tool, arguments) if is_device else {}
         selection = await self.selection(workspace_id)
         if workspace_id and selection and selection["agent_id"] != peer.agent_id:
             raise RoutingError("workspace_id belongs to a different manager than mcp_id")
@@ -530,9 +776,13 @@ class Gateway:
         try:
             context = get_context()
             request_context = context.request_context
-            # Modern HTTP has no session identity. Explicit workspace handles
-            # isolate workflows; anonymous/default calls use one stable pool.
-            if request_context and request_context.request and request_context.protocol_version >= "2026-07-28":
+            request = request_context.request if request_context else None
+            # Modern HTTP has no session identity, and a stateless transport makes up a
+            # new session id per request: those use one stable pool (else every call
+            # would open a new upstream plugin session). Explicit handles isolate workflows.
+            headers = getattr(request, "headers", None)
+            if request is not None and (request_context.protocol_version >= "2026-07-28"
+                                        or not (headers is not None and headers.get("mcp-session-id"))):
                 scope = "default"
             else:
                 scope = context.session_id
@@ -541,11 +791,70 @@ class Gateway:
         if selection:
             scope = selection.get("scope", scope)
         try:
-            result = await peer.call("tool_call", {"mcp": name, "tool": tool, "arguments": arguments,
-                                                   "workspace": workspace_name, "scope": scope})
+            async with progress_heartbeat(f"{tool} ({self.devices.display_name(peer.agent_id)})"):
+                result = await peer.call("tool_call", {"mcp": name, "tool": upstream_tool, "arguments": arguments,
+                                                       "workspace": workspace_name, "scope": scope})
         except asyncio.TimeoutError:
             raise RoutingError("local MCP call timed out; execution outcome may be unknown") from None
-        return ToolResult.from_mcp_result(CallToolResult.model_validate(result))
+        result = ToolResult.from_mcp_result(CallToolResult.model_validate(result))
+        return self.present(peer, tool, result, clamped=clamped) if is_device else result
+
+    def check_old_device_shell(self, peer: Peer, descriptor: dict, arguments: dict) -> None:
+        """A 0.8.34 Windows device without Git Bash passes shell='bash' straight to CreateProcess,
+        which finds System32\\bash.exe (WSL, another filesystem) or fails unclearly: refuse it here."""
+        shell = arguments.get("shell")
+        if not isinstance(shell, str) or shell.strip().lower().removesuffix(".exe") not in ("bash", "sh", "zsh"):
+            return
+        if self.devices.shells(peer.agent_id):
+            return  # 0.8.35+: the device checks the shell itself
+        if "Git Bash is not installed on this machine" in (descriptor.get("description") or ""):
+            raise RoutingError(f"shell {shell!r} is not available on {self.devices.display_name(peer.agent_id)}; "
+                               "available: powershell, cmd (default: powershell)")
+
+    def clamp_waits(self, tool: str, arguments: dict) -> dict:
+        """Cap a device tool's blocking arguments at ``tool_wait_max_s`` (in place); returns what was cut.
+
+        Old devices allowed waits longer than any MCP client keeps a call open
+        (exec 150 s, request_user_input 240 s by default): they return a handle instead."""
+        clamped = {}
+        for argument, factor in WAIT_ARGUMENTS.get(tool, ()):
+            cap = self.tool_wait_max_s * factor
+            value = arguments.get(argument)
+            if value is None:
+                if tool == "request_user_input":
+                    arguments[argument] = int(cap) if float(cap).is_integer() else cap
+                continue
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and value > cap:
+                arguments[argument] = int(cap) if isinstance(value, int) else float(cap)
+                clamped[argument] = (value, arguments[argument])
+        return clamped
+
+    def present(self, peer: Peer, tool: str, result: ToolResult, *, clamped: dict | None = None) -> ToolResult:
+        """How a device tool's result reaches the model.
+
+        exec tools: one header line (exit code or running session, time, device, shell) and the
+        raw output as text, not JSON with escaped newlines; the fields go to ``_meta["anx/exec"]``.
+        Other tools get a short device tag when several devices are online."""
+        device = self.devices.display_name(peer.agent_id)
+        data = result.structured_content
+        if tool in EXEC_TEXT_TOOLS and isinstance(data, dict) and ("output" in data or data.get("status") == "error") \
+                and not result.is_error:
+            text, failed = exec_text(data, device)
+            meta = {**(result.meta or {}),
+                    "anx/exec": {key: value for key, value in data.items() if key != "output"}}
+            return ToolResult(content=[TextContent(type="text", text=text)], meta=meta, is_error=failed)
+        notes = []
+        if clamped and tool == "sleep":
+            requested, used = clamped["duration_ms"]
+            notes.append(f"[waited {used} ms of {requested}: one call waits at most {used} ms; "
+                         f"call sleep(duration_ms={requested - used}) for the rest]")
+        if len(self.hub.peers) > 1:
+            notes.append(f"[device: {device}]")
+        if notes:
+            with contextlib.suppress(AttributeError):
+                result._raw_mcp_result = None  # the edited content must reach the client
+            result.content = [*(result.content or []), *(TextContent(type="text", text=note) for note in notes)]
+        return result
 
     async def _previous_handle(self, previous: Any, ctx: Context, client_id: str | None) -> str | None:
         """The caller's earlier handle: the workspace_id it passed, else this MCP session's selection.
@@ -897,17 +1206,115 @@ class Gateway:
         except EnrollError as exc:
             raise RoutingError(f"{exc.code}: {exc.message}") from None
 
+    # -- toolsearch / tooluse over tools not in tools/list --------------------
+    def _hidden_native(self) -> frozenset:
+        return HIDDEN_GATEWAY_TOOLS if self.tool_listing == "compact" else frozenset()
+
+    async def _hidden_native_names(self) -> frozenset:
+        server = getattr(self, "_server", None)
+        if server is None:
+            return frozenset()
+        names = set()
+        for name in self._hidden_native():
+            with contextlib.suppress(Exception):
+                if await server.get_tool(name) is not None:
+                    names.add(name)
+        return frozenset(names)
+
+    async def _hidden_native_tools(self) -> list[dict]:
+        """The unlisted gateway-native tools as search entries (MCP ``nexus``)."""
+        server = getattr(self, "_server", None)
+        tools = []
+        for name in sorted(await self._hidden_native_names()):
+            tool = await server.get_tool(name)
+            entry = {"name": name, "title": tool.title, "description": tool.description or "",
+                     "inputSchema": compact_schema(tool.parameters)}
+            tools.append({key: value for key, value in entry.items() if value is not None})
+        return tools
+
+    async def _run_native(self, name: str, arguments: dict, workspace_id: str | None) -> ToolResult:
+        """tooluse of a gateway-native tool: run it directly (the tooluse call itself already
+        passes the middleware, so the mail notice is not added twice)."""
+        tool = await self._server.get_tool(name)
+        if workspace_id and "workspace_id" in (tool.parameters.get("properties") or {}):
+            arguments.setdefault("workspace_id", workspace_id)
+        return await tool.run(arguments)
+
+    async def resolve_tool(self, reference: str, workspace_id: str | None = None) -> tuple[str, str]:
+        """tooluse without mcp_id: ``server.tool`` or a bare tool name -> (mcp_id, tool).
+
+        The current device (use_device, workspace_id, or the 本机 MCP's own device) wins over
+        other devices; otherwise the name must be unique, else the candidates are listed."""
+        inventory = self.hub.inventory()
+        cache: dict[str, set] = {}
+
+        def names(mcp_id: str) -> set:
+            if mcp_id not in cache:
+                peer, mcp_name, _ = self.hub.mcp(mcp_id)
+                is_device = peer is not self.hub.connectors and self.is_device_mcp(peer, mcp_name)
+                cache[mcp_id] = {tool.get("name") for tool in device_tools(peer, mcp_name, is_device=is_device)}
+            return cache[mcp_id]
+
+        candidates: list[tuple[dict, str]] = []
+        for index in [i for i, char in enumerate(reference) if char == "."][::-1]:
+            prefix, name = reference[:index], reference[index + 1:]
+            found = [(item, name) for item in inventory
+                     if (item["mcp_id"] == prefix or item["name"] == prefix or MCP_ALIASES.get(prefix) == item["name"])
+                     and name in names(item["mcp_id"])]
+            if not found:
+                # "PC-B.screenshot": a device's display name or id as the prefix (its device MCP first).
+                agent = None
+                with contextlib.suppress(Exception):
+                    agent = self.devices.resolve(prefix)
+                if agent in self.hub.peers:
+                    found = [(item, name) for item in inventory
+                             if item.get("agent_id") == agent and name in names(item["mcp_id"])]
+                    device = [entry for entry in found if self.is_device_mcp(self.hub.peers[agent], entry[0]["name"])]
+                    found = device or found
+            if found:
+                candidates = found
+                break
+        if not candidates:
+            candidates = [(item, reference) for item in inventory if reference in names(item["mcp_id"])]
+        if not candidates:
+            raise RoutingError(f"unknown tool {reference!r}; find it with toolsearch")
+        if len(candidates) > 1:
+            current = await self.selection(workspace_id) if workspace_id else None
+            if current is None:
+                with contextlib.suppress(RoutingError):
+                    current = await self.selection()
+            agent = current.get("agent_id") if isinstance(current, dict) else None
+            preferred = [item for item in candidates if item[0]["agent_id"] == agent]
+            if len(preferred) > 1:
+                peer = self.hub.peers.get(agent)
+                device = [item for item in preferred if peer is not None and self.is_device_mcp(peer, item[0]["name"])]
+                preferred = device or preferred
+            if len(preferred) == 1:
+                candidates = preferred
+        if len(candidates) > 1:
+            listed = ", ".join(f"{item['mcp_id']}" for item, _ in candidates[:10])
+            raise RoutingError(f"tool {reference!r} is on several MCPs ({listed}): pass mcp_id, use "
+                               "'server.tool', or choose a device with use_device / workspace_id")
+        item, name = candidates[0]
+        return item["mcp_id"], name
+
     def build(self) -> FastMCP:
-        server = FastMCP("Agent Nexus", instructions=INSTRUCTIONS, providers=[WorkspaceProvider(self)])
-        if self.legacy_tools == "hidden":
-            server.add_middleware(HideLegacyTools())
+        server = NexusServer("Agent Nexus", instructions=INSTRUCTIONS, providers=[WorkspaceProvider(self)])
+        compact = self.tool_listing == "compact"
+        server.lean_meta = compact
+        hidden = set(LEGACY_TOOL_NAMES) if self.legacy_tools == "hidden" else set()
+        if compact:
+            hidden |= HIDDEN_GATEWAY_TOOLS
+        if hidden:
+            server.add_middleware(HiddenTools(hidden))
         legacy = self.legacy_tools != "off"
+        self._server = server
 
         @server.tool(title="List devices", annotations=ROUTING_READ_ONLY)
         async def device_list(include_offline: bool = False, capability: str | None = None,
                               workspace_id: str | None = None) -> dict:
-            """List devices (computers) with their display names, ids, capabilities and workdirs.
-            display_name is the owner's alias or the device's hostname; device_id is the stable id."""
+            """List devices: display_name (owner's alias or hostname), device_id, capabilities, shells
+            (default first, also shell_default), workdirs."""
             await self._touch(workspace_id)
             return {"devices": self.devices.list(include_offline=include_offline, capability=capability)}
 
@@ -916,14 +1323,25 @@ class Gateway:
                              session_name: str | None = None, kind: str | None = None,
                              resume_id: str | None = None, companion_route: str | None = None,
                              wake: str = "auto", workspace_id: str | None = None) -> dict:
-            """Choose a device (by device_id or display name) and one of its workdirs.
-            Returns the workspace_id to pass to every later call. Pass the workspace_id you already
-            hold to keep (or, with session_name, rename) your mailbox address."""
+            """Choose a device (device_id or display name) and workdir; returns the workspace_id to pass
+            on later calls for it, its shells (default first) and your mailbox address. Pass the
+            workspace_id you hold to keep (or, with session_name, rename) that address."""
             meta = _session_meta(session_name, kind, resume_id, companion_route, wake)
             selected = await self.select(device_id, workdir, ctx, meta, previous=workspace_id)
             selected["device_id"] = selected["agent_id"]
-            selected["hint"] = (f"Pass workspace_id={selected['workspace_id']} with every call. "
-                                f"Device: {selected['device_display']}, workdir: {selected['workspace']}.")
+            shells = self.devices.shells(selected["agent_id"])
+            if shells:
+                selected["shells"] = shells
+                selected["shell_default"] = shells[0]
+            via = caller_device()
+            fallback = (f"this device ({self.devices.display_name(via)})" if via
+                        else "the default device (the only online one; with several online they are refused)")
+            if via == selected["agent_id"]:
+                fallback = "this same device"
+            selected["hint"] = (f"Pass workspace_id={selected['workspace_id']} on every call for "
+                                f"{selected['device_display']} ({selected['workspace']}), mail_* and ask_user "
+                                f"included; calls without it go to {fallback}"
+                                + (f". Shells: {', '.join(shells)} (default {shells[0]})" if shells else "") + ".")
             return selected
 
         if legacy:
@@ -958,49 +1376,101 @@ class Gateway:
         async def mcpdetail(mcp_id: str, workspace_id: str | None = None) -> dict:
             """Return an instance/service descriptor and its full tool schemas."""
             await self._touch(workspace_id)
+            if mcp_id == NEXUS_MCP:  # toolsearch's name for the unlisted gateway tools
+                return {"mcp_id": NEXUS_MCP, "name": NEXUS_MCP, "tools": await self._hidden_native_tools()}
             _, _, descriptor = self.hub.mcp(mcp_id)
             return {"mcp_id": mcp_id, **english_metadata(descriptor)}
 
         @server.tool(title="Search internal tools", annotations=ROUTING_READ_ONLY)
-        async def toolsearch(query: str, agent_id: str | None = None, limit: int = 20, offset: int = 0,
+        async def toolsearch(query: str, agent_id: str | None = None, limit: int = 8, offset: int = 0,
                              workspace_id: str | None = None) -> dict:
-            """Rank internal tools by partial natural-language matches. Tool-name terms weigh most,
-            descriptions next, and MCP names add context. Results include schemas, scores and matched terms."""
-            await self._touch(workspace_id)
+            """Find tools not listed directly (desktop control, watchers, plugins, connectors, rare
+            gateway tools) by words; each hit has its inputSchema. Run one with tooluse(tool, arguments)."""
             if not 1 <= limit <= 100 or offset < 0:
                 raise RoutingError("limit must be 1-100 and offset nonnegative")
             query_terms = _search_terms(query)
             if not query_terms:
                 raise RoutingError("query must contain searchable words")
-            matches = []
+            current = None
+            with contextlib.suppress(RoutingError):
+                current = await self.selection(workspace_id) if workspace_id else await self.selection()
+            current_agent = current.get("agent_id") if isinstance(current, dict) else None
+            matches: list[dict] = []
             waiting = []
+            by_device_tool: dict[str, dict] = {}
             for mcp in self.hub.inventory(self.agent_filter(agent_id)):
-                _, _, descriptor = self.hub.mcp(mcp["mcp_id"])
+                peer, mcp_name, descriptor = self.hub.mcp(mcp["mcp_id"])
                 if mcp.get("kind") == "connector" and mcp.get("auth_state") == "needs_login":
                     # design §7.5: say where to log in instead of silently finding nothing.
                     waiting.append({"mcp_id": mcp["mcp_id"], "kind": "connector", "auth_state": "needs_login",
                                     "score": 0, "message": mcp.get("error") or "needs login in the gateway console"})
                     continue
                 extra = {"kind": "connector", "auth_state": mcp.get("auth_state")} if mcp.get("kind") == "connector" else {}
-                for tool in english_metadata(descriptor).get("tools", []):
+                is_device = peer is not self.hub.connectors and self.is_device_mcp(peer, mcp_name)
+                for tool in english_metadata(device_tools(peer, mcp_name, is_device=is_device)):
                     if device_contract.is_internal(tool):
                         continue  # internal tools are never listed (design §5.2 rule 4)
-                    score, matched_terms = score_tool_search(query, mcp["mcp_id"], tool)
+                    score, _ = score_tool_search(query, mcp["mcp_id"], tool)
+                    if not score:
+                        continue
+                    hit = {"name": tool["name"], "mcp_id": mcp["mcp_id"], "title": tool.get("title"),
+                           "description": tool.get("description", ""),
+                           "inputSchema": compact_schema(tool.get("inputSchema") or {}), **extra, "score": score}
+                    if is_device:
+                        # One hit per device tool; the current device's copy first, the others named.
+                        known = by_device_tool.get(tool["name"])
+                        if known is not None:
+                            if peer.agent_id == current_agent:
+                                hit["also_on"] = [*known.get("also_on", []),
+                                                  {"device": self.devices.display_name(known["_agent"]),
+                                                   "mcp_id": known["mcp_id"]}]
+                                hit["_agent"] = peer.agent_id
+                                known.clear()
+                                known.update(hit)
+                            else:
+                                known.setdefault("also_on", []).append(
+                                    {"device": self.devices.display_name(peer.agent_id), "mcp_id": mcp["mcp_id"]})
+                            continue
+                        hit["_agent"] = peer.agent_id
+                        by_device_tool[tool["name"]] = hit
+                    matches.append(hit)
+            if not agent_id:
+                for tool in await self._hidden_native_tools():
+                    score, _ = score_tool_search(query, NEXUS_MCP, tool)
                     if score:
-                        matches.append({"mcp_id": mcp["mcp_id"], **tool, **extra,
-                                        "score": score, "matched_terms": matched_terms})
+                        matches.append({**tool, "mcp_id": NEXUS_MCP, "score": score})
+            for hit in matches:
+                hit.pop("_agent", None)
+                if not hit.get("title"):
+                    hit.pop("title", None)
             matches.sort(key=lambda item: (-item["score"], item["mcp_id"], item["name"]))
             result = {"tools": matches[offset:offset + limit], "total": len(matches),
-                      "query_terms": query_terms,
                       "next_offset": offset + limit if offset + limit < len(matches) else None}
             if waiting:
                 result["connectors_needing_login"] = waiting
             return result
 
         @server.tool(title="Run an internal MCP tool")
-        async def tooluse(mcp_id: str, tool: str, arguments: dict[str, Any], workspace_id: str | None = None) -> ToolResult:
-            """Execute an internal MCP tool with the arguments given by mcpdetail/toolsearch."""
-            return await self.call(mcp_id, tool, arguments, workspace_id)
+        async def tooluse(tool: str, arguments: dict[str, Any] | None = None, mcp_id: str | None = None,
+                          workspace_id: str | None = None) -> ToolResult:
+            """Run a tool found by toolsearch: tool is its name, or "server.tool" (e.g. "unity.get_scene");
+            mcp_id is only needed when a name is ambiguous."""
+            arguments = dict(arguments or {})
+            if not isinstance(tool, str) or not tool:
+                raise RoutingError("tool is required")
+            if mcp_id == NEXUS_MCP:  # an unlisted gateway tool, as toolsearch names it
+                name = tool[len(NEXUS_MCP) + 1:] if tool.startswith(NEXUS_MCP + ".") else tool
+                if name not in await self._hidden_native_names():
+                    raise RoutingError(f"unknown tool {NEXUS_MCP}/{name}; find it with toolsearch")
+                return await self._run_native(name, arguments, workspace_id)
+            if mcp_id:
+                return await self.call(mcp_id, tool, arguments, workspace_id)
+            if tool in await self._hidden_native_names() or (tool.startswith(NEXUS_MCP + ".")
+                                                             and tool[len(NEXUS_MCP) + 1:] in await self._hidden_native_names()):
+                return await self._run_native(tool.split(".", 1)[1] if tool.startswith(NEXUS_MCP + ".") else tool,
+                                              arguments, workspace_id)
+            target, name = await self.resolve_tool(tool, workspace_id)
+            return await self.call(target, name, arguments, workspace_id)
 
         from . import file_copy_tools
         file_copy_tools.register(server, self)
@@ -1030,8 +1500,17 @@ class WorkspaceProvider(Provider):
         capability = device_contract.tool_meta(descriptor).get(device_contract.META_CAPABILITY)
         return declared is None or not isinstance(capability, str) or capability in declared
 
+    def _tools_of(self, peer: Peer, mcp_name: str) -> list[dict]:
+        return device_tools(peer, mcp_name, is_device=self.gateway.is_device_mcp(peer, mcp_name))
+
+    def listed(self, peer: Peer, descriptor: dict) -> bool:
+        """Exposed and, in compact mode, not one of the rarely used tools kept behind toolsearch."""
+        return self.exposed(peer, descriptor) and not (self.gateway.tool_listing == "compact" and deferred(descriptor))
+
     async def _list_tools(self):
-        selection = await self.gateway.selection()
+        selection = None
+        with contextlib.suppress(RoutingError):
+            selection = await self.gateway.selection()
         try:
             peer, workspace, _ = self.gateway.hub.workspace(selection)
         except RoutingError:
@@ -1040,31 +1519,51 @@ class WorkspaceProvider(Provider):
             tools = {}
             for candidate in self.gateway.hub.peers.values():
                 for entry in candidate.catalog["workspaces"].values():
-                    for descriptor in candidate.catalog["mcps"][entry["mcp"]].get("tools", []):
-                        if self.exposed(candidate, descriptor):
+                    for descriptor in self._tools_of(candidate, entry["mcp"]):
+                        if self.listed(candidate, descriptor):
                             tools.setdefault(descriptor["name"], self.make_tool(descriptor))
             return list(tools.values())
-        return [self.make_tool(tool) for tool in peer.catalog["mcps"][workspace["mcp"]].get("tools", [])
-                if self.exposed(peer, tool) and "workspace_id" not in tool["inputSchema"].get("properties", {})]
+        return [self.make_tool(tool, peer) for tool in self._tools_of(peer, workspace["mcp"])
+                if self.listed(peer, tool) and "workspace_id" not in tool["inputSchema"].get("properties", {})]
 
     async def _get_tool(self, name, version=None):
         # Schema resolution must work before a handle argument is available.
-        # Search the selected workspace first, then all workspace providers.
+        # Search the selected workspace first, then all workspace providers;
+        # a tool kept out of the list (compact) is still found and callable.
         for tool in await self._list_tools():
             if tool.name == name:
                 return tool
+        # A tool kept out of the list: the selected device's own descriptor first, so its
+        # arguments are checked against that device's schema, not another device's.
+        selection = None
+        with contextlib.suppress(RoutingError):
+            selection = await self.gateway.selection()
+        selected = None
+        with contextlib.suppress(RoutingError):
+            selected = self.gateway.hub.workspace(selection)
+        if selected is not None:
+            peer, workspace, _ = selected
+            for tool in self._tools_of(peer, workspace["mcp"]):
+                if tool["name"] == name and self.exposed(peer, tool):
+                    return self.make_tool(tool, peer)
         for peer in self.gateway.hub.peers.values():
             for workspace in peer.catalog["workspaces"].values():
-                for tool in peer.catalog["mcps"][workspace["mcp"]].get("tools", []):
+                for tool in self._tools_of(peer, workspace["mcp"]):
                     if tool["name"] == name and self.exposed(peer, tool):
                         return self.make_tool(tool)
         return None
 
-    def make_tool(self, descriptor: dict) -> SchemaTool:
+    def make_tool(self, descriptor: dict, peer: Peer | None = None) -> SchemaTool:
+        """``peer``: the device the descriptor came from; only a 本机 MCP caller's own device keeps
+        exec_command's "default here" clause (elsewhere the list is shared by several devices)."""
         descriptor = english_metadata(descriptor)
+        if descriptor.get("name") == "exec_command" and (peer is None or peer.agent_id != caller_device()):
+            descriptor = {**descriptor, "description": neutral_exec_description(descriptor.get("description") or "")}
+        compact = self.gateway.tool_listing == "compact"
+        # Validation uses the device's own schema: compacting (X | null -> X) is applied to the
+        # listing only (NexusServer.lean_meta), so a nested explicit null stays valid.
         schema = copy.deepcopy(descriptor["inputSchema"])
-        schema.setdefault("properties", {})["workspace_id"] = {
-            "type": "string", "description": "Workspace context returned by set_workspace; explicit computer routing."}
+        schema.setdefault("properties", {})["workspace_id"] = dict(WORKSPACE_ID_SCHEMA)
 
         async def run(arguments: dict) -> ToolResult:
             arguments = dict(arguments)
@@ -1072,9 +1571,6 @@ class WorkspaceProvider(Provider):
                 handle = arguments.pop("workspace_id", None)
                 selection = await self.gateway.selection(handle)
                 peer, workspace, workspace_name = self.gateway.hub.workspace(selection)
-                # Default selection also gets a concrete workdir on the agent.
-                if selection is None:
-                    selection = {"agent_id": peer.agent_id, "workspace": workspace_name}
                 return await self.gateway.call(f'{peer.agent_id}/{workspace["mcp"]}', descriptor["name"],
                                                arguments, handle)
             except RoutingError as exc:
@@ -1082,10 +1578,19 @@ class WorkspaceProvider(Provider):
 
         # Keep the upstream label; without it clients show the name title-cased.
         title = descriptor.get("title") or (descriptor.get("annotations") or {}).get("title")
-        # The device's _meta (anx/capability, anx/contract) is passed through.
         meta = device_contract.tool_meta(descriptor) or None
+        output_schema = descriptor.get("outputSchema")
+        if descriptor["name"] in EXEC_TEXT_TOOLS:
+            output_schema = None  # their results are plain text (Gateway.present)
+        if compact:
+            # Presentation only: anx/capability stays (clients and tests read it); the device's
+            # generic "any object" output schema and contract tag add nothing for a model.
+            capability = (meta or {}).get(device_contract.META_CAPABILITY)
+            meta = {device_contract.META_CAPABILITY: capability} if capability else None
+            if output_schema == GENERIC_OUTPUT_SCHEMA:
+                output_schema = None
         return SchemaTool(name=descriptor["name"], title=title, description=descriptor.get("description", ""),
-                          parameters=schema, output_schema=descriptor.get("outputSchema"),
+                          parameters=schema, output_schema=output_schema, drop_nulls=compact,
                           annotations=descriptor.get("annotations"), meta=meta, handler=run)
 
 

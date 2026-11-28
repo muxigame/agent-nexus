@@ -46,7 +46,11 @@ async def test_device_plugin_name_is_interchangeable(tmp_path, monkeypatch, agen
         await asyncio.wait_for(ready.wait(), 20)
         async with Client(StreamableHttpTransport(f"http://127.0.0.1:{port}/mcp", auth=SERVER_TOKEN)) as client:
             listed = [tool.name for tool in await client.list_tools()]
-            assert len(listed) == len(set(listed)) and set(listed) == federation.RESERVED_TOOLS | DEVICE_TOOLS
+            # 0.8.35 defaults: legacy aliases and rare gateway tools are unlisted (still callable).
+            from agent_nexus.gateway import HIDDEN_GATEWAY_TOOLS, LEGACY_TOOL_NAMES
+            listed_gateway = federation.RESERVED_TOOLS - ((LEGACY_TOOL_NAMES | HIDDEN_GATEWAY_TOOLS)
+                                                          if gateway_kind == "current" else set())
+            assert len(listed) == len(set(listed)) and set(listed) == listed_gateway | DEVICE_TOOLS
 
             selected = (await client.call_tool("set_workspace", {"agent_id": AGENT_ID, "workspace": "project"})).data
             assert selected["mcp"] == plugin

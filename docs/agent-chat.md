@@ -417,7 +417,7 @@ FEATURE = "agents/1"
 ACP `mcpServers` 的 http 项、自定义 CLI 的 `{mcp_url}`）；检测结果是“无法确定”（unknown）时什么都不接，提示词只写“如果你有 Agent Nexus
 的工具，只用其中一个连接器”。免审批的工具按权限模式给出明确清单（只读：只读工具；逐项审批：再加 mail_send + ask_user；自动改文件：
 经网关时再加 file_write / edit_file / patch_file；完全：全部），exec_command 等在完全之外从不免审批：Codex 用 `enabled_tools` 只留下清单里的
-工具再加审批覆盖，Claude 用 `--allowedTools` 列出清单。`agent_info` 的 `nexus_mcp` 报告每个 CLI
+工具再加审批覆盖，Claude 用 `--allowedTools` 列出清单。只读清单里有 `exec_wait`（只等待、读取已经批准过的命令）。0.8.35 起网关默认不直接列出少用的工具（design.md §20.1）：`curr_time`、`device_info` 等按名字调用仍免审批，经 `tooluse` 调用时和其它 `tooluse` 一样要审批。`agent_info` 的 `nexus_mcp` 报告每个 CLI
 用哪个连接器（`gateway_mcp` 保留一版，只有什么都接不上时为 false）；“没有配置连接器”的提示已删除。
 
 **Codex 的 ChatGPT 账户连接器**（真机，codex-cli 0.164.0）：账户里的连接器是 `codex_apps` 下的 app（工具名 `<app>.<tool>`），`codex exec`

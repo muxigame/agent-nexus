@@ -32,8 +32,8 @@ def register(server: "FastMCP", gateway: "Gateway") -> None:
     async def me(workspace_id: str | None, *, required: bool = True) -> str | None:
         address = await gateway.caller_address(workspace_id)
         if address is None and required:
-            raise RoutingError("pass the workspace_id returned by use_device (or set_workspace); "
-                               "it identifies your mailbox address")
+            raise RoutingError("no mailbox address: call use_device first and pass the workspace_id it "
+                               "returns (it identifies your address)")
         return address
 
     @server.tool(title="Send mail", annotations=MAIL_WRITE)
@@ -43,12 +43,9 @@ def register(server: "FastMCP", gateway: "Gateway") -> None:
                         priority: Literal["normal", "urgent"] = "normal",
                         wake: Literal["auto", "always", "never"] = "auto",
                         attachments: list[dict[str, Any]] | None = None) -> dict:
-        """Send mail to other agent sessions or to the owner ("me").
-        to: an address name@device (device id or display name), a bare name, "me", or a group:
-        @all, @device:<device>, @kind:<claude|codex|gpt|other>, @team:<name>; or a list of these.
-        Pass workspace_id so the mail comes from your address; reply_to answers a message in its thread.
-        wake: auto wakes idle recipients on their device (not active ones), always also wakes active ones,
-        never only leaves the unread notice for their next call."""
+        """Send mail to other sessions or the owner. to: name@device, a bare name, "me", @all, @device:<d>,
+        @kind:<k>, @team:<t>, or a list. Pass workspace_id so it comes from your address; reply_to answers
+        in its thread. wake: auto (wakes idle recipients), always, never."""
         sender = await me(workspace_id, required=False) or ANON_SENDER
         if kind not in ("message", "task", "result"):
             raise RoutingError("kind must be message, task or result")
@@ -60,7 +57,7 @@ def register(server: "FastMCP", gateway: "Gateway") -> None:
         return result
 
     @server.tool(title="Check your inbox", annotations=MAIL_READ_ONLY)
-    async def mail_inbox(workspace_id: str, unread_only: bool = True, thread_id: str | None = None,
+    async def mail_inbox(workspace_id: str | None = None, unread_only: bool = True, thread_id: str | None = None,
                          limit: int = 20, before: str | None = None) -> dict:
         """List your mail (newest first): id, thread, sender, subject, snippet, priority, kind and state.
         Use mail_read to read a message in full."""
@@ -68,15 +65,15 @@ def register(server: "FastMCP", gateway: "Gateway") -> None:
                              limit=limit, before=before)
 
     @server.tool(title="Read mail", annotations=MAIL_READ_ONLY)
-    async def mail_read(workspace_id: str, message_id: str | None = None, thread_id: str | None = None,
+    async def mail_read(workspace_id: str | None = None, message_id: str | None = None, thread_id: str | None = None,
                         mark_read: bool = True) -> dict:
         """Read a message in full (or a whole thread), with attachments; marks it read.
         Without message_id and thread_id, reads your oldest unread message."""
         return mailbox.read(await me(workspace_id), message_id=message_id, thread_id=thread_id, mark_read=mark_read)
 
     @server.tool(title="Wait for new mail", annotations=MAIL_READ_ONLY)
-    async def mail_wait(workspace_id: str, timeout_s: int = 50, thread_id: str | None = None) -> dict:
-        """Wait for unread mail (optionally in one thread), up to timeout_s seconds; returns like mail_inbox."""
+    async def mail_wait(workspace_id: str | None = None, timeout_s: int = 50, thread_id: str | None = None) -> dict:
+        """Wait for unread mail (optionally in one thread), up to timeout_s (max 50); returns like mail_inbox."""
         address = await me(workspace_id)
         return await gateway.wait_for_mail(address, timeout_s, thread_id,
                                            handle=await gateway.caller_handle(workspace_id))
@@ -84,8 +81,7 @@ def register(server: "FastMCP", gateway: "Gateway") -> None:
     @server.tool(title="List mailbox addresses", annotations=MAIL_READ_ONLY)
     async def mail_who(workspace_id: str | None = None, agent_id: str | None = None, kind: str | None = None,
                        include_ended: bool = False) -> dict:
-        """List devices and the mailbox addresses on them: kind, presence (active/idle/offline/ended),
-        unread counts. Address names are shown as name@<device display name>."""
+        """List mailbox addresses (name@device) with kind, presence and unread counts, and the devices."""
         address = await me(workspace_id, required=False)
         resolved = gateway.devices.resolve(agent_id) if agent_id else None
         devices = [{"agent_id": item["device_id"], "display_name": item["display_name"], "online": item["online"],
@@ -98,7 +94,7 @@ def register(server: "FastMCP", gateway: "Gateway") -> None:
                 "counters": mailbox.counters()}
 
     @server.tool(title="End this session", annotations=MAIL_WRITE)
-    async def mail_bye(workspace_id: str) -> dict:
+    async def mail_bye(workspace_id: str | None = None) -> dict:
         """End this session's mailbox presence: it will not be woken again; mail is kept."""
         return mailbox.bye(await me(workspace_id))
 
@@ -109,7 +105,7 @@ def register(server: "FastMCP", gateway: "Gateway") -> None:
         return mailbox.status(message_id)
 
     @server.tool(title="Recall mail", annotations=MAIL_DESTRUCTIVE)
-    async def mail_recall(workspace_id: str, message_id: str, to: str | list[str] | None = None) -> dict:
+    async def mail_recall(message_id: str, workspace_id: str | None = None, to: str | list[str] | None = None) -> dict:
         """Recall a message you sent from recipients who have not read it yet (all, or only those in to).
         Already-read deliveries are reported in not_recalled."""
         return mailbox.recall(await me(workspace_id), message_id, to)
@@ -118,13 +114,12 @@ def register(server: "FastMCP", gateway: "Gateway") -> None:
     async def ask_user(question: str, workspace_id: str | None = None, options: list[str] | None = None,
                        recommended: str | None = None, context: str = "", blocking: bool = False,
                        timeout_s: int = 50) -> dict:
-        """Ask the owner a question. It appears as a question card in the agent-nexus inbox (recommended
-        option first, then the others, then a free "other" answer) and as a toast on online devices.
-        blocking=false returns at once; the answer arrives later as mail (kind=answer).
-        blocking=true waits up to timeout_s for the answer and returns it directly."""
+        """Ask the owner a question (inbox card and toast). blocking=false returns at once and the answer
+        arrives as mail (kind=answer); blocking=true waits up to timeout_s (max 50) for it."""
         sender = await me(workspace_id, required=False) or ANON_SENDER
         if sender == ANON_SENDER:
-            raise RoutingError("ask_user needs your workspace_id: the answer is mailed back to your address")
+            raise RoutingError("ask_user needs your workspace_id: call use_device first and pass the workspace_id it "
+                               "returns (the answer is mailed back to that address)")
         created = mailbox.ask_create(sender, question, options=options, recommended=recommended,
                                      context=context, blocking=blocking)
         gateway.ask_created(created["ask_id"])

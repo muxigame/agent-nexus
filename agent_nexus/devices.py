@@ -102,7 +102,30 @@ class Devices:
                 # sha256-checked copies to and from it (docs/design.md §18).
                 "file_copy": bool(peer is not None and "fxjob/1" in peer.features),
                 "files_v2": bool(peer is not None and "files/2" in peer.features),
-                "features": sorted(peer.features) if peer else list(row.get("features") or [])}
+                "features": sorted(peer.features) if peer else list(row.get("features") or []),
+                **self._shell_facts(block)}
+
+    @staticmethod
+    def _shell_facts(block: dict) -> dict:
+        """exec_command's shells (device 0.8.35+): ``shells`` default first, ``shell_default``, and their
+        paths on Windows."""
+        facts: dict = {}
+        shells = block.get("shells")
+        if isinstance(shells, list) and all(isinstance(item, str) for item in shells):
+            facts["shells"] = shells[:16]
+            default = block.get("shell_default")
+            facts["shell_default"] = default if isinstance(default, str) and default in shells else \
+                (shells[0] if shells else None)
+            if facts["shell_default"] is None:
+                facts.pop("shell_default")
+        if isinstance(block.get("shell_paths"), dict):
+            facts["shell_paths"] = {str(k): str(v)[:400] for k, v in list(block["shell_paths"].items())[:16]}
+        return facts
+
+    def shells(self, agent_id: str) -> list[str]:
+        """The device's shells, default first (empty for a device older than 0.8.35)."""
+        peer: Peer | None = self.hub.peers.get(agent_id)
+        return list(self._shell_facts(device_block(peer.catalog) if peer else {}).get("shells") or [])
 
     def list(self, *, include_offline: bool = False, capability: str | None = None) -> list[dict]:
         known = self._known()

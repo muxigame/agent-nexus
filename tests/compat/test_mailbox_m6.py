@@ -84,10 +84,15 @@ def api(port):
                              headers={"Authorization": f"Bearer {SERVER_TOKEN}"})
 
 
+#: These tests check the notice on each result: ``notice.repeat = "every"`` (since 0.8.35 the
+#: default is ``on_change``; see test_notice_repeats_only_when_the_unread_mail_changes).
+EVERY = {"mailbox": {"notice": {"repeat": "every"}}}
+
+
 # -- identity, notice, both failure shapes, strict schemas ---------------------------
 
 async def test_notice_on_every_result_including_both_failure_shapes(tmp_path, monkeypatch):
-    async with running_gateway(tmp_path, monkeypatch) as (app, port, agents, _):
+    async with running_gateway(tmp_path, monkeypatch, config_extra=EVERY) as (app, port, agents, _):
         await start(tmp_path, port, agents)
         async with mcp_client(port) as a, mcp_client(port) as b:
             ha, selected_a = await use(a, "alpha")
@@ -201,13 +206,13 @@ async def test_groups_who_wait_bye_and_missed_notices(tmp_path, monkeypatch):
 
 
 async def test_mail_addresses_and_handles_survive_a_gateway_restart(tmp_path, monkeypatch):
-    async with running_gateway(tmp_path, monkeypatch) as (app, port, agents, _):
+    async with running_gateway(tmp_path, monkeypatch, config_extra=EVERY) as (app, port, agents, _):
         await start(tmp_path, port, agents)
         async with mcp_client(port) as client:
             ha, _ = await use(client, "alpha")
             hb, _ = await use(client, "beta", kind="codex")
             sent = (await client.call_tool("mail_send", {"workspace_id": ha, "to": "beta", "body": "kept"})).data
-    async with running_gateway(tmp_path, monkeypatch) as (app, port, agents, _):
+    async with running_gateway(tmp_path, monkeypatch, config_extra=EVERY) as (app, port, agents, _):
         await start(tmp_path, port, agents)
         async with mcp_client(port) as client:
             inbox = (await client.call_tool("mail_inbox", {"workspace_id": hb})).data
@@ -337,7 +342,7 @@ def test_retention_vacuums_at_most_once_a_week(tmp_path):
 
 async def test_a_session_can_mail_itself(tmp_path, monkeypatch):
     """§8.6: the real clients are measured by a session mailing itself first."""
-    async with running_gateway(tmp_path, monkeypatch) as (app, port, agents, _):
+    async with running_gateway(tmp_path, monkeypatch, config_extra=EVERY) as (app, port, agents, _):
         await start(tmp_path, port, agents)
         async with mcp_client(port) as client:
             h, _ = await use(client, "probe")
@@ -359,7 +364,7 @@ async def test_notice_falls_back_to_the_oauth_client_id(tmp_path, monkeypatch):
     """§8.6 identity fallback: no workspace_id, one recent address for this client -> its notice."""
     from agent_nexus import gateway as gateway_module
     monkeypatch.setattr(gateway_module, "_client_id", lambda: "dcr-client-1")
-    async with running_gateway(tmp_path, monkeypatch) as (app, port, agents, _):
+    async with running_gateway(tmp_path, monkeypatch, config_extra=EVERY) as (app, port, agents, _):
         await start(tmp_path, port, agents)
         async with mcp_client(port) as client:
             h, _ = await use(client, "fallback")
@@ -647,3 +652,20 @@ def test_mail_tool_schemas_match_the_published_file():
         for prop, spec in entry["inputSchema"]["properties"].items():
             assert schema["properties"][prop] == spec, (name, prop)
         assert tools[name].title == entry["title"]
+
+
+async def test_notice_repeats_only_when_the_unread_mail_changes(tmp_path, monkeypatch):
+    """0.8.35 default (``notice.repeat = "on_change"``): one notice per change of the unread mail."""
+    async with running_gateway(tmp_path, monkeypatch) as (app, port, agents, _):
+        await start(tmp_path, port, agents)
+        async with mcp_client(port) as a, mcp_client(port) as b:
+            ha, _ = await use(a, "alpha")
+            hb, _ = await use(b, "beta", kind="codex")
+            await a.call_tool("mail_send", {"workspace_id": ha, "to": "beta", "body": "one"})
+            first = await b.call_tool_mcp("device_list", {"workspace_id": hb})
+            assert last_text(first).startswith(NOTICE)
+            second = await b.call_tool_mcp("device_list", {"workspace_id": hb})
+            assert not last_text(second).startswith(NOTICE)
+            await a.call_tool("mail_send", {"workspace_id": ha, "to": "beta", "body": "two"})
+            third = await b.call_tool_mcp("device_list", {"workspace_id": hb})
+            assert last_text(third).startswith(NOTICE) and "有 2 封未读" in last_text(third)

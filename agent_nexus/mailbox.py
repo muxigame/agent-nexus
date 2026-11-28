@@ -141,7 +141,7 @@ def clean_title(value: Any) -> str | None:
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "enabled": True,
-    "notice": {"repeat": "every", "max_items": 3, "max_chars": 600, "structured": "auto", "meta": True,
+    "notice": {"repeat": "on_change", "max_items": 3, "max_chars": 600, "structured": "auto", "meta": True,
                "fallback": "client_id", "fallback_window_s": 1800},
     "presence": {"idle_after_s": 120, "end_after_days": 30},
     "retention": {"read_days": 90, "events_days": 30, "jobs_days": 14, "warn_db_mb": 1024,

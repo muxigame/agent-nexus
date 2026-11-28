@@ -221,7 +221,7 @@ class FileCopyService:
 
     async def status(self, job_id: str, wait_ms: int = 0) -> dict:
         runner = self._runner(job_id)
-        wait_ms = max(0, min(int(wait_ms or 0), STATUS_WAIT_MAX_MS))
+        wait_ms = max(0, min(int(wait_ms or 0), int(getattr(self, "wait_max_ms", STATUS_WAIT_MAX_MS))))
         loop = asyncio.get_running_loop()
         deadline = loop.time() + wait_ms / 1000.0
         if runner == "gateway":

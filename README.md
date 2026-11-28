@@ -82,18 +82,20 @@ flowchart LR
 
 云端只有一个对外 MCP 端点 `/mcp`，并提供接入点 `/ingress/{agent_id}`。本机 manager 主动发起连接，电脑无需公网监听端口。接入凭据按实例分别设置，与外部 MCP 客户端使用的凭据分开；一个实例 ID 同时只能有一个连接。多台电脑和同一电脑的多个实例均可接入，使用不同实例 ID；本机多个实例应使用独立配置根目录、管理器端口和服务端口。
 
-默认工具列表只展开 Workspace 的工具，并追加：
+默认工具列表（`gateway.tool_listing = "compact"`）只展开常用的设备工具（命令、文件、编辑、搜索、图片），并追加：
 
 | 工具 | 用途 |
 | --- | --- |
-| `workspace_list` | 列出各电脑／实例已注册的 workspace |
-| `set_workspace(agent_id, workspace)` | 选择指定电脑／实例上的工作目录，返回 `workspace_id` |
+| `device_list` | 列出设备，带显示名、能力、可用 shell 和工作目录 |
+| `use_device(device_id, workdir?)` | 选设备和工作目录，返回 `workspace_id`（之后发给这台设备的调用都带上它）、`shells` 和 `shell_default` |
 | `mcplist(agent_id?)` | 查看内部 MCP 列表；标识为 `实例/服务` |
-| `mcpdetail(mcp_id)` | 获取某个 MCP 的全部工具与参数定义 |
-| `toolsearch(query, agent_id?, limit?, offset?)` | 搜索内部工具，返回参数定义和分页位置 |
-| `tooluse(mcp_id, tool, arguments, workspace_id?)` | 调用内部工具，透传文本、图片、结构化结果、元数据与工具错误 |
+| `toolsearch(query, agent_id?, limit?, offset?)` | 搜索没有直接列出的工具（桌面控制、watcher、插件、连接器等），每条结果直接带参数定义 |
+| `tooluse(tool, arguments?, mcp_id?, workspace_id?)` | 调用找到的工具：`tool` 可以是裸名或 `server.tool`；透传文本、图片、结构化结果、元数据与工具错误 |
+| `exec_wait(session_id, timeout_ms?)` | 等待仍在运行的命令；超时后用同一个 id 再调 |
 
-Workspace 工具增加可选 `workspace_id` 参数。当前部署沿用原 Workspace 的 `stateless=true`，各客户端应在每次调用中携带 `set_workspace` 返回的 `workspace_id`；配置为有会话模式且使用旧版有会话的客户端时，也可以使用当前会话的选择。该句柄空闲 24 小时后过期。连接中只有一个 workspace 时会自动选择；也可以在云端配置 `default_workspace`，例如 `{"agent_id":"office-pc-main","workspace":"projects"}`。存在多个 workspace 且没有明确选择时，执行请求会返回选择提示，不会随机切换电脑。
+旧名 `workspace_list`、`set_workspace`，以及 `mcpdetail`、`mail_bye`、`mail_recall`、`mail_status`、`file_copy_cancel`、`file_copy_list`、桌面控制和 watcher 等少用工具不在列表里，但照样可以按名字调用。`"full"` 恢复完整列表。每次调用最多阻塞 `gateway.tool_wait_max_s`（默认 50 秒）就返回可继续的句柄，因为 MCP 客户端会在约 60 秒时自己切断。详见 `docs/design.md` §20。
+
+Workspace 工具增加可选 `workspace_id` 参数。不传时用当前设备：有会话的传输里是 `use_device` 选的设备，经本机 MCP 时是这台设备自己，只有一台设备在线时是它。当前部署沿用原 Workspace 的 `stateless=true`，本机 MCP 也不保留会话，所以 `use_device` 之后发给那台设备的每次调用（包括 `mail_*`、`ask_user`）都要携带它返回的 `workspace_id`，否则经本机 MCP 的调用会落在这台设备自己；配置为有会话模式且使用旧版有会话的客户端时，也可以使用当前会话的选择。该句柄空闲 24 小时后过期。连接中只有一个 workspace 时会自动选择；也可以在云端配置 `default_workspace`，例如 `{"agent_id":"office-pc-main","workspace":"projects"}`。存在多个 workspace 且没有明确选择时，执行请求会返回选择提示，不会随机切换电脑。
 
 Workspace 是工作目录的路由和默认值：调用上游带 `workdir` 参数的工具时填入所选路径，显式传入的 `workdir` 保持有效；访问边界仍由各本机 Workspace 的 `allowed_roots` 等配置控制。目录名、路径和实例信息由本机配置注册，云端 `set_workspace` 不能任意增加本机目录。
 

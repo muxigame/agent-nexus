@@ -143,7 +143,9 @@ async def test_display_names_aliases_and_device_resolution(tmp_path, monkeypatch
         await start_agent(tmp_path, port, agents, agent_id=SECOND_ID, token_env="SECOND_TOKEN", hostname=HOST_B)
         async with mcp_client(port) as client:
             names = {tool.name for tool in await client.list_tools()}
-            assert {"device_list", "use_device", "workspace_list", "set_workspace"} <= names
+            assert {"device_list", "use_device"} <= names
+            # 0.8.35: the old names are unlisted by default (gateway.legacy_tools = "hidden"), still callable.
+            assert not {"workspace_list", "set_workspace"} & names
 
             devices = {d["device_id"]: d for d in (await client.call_tool("device_list")).data["devices"]}
             assert {k: (d["display_name"], d["hostname"], d["alias"]) for k, d in devices.items()} == {
@@ -342,6 +344,25 @@ def _shape(schema):
     return schema
 
 
+#: Defaults changed on purpose (0.8.35): toolsearch returns 8 hits unless asked for more.
+CHANGED_DEFAULTS = {("toolsearch", "limit")}
+
+
+def _widened(new, old):
+    """The same schema, or one that only accepts more: an added default, or ``| null``."""
+    if new == old:
+        return True
+    if not isinstance(new, dict):
+        return False
+    base = {key: value for key, value in new.items() if key != "default"}
+    if base == old:
+        return True
+    options = base.get("anyOf")
+    return (isinstance(options, list) and {"type": "null"} in options and len(options) == 2
+            and {key: value for key, value in base.items() if key != "anyOf"} == {}
+            and next(item for item in options if item != {"type": "null"}) == old)
+
+
 async def _schemas(gateway):
     async with Client(gateway.build()) as client:
         return {tool.name: _shape(tool.input_schema) for tool in await client.list_tools()}
@@ -358,9 +379,15 @@ async def test_routing_tool_schemas_only_grow_optional_properties():
     current = await _schemas(current_gateway.Gateway(current_federation.Hub()))
     for name, old in snapshot.items():
         new = current[name]
-        assert sorted(new.get("required", [])) == sorted(old.get("required", [])), name
+        # A parameter may become optional (0.8.35: tooluse's mcp_id and arguments), never newly required:
+        # old clients keep sending it and it keeps working.
+        assert set(new.get("required", [])) <= set(old.get("required", [])), name
         for prop, old_schema in old.get("properties", {}).items():
-            assert new["properties"].get(prop) == old_schema, f"{name}.{prop} changed"
+            new_schema = new["properties"].get(prop)
+            if (name, prop) in CHANGED_DEFAULTS:
+                # Only the default differs; an explicit value means what it always meant.
+                new_schema = {**new_schema, "default": old_schema.get("default")}
+            assert _widened(new_schema, old_schema), f"{name}.{prop} changed"
         added = set(new.get("properties", {})) - set(old.get("properties", {}))
         assert not added & set(new.get("required", [])), f"{name}: new properties must be optional"
 

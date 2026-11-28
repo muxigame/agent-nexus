@@ -19,6 +19,7 @@ async def test_expected_tool_surface(server: DeviceServer) -> None:
     expected = [
         "exec_command",
         "write_stdin",
+        "exec_wait",  # 0.8.35: waits for a running command (additive)
         "exec_kill",
         "exec_list",
         "edit_file",

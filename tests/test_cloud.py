@@ -19,6 +19,7 @@ from starlette.testclient import TestClient
 from agent_nexus.agent import LocalGateway, run_agent
 from agent_nexus.agent import connection_settings
 from agent_nexus.cloud import build_cloud_app
+from agent_nexus.gateway import HIDDEN_GATEWAY_TOOLS, LEGACY_TOOL_NAMES
 from agent_nexus.federation import Hub, Peer, RESERVED_TOOLS, RoutingError
 from agent_nexus.gateway import score_tool_search
 
@@ -158,7 +159,8 @@ async def test_two_computers_full_reverse_mcp_roundtrip(tmp_path, monkeypatch):
 
         async with client() as first, client() as second:
             names = {tool.name for tool in await first.list_tools()}
-            assert names == RESERVED_TOOLS | {"execute", "picture", "failure"}
+            # 0.8.35 defaults: legacy aliases and rare gateway tools are hidden from tools/list (still callable).
+            assert names == (RESERVED_TOOLS - LEGACY_TOOL_NAMES - HIDDEN_GATEWAY_TOOLS) | {"execute", "picture", "failure"}
             assert "internal_action" not in names
             choices = await first.call_tool("workspace_list")
             assert len(choices.data["workspaces"]) == 2

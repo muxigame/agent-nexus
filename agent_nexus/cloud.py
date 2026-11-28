@@ -30,7 +30,7 @@ from .connectors import ConnectorHost
 from .connectors.web import ConnectorsWeb
 from .console import Console
 from .downloads import Downloads
-from .gateway import LEGACY_TOOLS_MODES, Gateway, client_kind_from_name
+from .gateway import DEFAULT_TOOL_WAIT_MAX_S, LEGACY_TOOLS_MODES, TOOL_LISTING_MODES, Gateway, client_kind_from_name
 from .inbox_web import InboxWeb, oauth_provider
 from .invites import CLOSE_REVOKED, Enrollment
 from .mailbox import ME, SYSTEM_SENDER, mailbox_config
@@ -55,7 +55,7 @@ KNOWN_CONFIG_KEYS = frozenset({
     "default_workspace", "rpc_timeout_s", "auth", "media_cache_dir", "state_dir", "gateway", "mailbox", "p2p",
     "migrated_from", "downloads", "invites", "plugin_repo"})
 KNOWN_INVITE_KEYS = frozenset({"default_ttl_s", "max_ttl_s"})
-KNOWN_GATEWAY_KEYS = frozenset({"legacy_tools"})
+KNOWN_GATEWAY_KEYS = frozenset({"legacy_tools", "tool_listing", "tool_wait_max_s"})
 STATE_DB_NAME = "gateway.sqlite3"
 
 
@@ -149,9 +149,19 @@ def build_cloud_app(config: dict, root: Path):
     section = config.get("gateway", {})
     if not isinstance(section, dict):
         raise ConfigError("gateway must be an object")
-    legacy_tools = section.get("legacy_tools", "listed")
+    # 0.8.35: the old routing names are hidden from tools/list by default (still callable).
+    legacy_tools = section.get("legacy_tools", "hidden")
     if legacy_tools not in LEGACY_TOOLS_MODES:
         raise ConfigError(f"gateway.legacy_tools must be one of {', '.join(LEGACY_TOOLS_MODES)}")
+    tool_listing = section.get("tool_listing", "compact")
+    if tool_listing not in TOOL_LISTING_MODES:
+        raise ConfigError(f"gateway.tool_listing must be one of {', '.join(TOOL_LISTING_MODES)}")
+    try:
+        tool_wait_max_s = float(section.get("tool_wait_max_s", DEFAULT_TOOL_WAIT_MAX_S))
+    except (TypeError, ValueError):
+        raise ConfigError("gateway.tool_wait_max_s must be a number") from None
+    if "tool_wait_max_s" in section and not 5 <= tool_wait_max_s <= max(5.0, timeout - 10):
+        raise ConfigError("gateway.tool_wait_max_s must be between 5 and rpc_timeout_s - 10")
     if "mailbox" in config and not isinstance(config["mailbox"], dict):
         raise ConfigError("mailbox must be an object")
     if "state_dir" in config and not isinstance(config["state_dir"], str):
@@ -159,7 +169,8 @@ def build_cloud_app(config: dict, root: Path):
     hub = Hub(default_workspace=default, timeout=timeout)
     # Opened lazily: --check-config builds the app but never touches the database.
     store = GatewayStore(state_db_path(config, root))
-    facade = Gateway(hub, store, legacy_tools=legacy_tools, mailbox=config.get("mailbox"))
+    facade = Gateway(hub, store, legacy_tools=legacy_tools, mailbox=config.get("mailbox"),
+                     tool_listing=tool_listing, tool_wait_max_s=tool_wait_max_s)
     # Invites and per-device credentials (M16, decision D3, design §11.5).
     enrollment = Enrollment(store, hub, public_url=config.get("public_url"), agents=agents.keys(),
                             groups=groups.keys(), settings=invite_settings(config))

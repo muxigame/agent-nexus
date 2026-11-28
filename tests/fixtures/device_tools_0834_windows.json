@@ -1,0 +1,1983 @@
+{
+ "note": "tools/list of the 0.8.34 device plugin (platform windows), recorded in-process for the tools/list size regression test",
+ "tools": [
+  {
+   "name": "exec_command",
+   "title": "Run a command",
+   "description": "Run a command and return its output and exit_code. cmd is a bash command line; shell='powershell' or shell='cmd' runs another shell instead. The call waits up to yield_time_ms (default 10000, max 150000) and returns as soon as the command exits; a command still running then returns a session_id: poll it or type into it with write_stdin, stop it with exec_kill. Pass a long yield_time_ms for builds and tests, a short one to start a server. Output beyond max_output_tokens (about 4 characters each, default 10000) keeps its head and tail. workdir defaults to the session's workdir. For reading, searching and editing files prefer file_read, file_grep, file_glob and edit_file: they need no quoting.",
+   "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+     "cmd": {
+      "type": "string"
+     },
+     "workdir": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     },
+     "yield_time_ms": {
+      "anyOf": [
+       {
+        "type": "number"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     },
+     "max_output_tokens": {
+      "anyOf": [
+       {
+        "type": "number"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     },
+     "shell": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     },
+     "login": {
+      "anyOf": [
+       {
+        "type": "boolean"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     },
+     "tty": {
+      "default": false,
+      "type": "boolean"
+     }
+    },
+    "required": [
+     "cmd"
+    ]
+   },
+   "outputSchema": {
+    "additionalProperties": true,
+    "type": "object"
+   },
+   "annotations": {
+    "readOnlyHint": false,
+    "destructiveHint": false,
+    "idempotentHint": false,
+    "openWorldHint": true
+   },
+   "_meta": {
+    "anx/capability": "exec",
+    "anx/contract": "anx.device/1",
+    "fastmcp": {
+     "tags": []
+    }
+   }
+  },
+  {
+   "name": "write_stdin",
+   "title": "Send command input or wait for output",
+   "description": "Send characters to a command that exec_command left running, then return the output it has produced since the last call (and exit_code once it has exited). chars='' just waits for output: up to yield_time_ms (default 5000, or 250 after writing; max 150000), returning early when the command exits. Characters are sent exactly as given, so end a line with '\\n'; chars='\\u0003' stops the command.",
+   "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+     "session_id": {
+      "type": "integer"
+     },
+     "chars": {
+      "default": "",
+      "type": "string"
+     },
+     "yield_time_ms": {
+      "anyOf": [
+       {
+        "type": "number"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     },
+     "max_output_tokens": {
+      "anyOf": [
+       {
+        "type": "number"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     }
+    },
+    "required": [
+     "session_id"
+    ]
+   },
+   "outputSchema": {
+    "additionalProperties": true,
+    "type": "object"
+   },
+   "annotations": {
+    "readOnlyHint": false,
+    "destructiveHint": false,
+    "idempotentHint": false,
+    "openWorldHint": true
+   },
+   "_meta": {
+    "anx/capability": "exec",
+    "anx/contract": "anx.device/1",
+    "fastmcp": {
+     "tags": []
+    }
+   }
+  },
+  {
+   "name": "exec_kill",
+   "title": "Stop a command",
+   "description": "Terminate a still-running exec_command process and everything it started.",
+   "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+     "session_id": {
+      "type": "integer"
+     }
+    },
+    "required": [
+     "session_id"
+    ]
+   },
+   "outputSchema": {
+    "additionalProperties": true,
+    "type": "object"
+   },
+   "annotations": {
+    "readOnlyHint": false,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": false
+   },
+   "_meta": {
+    "anx/capability": "exec",
+    "anx/contract": "anx.device/1",
+    "fastmcp": {
+     "tags": []
+    }
+   }
+  },
+  {
+   "name": "exec_list",
+   "title": "List running commands",
+   "description": "List resumable exec_command processes currently held by this MCP server.",
+   "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+   },
+   "outputSchema": {
+    "additionalProperties": true,
+    "type": "object"
+   },
+   "annotations": {
+    "readOnlyHint": true,
+    "openWorldHint": false
+   },
+   "_meta": {
+    "anx/capability": "exec",
+    "anx/contract": "anx.device/1",
+    "fastmcp": {
+     "tags": []
+    }
+   }
+  },
+  {
+   "name": "edit_file",
+   "title": "Edit a file",
+   "description": "Replace exact text in one file: old_string must match the file character for character (copy it from file_read, without line-number prefixes) and occur exactly once, unless replace_all=true replaces every occurrence. Include enough surrounding lines to make it unique. Line endings may be given as LF: the file's own CRLF/LF, BOM and encoding (UTF-8 or GBK) are kept. The result has a numbered snippet of the edited lines, so there is no need to read the file again. Use file_write to create a file, patch_file for many changes at once.",
+   "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+     "path": {
+      "type": "string"
+     },
+     "old_string": {
+      "type": "string"
+     },
+     "new_string": {
+      "type": "string"
+     },
+     "replace_all": {
+      "default": false,
+      "type": "boolean"
+     }
+    },
+    "required": [
+     "path",
+     "old_string",
+     "new_string"
+    ]
+   },
+   "outputSchema": {
+    "additionalProperties": true,
+    "type": "object"
+   },
+   "annotations": {
+    "readOnlyHint": false,
+    "destructiveHint": false,
+    "idempotentHint": false,
+    "openWorldHint": false
+   },
+   "_meta": {
+    "anx/capability": "edit",
+    "anx/contract": "anx.device/1",
+    "fastmcp": {
+     "tags": []
+    }
+   }
+  },
+  {
+   "name": "patch_file",
+   "title": "Apply a patch",
+   "description": "Apply a unified diff (the output format of `git diff` or `diff -u`) to one or more files: '--- a/path' and '+++ b/path' headers, '@@ -start,count +start,count @@' hunks, /dev/null to create or delete a file, git 'rename from'/'rename to'. Relative paths start at workdir (default: default_workdir). All files change or none do; dry_run=true checks the patch without writing. Hunks may have drifted: the nearest matching position is used and reported.",
+   "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+     "patch": {
+      "type": "string"
+     },
+     "workdir": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     },
+     "dry_run": {
+      "default": false,
+      "type": "boolean"
+     }
+    },
+    "required": [
+     "patch"
+    ]
+   },
+   "outputSchema": {
+    "additionalProperties": true,
+    "type": "object"
+   },
+   "annotations": {
+    "readOnlyHint": false,
+    "destructiveHint": false,
+    "idempotentHint": false,
+    "openWorldHint": false
+   },
+   "_meta": {
+    "anx/capability": "edit",
+    "anx/contract": "anx.device/1",
+    "fastmcp": {
+     "tags": []
+    }
+   }
+  },
+  {
+   "name": "view_image",
+   "title": "View a local image",
+   "description": "View a local image file when visual inspection is needed. Returns MCP image content for the model plus a temporary HTTPS URL. If the image is important for the user to see, or the user explicitly asks to see it, include that URL in the assistant response.",
+   "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+     "path": {
+      "type": "string"
+     },
+     "detail": {
+      "default": "high",
+      "type": "string"
+     },
+     "workdir": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     }
+    },
+    "required": [
+     "path"
+    ]
+   },
+   "annotations": {
+    "readOnlyHint": false,
+    "destructiveHint": false,
+    "idempotentHint": false,
+    "openWorldHint": true
+   },
+   "_meta": {
+    "anx/capability": "media",
+    "anx/contract": "anx.device/1",
+    "fastmcp": {
+     "tags": []
+    }
+   }
+  },
+  {
+   "name": "update_plan",
+   "title": "Update the task plan",
+   "description": "Updates the task plan. Provide an optional explanation and plan items with step/status. Status must be pending, in_progress, or completed; at most one item may be in_progress.",
+   "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+     "plan": {
+      "items": {
+       "additionalProperties": {
+        "type": "string"
+       },
+       "type": "object"
+      },
+      "type": "array"
+     },
+     "explanation": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     }
+    },
+    "required": [
+     "plan"
+    ]
+   },
+   "outputSchema": {
+    "additionalProperties": true,
+    "type": "object"
+   },
+   "annotations": {
+    "readOnlyHint": true,
+    "idempotentHint": true,
+    "openWorldHint": false
+   },
+   "_meta": {
+    "anx/capability": "plan",
+    "anx/contract": "anx.device/1",
+    "fastmcp": {
+     "tags": []
+    }
+   }
+  },
+  {
+   "name": "curr_time",
+   "title": "Get the current UTC time",
+   "description": "Return the current UTC time.",
+   "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+   },
+   "outputSchema": {
+    "additionalProperties": true,
+    "type": "object"
+   },
+   "annotations": {
+    "readOnlyHint": true,
+    "openWorldHint": false
+   },
+   "_meta": {
+    "anx/capability": "time",
+    "anx/contract": "anx.device/1",
+    "fastmcp": {
+     "tags": []
+    }
+   }
+  },
+  {
+   "name": "sleep",
+   "title": "Wait for a duration",
+   "description": "Pause this tool call for duration_ms milliseconds. It cannot be interrupted by new chat input mid-call.",
+   "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+     "duration_ms": {
+      "type": "integer"
+     }
+    },
+    "required": [
+     "duration_ms"
+    ]
+   },
+   "outputSchema": {
+    "additionalProperties": true,
+    "type": "object"
+   },
+   "annotations": {
+    "readOnlyHint": true,
+    "openWorldHint": false
+   },
+   "_meta": {
+    "anx/capability": "time",
+    "anx/contract": "anx.device/1",
+    "fastmcp": {
+     "tags": []
+    }
+   }
+  },
+  {
+   "name": "companion_routes",
+   "title": "List GPT Companion routes",
+   "description": "Show GPT Companion's saved ChatGPT conversation routes and which saved route, if any, is currently open. Useful before creating a watcher.",
+   "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+   },
+   "outputSchema": {
+    "additionalProperties": true,
+    "type": "object"
+   },
+   "annotations": {
+    "readOnlyHint": true,
+    "openWorldHint": true
+   },
+   "_meta": {
+    "anx/capability": "companion",
+    "anx/contract": "anx.device/1",
+    "fastmcp": {
+     "tags": []
+    }
+   }
+  },
+  {
+   "name": "request_user_input",
+   "title": "Ask the user and wait for an answer",
+   "description": "Ask the person at this machine a question and wait for their answer. The question appears in the chatx companion window with the options as radio buttons (kind='single'), checkboxes (kind='multi'), or a text box (kind='text'); set allow_custom to add a free-text box beside the options. Returns the chosen option values in 'selected' and any typed text in 'text'. Use this instead of guessing when a decision is genuinely the user's to make. If nobody answers within the timeout the call returns answered=false with a question_id -- the question stays on screen and request_user_input_result collects the answer later.",
+   "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+     "question": {
+      "type": "string"
+     },
+     "title": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     },
+     "kind": {
+      "default": "text",
+      "type": "string"
+     },
+     "options": {
+      "anyOf": [
+       {
+        "items": {
+         "type": "string"
+        },
+        "type": "array"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     },
+     "allow_custom": {
+      "default": false,
+      "type": "boolean"
+     },
+     "timeout_s": {
+      "anyOf": [
+       {
+        "type": "number"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     }
+    },
+    "required": [
+     "question"
+    ]
+   },
+   "outputSchema": {
+    "additionalProperties": true,
+    "type": "object"
+   },
+   "annotations": {
+    "readOnlyHint": false,
+    "destructiveHint": false,
+    "idempotentHint": false,
+    "openWorldHint": true
+   },
+   "_meta": {
+    "anx/capability": "ask",
+    "anx/contract": "anx.device/1",
+    "fastmcp": {
+     "tags": []
+    }
+   }
+  },
+  {
+   "name": "request_user_input_async",
+   "title": "Ask the user without waiting",
+   "description": "Post a question to the chatx companion window and return its question_id immediately, without waiting. Use this to ask something while continuing to work; collect the answer with request_user_input_result.",
+   "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+     "question": {
+      "type": "string"
+     },
+     "title": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     },
+     "kind": {
+      "default": "text",
+      "type": "string"
+     },
+     "options": {
+      "anyOf": [
+       {
+        "items": {
+         "type": "string"
+        },
+        "type": "array"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     },
+     "allow_custom": {
+      "default": false,
+      "type": "boolean"
+     }
+    },
+    "required": [
+     "question"
+    ]
+   },
+   "outputSchema": {
+    "additionalProperties": true,
+    "type": "object"
+   },
+   "annotations": {
+    "readOnlyHint": false,
+    "destructiveHint": false,
+    "idempotentHint": false,
+    "openWorldHint": true
+   },
+   "_meta": {
+    "anx/capability": "ask",
+    "anx/contract": "anx.device/1",
+    "fastmcp": {
+     "tags": []
+    }
+   }
+  },
+  {
+   "name": "request_user_input_result",
+   "title": "Get the answer to a question",
+   "description": "Read the current state of a question asked earlier: answered with the user's choices, still pending, or skipped by the user. Optionally wait up to wait_s seconds for an answer that has not arrived yet.",
+   "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+     "question_id": {
+      "type": "string"
+     },
+     "wait_s": {
+      "default": 0.0,
+      "type": "number"
+     }
+    },
+    "required": [
+     "question_id"
+    ]
+   },
+   "outputSchema": {
+    "additionalProperties": true,
+    "type": "object"
+   },
+   "annotations": {
+    "readOnlyHint": true,
+    "openWorldHint": true
+   },
+   "_meta": {
+    "anx/capability": "ask",
+    "anx/contract": "anx.device/1",
+    "fastmcp": {
+     "tags": []
+    }
+   }
+  },
+  {
+   "name": "watch_create",
+   "title": "Create a background watcher",
+   "description": "Create a persistent watcher. kind=session watches an exec_command session exit; kind=log scans newly appended log text for regex patterns; kind=file watches one file for create/change/delete; kind=glob watches a directory for newly matching files. Events are persisted in SQLite and routed through GPT Companion to a saved chat.",
+   "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+     "kind": {
+      "type": "string"
+     },
+     "target": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     },
+     "session_id": {
+      "anyOf": [
+       {
+        "type": "integer"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     },
+     "workdir": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     },
+     "patterns": {
+      "anyOf": [
+       {
+        "items": {
+         "type": "string"
+        },
+        "type": "array"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     },
+     "glob_pattern": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     },
+     "label": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     },
+     "companion_project_id": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     },
+     "poll_interval_s": {
+      "anyOf": [
+       {
+        "type": "number"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     },
+     "from_start": {
+      "default": false,
+      "type": "boolean"
+     }
+    },
+    "required": [
+     "kind"
+    ]
+   },
+   "outputSchema": {
+    "additionalProperties": true,
+    "type": "object"
+   },
+   "annotations": {
+    "readOnlyHint": false,
+    "destructiveHint": false,
+    "idempotentHint": false,
+    "openWorldHint": true
+   },
+   "_meta": {
+    "anx/capability": "watch",
+    "anx/contract": "anx.device/1",
+    "fastmcp": {
+     "tags": []
+    }
+   }
+  },
+  {
+   "name": "watch_training",
+   "title": "Monitor model training",
+   "description": "Convenience watcher for model training. Can watch a long-running exec session, new log errors, and newly-created checkpoint files together as one group. At least one of session_id, log_path, or checkpoint_glob is required.",
+   "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+     "workdir": {
+      "type": "string"
+     },
+     "session_id": {
+      "anyOf": [
+       {
+        "type": "integer"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     },
+     "log_path": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     },
+     "checkpoint_glob": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     },
+     "error_patterns": {
+      "anyOf": [
+       {
+        "items": {
+         "type": "string"
+        },
+        "type": "array"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     },
+     "label": {
+      "default": "model training",
+      "type": "string"
+     },
+     "companion_project_id": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     },
+     "poll_interval_s": {
+      "default": 2.0,
+      "type": "number"
+     }
+    },
+    "required": [
+     "workdir"
+    ]
+   },
+   "outputSchema": {
+    "additionalProperties": true,
+    "type": "object"
+   },
+   "annotations": {
+    "readOnlyHint": false,
+    "destructiveHint": false,
+    "idempotentHint": false,
+    "openWorldHint": true
+   },
+   "_meta": {
+    "anx/capability": "watch",
+    "anx/contract": "anx.device/1",
+    "fastmcp": {
+     "tags": []
+    }
+   }
+  },
+  {
+   "name": "watch_list",
+   "title": "List background watchers",
+   "description": "List active watchers, or include completed/cancelled/stale watchers for history.",
+   "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+     "include_inactive": {
+      "default": false,
+      "type": "boolean"
+     },
+     "group_id": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     }
+    }
+   },
+   "outputSchema": {
+    "additionalProperties": true,
+    "type": "object"
+   },
+   "annotations": {
+    "readOnlyHint": true,
+    "openWorldHint": false
+   },
+   "_meta": {
+    "anx/capability": "watch",
+    "anx/contract": "anx.device/1",
+    "fastmcp": {
+     "tags": []
+    }
+   }
+  },
+  {
+   "name": "watch_cancel",
+   "title": "Cancel a background watcher",
+   "description": "Cancel one watch_id, or every watcher in a watch_training group_id.",
+   "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+     "watch_id": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     },
+     "group_id": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     }
+    }
+   },
+   "outputSchema": {
+    "additionalProperties": true,
+    "type": "object"
+   },
+   "annotations": {
+    "readOnlyHint": false,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": false
+   },
+   "_meta": {
+    "anx/capability": "watch",
+    "anx/contract": "anx.device/1",
+    "fastmcp": {
+     "tags": []
+    }
+   }
+  },
+  {
+   "name": "watch_event",
+   "title": "Read a watcher event",
+   "description": "Look up one watcher event by event_id and return its watcher context, including the original workdir/target. This is the first tool to call after GPT Companion sends a minimal 'process local event evt-...' reminder.",
+   "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+     "event_id": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "event_id"
+    ]
+   },
+   "outputSchema": {
+    "additionalProperties": true,
+    "type": "object"
+   },
+   "annotations": {
+    "readOnlyHint": true,
+    "openWorldHint": false
+   },
+   "_meta": {
+    "anx/capability": "watch",
+    "anx/contract": "anx.device/1",
+    "fastmcp": {
+     "tags": []
+    }
+   }
+  },
+  {
+   "name": "watch_events",
+   "title": "Read watcher event history",
+   "description": "Read persisted watcher events, including delivery status to GPT Companion. Use this to inspect what happened while the user was away.",
+   "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+     "watch_id": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     },
+     "group_id": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     },
+     "limit": {
+      "default": 50,
+      "type": "integer"
+     }
+    }
+   },
+   "outputSchema": {
+    "additionalProperties": true,
+    "type": "object"
+   },
+   "annotations": {
+    "readOnlyHint": true,
+    "openWorldHint": false
+   },
+   "_meta": {
+    "anx/capability": "watch",
+    "anx/contract": "anx.device/1",
+    "fastmcp": {
+     "tags": []
+    }
+   }
+  },
+  {
+   "name": "start_control",
+   "title": "Start screen control",
+   "description": "Take control of this Windows desktop. A blue glow appears around every monitor and a label at the top says the computer is being controlled and that the user can press ESC to end it, and the mouse pointer changes, so the person at the machine can see what is happening.\nlist_screens, screenshot, mouse and keyboard work only while a session is open. Call stop_control when the task is finished. The user can also end control at any moment by physically pressing ESC, which takes effect immediately; check control_status if a later call reports that no session is open. Sending ESC through the keyboard tool does not end the session, so applications can still receive it. Either way the screen and the pointer are restored.",
+   "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+     "reason": {
+      "default": "",
+      "type": "string"
+     }
+    }
+   },
+   "outputSchema": {
+    "additionalProperties": true,
+    "type": "object"
+   },
+   "annotations": {
+    "readOnlyHint": false,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": false
+   },
+   "_meta": {
+    "anx/capability": "uia",
+    "anx/contract": "anx.device/1",
+    "fastmcp": {
+     "tags": []
+    }
+   }
+  },
+  {
+   "name": "stop_control",
+   "title": "Stop screen control",
+   "description": "End the control session: the glow and the label come off every monitor and the mouse pointer goes back to the user's own. Call this as soon as the task is done.",
+   "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+   },
+   "outputSchema": {
+    "additionalProperties": true,
+    "type": "object"
+   },
+   "annotations": {
+    "readOnlyHint": false,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": false
+   },
+   "_meta": {
+    "anx/capability": "uia",
+    "anx/contract": "anx.device/1",
+    "fastmcp": {
+     "tags": []
+    }
+   }
+  },
+  {
+   "name": "control_status",
+   "title": "Get screen control status",
+   "description": "Report whether a control session is open, how long it has been running, how long it has been idle, and whether the indicator and pointer are in place. Works with or without a session.",
+   "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+   },
+   "outputSchema": {
+    "additionalProperties": true,
+    "type": "object"
+   },
+   "annotations": {
+    "readOnlyHint": true,
+    "openWorldHint": false
+   },
+   "_meta": {
+    "anx/capability": "uia",
+    "anx/contract": "anx.device/1",
+    "fastmcp": {
+     "tags": []
+    }
+   }
+  },
+  {
+   "name": "list_screens",
+   "title": "List displays",
+   "description": "List the monitors with their position and size in virtual-desktop pixels, which is the coordinate space every control tool uses. The primary monitor comes first; a monitor placed left of it has a negative x. Requires an open control session.",
+   "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+   },
+   "outputSchema": {
+    "additionalProperties": true,
+    "type": "object"
+   },
+   "annotations": {
+    "readOnlyHint": true,
+    "openWorldHint": false
+   },
+   "_meta": {
+    "anx/capability": "screen",
+    "anx/contract": "anx.device/1",
+    "fastmcp": {
+     "tags": []
+    }
+   }
+  },
+  {
+   "name": "screenshot",
+   "title": "Capture the screen",
+   "description": "Capture the screen and return it as an image. Without arguments it captures every monitor; pass screen=<index from list_screens> for one monitor, or region={x, y, width, height} for part of the desktop.\nThe image is scaled down, so image coordinates are NOT screen coordinates: the result gives the region origin and the scale, and the conversion is screen_x = region.x + image_x / scale. Pass those screen coordinates to the mouse tool. The control indicator is left out of the capture. Requires an open session.",
+   "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+     "screen": {
+      "anyOf": [
+       {
+        "type": "integer"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     },
+     "region": {
+      "anyOf": [
+       {
+        "additionalProperties": {
+         "type": "integer"
+        },
+        "type": "object"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     },
+     "max_edge": {
+      "anyOf": [
+       {
+        "type": "integer"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     }
+    }
+   },
+   "annotations": {
+    "readOnlyHint": true,
+    "openWorldHint": false
+   },
+   "_meta": {
+    "anx/capability": "screen",
+    "anx/contract": "anx.device/1",
+    "fastmcp": {
+     "tags": []
+    }
+   }
+  },
+  {
+   "name": "vision",
+   "title": "Load or unload the icon recognition model",
+   "description": "Manage OmniParser, which finds picture-only controls -- a gear, a paperclip, a send arrow -- in windows whose accessibility tree is empty and whose buttons carry no text.\n- status (default): whether the packages and weights are present and whether the model is loaded\n- fetch: download the weights (about 1GB, once)\n- load: put the model in video memory; read_ui then reports icons alongside everything else, with source='vision' and a name from the caption model\n- unload: free the video memory again\nIt is deliberately not loaded automatically: this machine's video memory is shared with other applications. While it is unloaded, read_ui still reads text from the pixels with Windows OCR, so nothing breaks -- icon-only controls are simply absent. Loading takes a few seconds; detection adds about a second to a read of a tree-less window.",
+   "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+     "action": {
+      "default": "status",
+      "type": "string"
+     },
+     "device": {
+      "default": "",
+      "type": "string"
+     },
+     "caption": {
+      "default": true,
+      "type": "boolean"
+     }
+    }
+   },
+   "outputSchema": {
+    "additionalProperties": true,
+    "type": "object"
+   },
+   "annotations": {
+    "readOnlyHint": false,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": true
+   },
+   "_meta": {
+    "anx/capability": "screen",
+    "anx/contract": "anx.device/1",
+    "fastmcp": {
+     "tags": []
+    }
+   }
+  },
+  {
+   "name": "read_ui",
+   "title": "Read UI elements",
+   "description": "Read the on-screen controls as named elements with refs, instead of measuring pixels in a screenshot. Prefer this over screenshot whenever it returns anything: clicking ref_7 'Don't Save' hits the button wherever it is, while clicking a coordinate measured off an image is a guess.\nscope: 'focused' (default, the active window), 'windows' (every top-level window, each with a ref you can focus), 'window:<hwnd>', or 'ref:<ref>' for a window you already listed. filter='all' includes structural elements as well, and query='Save' returns only elements whose name or value contains that text -- worth using on a file manager or a browser, where a full read easily hits the limit.\nEach element reports role, name, value, rectangle, centre and the actions it supports. Pass a ref to the element tool, or to mouse(ref=...).\nWindows that expose no accessibility tree -- Electron and custom-drawn applications, Unity, games -- are handled here rather than by you: their on-screen text is recognised and returned as elements too, marked source='ocr'. Those carry a name read from pixels, so it can be wrong, icon-only controls are missing entirely, and only clicking works on them. Read the 'note' field, and reach for screenshot only when even that finds nothing.\nReading works on a window that is covered by other windows, and on one that is not focused. If a window cannot be captured at all it is brought forward so the answer is complete, and the note says so -- which is why this tool is not marked read-only. A minimised window has neither a tree nor pixels: restore it first. Requires an open control session.",
+   "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+     "scope": {
+      "default": "focused",
+      "type": "string"
+     },
+     "filter": {
+      "default": "interactive",
+      "type": "string"
+     },
+     "limit": {
+      "default": 200,
+      "type": "integer"
+     },
+     "query": {
+      "default": "",
+      "type": "string"
+     }
+    }
+   },
+   "outputSchema": {
+    "additionalProperties": true,
+    "type": "object"
+   },
+   "annotations": {
+    "readOnlyHint": false,
+    "destructiveHint": false,
+    "idempotentHint": true,
+    "openWorldHint": false
+   },
+   "_meta": {
+    "anx/capability": "uia",
+    "anx/contract": "anx.device/1",
+    "fastmcp": {
+     "tags": []
+    }
+   }
+  },
+  {
+   "name": "element",
+   "title": "Interact with a UI element",
+   "description": "Act on an element from read_ui by its ref. Actions:\n- click / double_click / right_click: a real mouse click on the control's own clickable point\n- invoke: trigger the control directly through its accessibility pattern, without moving the mouse at all -- the most reliable way to press a button\n- set_value: put text straight into an edit control (no typing, no focus fight)\n- toggle / expand / collapse / select / scroll_into_view: for check boxes, tree nodes, list items and off-screen rows\n- focus: give a control or window the keyboard focus; restore: un-minimise a window\nOnly the actions listed on the element are supported by it. The element is found again and checked before anything happens, so if the screen changed the call fails instead of hitting whatever moved into that spot. The result carries the new state (see the mouse tool's observe parameter). Requires an open control session.",
+   "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+     "action": {
+      "type": "string"
+     },
+     "ref": {
+      "type": "string"
+     },
+     "text": {
+      "default": "",
+      "type": "string"
+     },
+     "observe": {
+      "default": "auto",
+      "type": "string"
+     }
+    },
+    "required": [
+     "action",
+     "ref"
+    ]
+   },
+   "annotations": {
+    "readOnlyHint": false,
+    "destructiveHint": false,
+    "idempotentHint": false,
+    "openWorldHint": true
+   },
+   "_meta": {
+    "anx/capability": "uia",
+    "anx/contract": "anx.device/1",
+    "fastmcp": {
+     "tags": []
+    }
+   }
+  },
+  {
+   "name": "mouse",
+   "title": "Control the mouse",
+   "description": "Drive the mouse in virtual-desktop pixels (see list_screens and the screenshot conversion). Actions:\n- move: glide the pointer to x, y\n- click / double_click / right_click / middle_click: optionally move to x, y first, or pass ref=<a ref from read_ui> to hit that control wherever it actually is\n- down / up: hold or release a button, for selections the click action cannot express\n- drag: press at x, y (or where the pointer is) and release at to_x, to_y\n- scroll: amount in notches, positive is up, horizontal=true for sideways\n- position: report where the pointer is without touching anything\nThe result carries the state the action produced, so a separate look is usually unnecessary: observe='auto' (default) returns an element diff, or a picture of the focused window when it has no accessibility tree; 'ui' returns the full element list, 'image' forces a picture, 'none' skips it.\nRequires an open control session.",
+   "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+     "action": {
+      "type": "string"
+     },
+     "x": {
+      "anyOf": [
+       {
+        "type": "integer"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     },
+     "y": {
+      "anyOf": [
+       {
+        "type": "integer"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     },
+     "ref": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     },
+     "button": {
+      "default": "left",
+      "type": "string"
+     },
+     "clicks": {
+      "default": 1,
+      "type": "integer"
+     },
+     "to_x": {
+      "anyOf": [
+       {
+        "type": "integer"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     },
+     "to_y": {
+      "anyOf": [
+       {
+        "type": "integer"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     },
+     "amount": {
+      "default": 0,
+      "type": "integer"
+     },
+     "horizontal": {
+      "default": false,
+      "type": "boolean"
+     },
+     "observe": {
+      "default": "auto",
+      "type": "string"
+     }
+    },
+    "required": [
+     "action"
+    ]
+   },
+   "annotations": {
+    "readOnlyHint": false,
+    "destructiveHint": false,
+    "idempotentHint": false,
+    "openWorldHint": true
+   },
+   "_meta": {
+    "anx/capability": "input",
+    "anx/contract": "anx.device/1",
+    "fastmcp": {
+     "tags": []
+    }
+   }
+  },
+  {
+   "name": "keyboard",
+   "title": "Send keyboard input",
+   "description": "Send keystrokes to whatever window has focus.\n- action='type' with text: types the literal text, including characters the keyboard layout has no key for (Chinese, emoji).\n- action='press' with keys: strikes key chords, space-separated for a sequence, e.g. 'ctrl+s', 'alt+tab', 'ctrl+a delete', 'win+d', 'f5', 'enter'.\nCheck the returned foreground_window to confirm the keystrokes went where you meant. Requires an open control session.",
+   "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+     "action": {
+      "type": "string"
+     },
+     "text": {
+      "default": "",
+      "type": "string"
+     },
+     "keys": {
+      "default": "",
+      "type": "string"
+     },
+     "observe": {
+      "default": "auto",
+      "type": "string"
+     }
+    },
+    "required": [
+     "action"
+    ]
+   },
+   "annotations": {
+    "readOnlyHint": false,
+    "destructiveHint": false,
+    "idempotentHint": false,
+    "openWorldHint": true
+   },
+   "_meta": {
+    "anx/capability": "input",
+    "anx/contract": "anx.device/1",
+    "fastmcp": {
+     "tags": []
+    }
+   }
+  },
+  {
+   "name": "device_info",
+   "title": "Get device information",
+   "description": "Describe this device under the anx.device/1 contract: hostname, platform, OS, form, the capabilities it declares (with runtime availability and the reason when one is unavailable) and which agent runtimes (claude, codex, GPT Companion) exist here.",
+   "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+   },
+   "outputSchema": {
+    "additionalProperties": true,
+    "type": "object"
+   },
+   "annotations": {
+    "readOnlyHint": true,
+    "openWorldHint": false
+   },
+   "_meta": {
+    "anx/capability": "info",
+    "anx/contract": "anx.device/1",
+    "fastmcp": {
+     "tags": []
+    }
+   }
+  },
+  {
+   "name": "notify",
+   "title": "Send a notification",
+   "description": "Show a notification to the person at this device (Windows: a toast, falling back to a tray balloon; Linux: notify-send). level is info, warn or urgent. actions are up to 5 buttons (id, label, optional link); a link opens when its button is clicked. dry_run=true validates and reports what would be shown without showing it.",
+   "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+     "title": {
+      "type": "string"
+     },
+     "body": {
+      "default": "",
+      "type": "string"
+     },
+     "level": {
+      "default": "info",
+      "enum": [
+       "info",
+       "warn",
+       "urgent"
+      ],
+      "type": "string"
+     },
+     "actions": {
+      "anyOf": [
+       {
+        "items": {
+         "additionalProperties": false,
+         "description": "A button on the notification. ``link`` opens a URL (or ``agentnexus://``) when clicked.",
+         "properties": {
+          "id": {
+           "maxLength": 64,
+           "minLength": 1,
+           "pattern": "^[A-Za-z0-9_.:-]+$",
+           "type": "string"
+          },
+          "label": {
+           "maxLength": 64,
+           "minLength": 1,
+           "type": "string"
+          },
+          "link": {
+           "anyOf": [
+            {
+             "maxLength": 2000,
+             "type": "string"
+            },
+            {
+             "type": "null"
+            }
+           ],
+           "default": null
+          }
+         },
+         "required": [
+          "id",
+          "label"
+         ],
+         "type": "object"
+        },
+        "type": "array"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     },
+     "dry_run": {
+      "default": false,
+      "type": "boolean"
+     }
+    },
+    "required": [
+     "title"
+    ]
+   },
+   "outputSchema": {
+    "additionalProperties": true,
+    "type": "object"
+   },
+   "annotations": {
+    "readOnlyHint": false,
+    "destructiveHint": false,
+    "idempotentHint": false,
+    "openWorldHint": true
+   },
+   "_meta": {
+    "anx/capability": "notify",
+    "anx/contract": "anx.device/1",
+    "fastmcp": {
+     "tags": []
+    }
+   }
+  },
+  {
+   "name": "file_list",
+   "title": "List a directory",
+   "description": "List a directory (default: default_workdir): name, type, size and modification time of each entry, directories first. pattern is an optional glob such as '*.py'. Paths obey the configured allowed_roots.",
+   "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+     "path": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     },
+     "pattern": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     },
+     "limit": {
+      "default": 200,
+      "type": "integer"
+     }
+    }
+   },
+   "outputSchema": {
+    "additionalProperties": true,
+    "type": "object"
+   },
+   "annotations": {
+    "readOnlyHint": true,
+    "openWorldHint": false
+   },
+   "_meta": {
+    "anx/capability": "files",
+    "anx/contract": "anx.device/1",
+    "fastmcp": {
+     "tags": []
+    }
+   }
+  },
+  {
+   "name": "file_stat",
+   "title": "Get file information",
+   "description": "Report whether a path exists, and its type, size, modification time and writability.",
+   "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+     "path": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "path"
+    ]
+   },
+   "outputSchema": {
+    "additionalProperties": true,
+    "type": "object"
+   },
+   "annotations": {
+    "readOnlyHint": true,
+    "openWorldHint": false
+   },
+   "_meta": {
+    "anx/capability": "files",
+    "anx/contract": "anx.device/1",
+    "fastmcp": {
+     "tags": []
+    }
+   }
+  },
+  {
+   "name": "file_read",
+   "title": "Read a file",
+   "description": "Read a text file: limit lines starting at the 0-based line offset (line N of the file is offset N-1). The result gives total_lines and next_offset to continue. content always has LF line endings; line_ending='crlf' marks a CRLF file and encoding appears when the file is not UTF-8 (GBK is decoded). line_numbers=true prefixes each line with its number and a tab, for orientation; leave it off when copying text into edit_file. Binary files are refused (images: view_image).",
+   "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+     "path": {
+      "type": "string"
+     },
+     "offset": {
+      "default": 0,
+      "type": "integer"
+     },
+     "limit": {
+      "default": 2000,
+      "type": "integer"
+     },
+     "line_numbers": {
+      "default": false,
+      "type": "boolean"
+     }
+    },
+    "required": [
+     "path"
+    ]
+   },
+   "outputSchema": {
+    "additionalProperties": true,
+    "type": "object"
+   },
+   "annotations": {
+    "readOnlyHint": true,
+    "openWorldHint": false
+   },
+   "_meta": {
+    "anx/capability": "files",
+    "anx/contract": "anx.device/1",
+    "fastmcp": {
+     "tags": []
+    }
+   }
+  },
+  {
+   "name": "file_glob",
+   "title": "Find files by name",
+   "description": "Find files under path (default: the session's workdir) whose name or relative path matches a glob, newest first. A pattern without '/' matches file names at any depth ('*.py', 'README*'); with '/' it matches the path relative to path, '**' spanning directories ('src/**/test_*.py'). {a,b} and [abc] work. .git, node_modules, .venv, __pycache__ and similar are skipped unless the pattern names them. Results are relative paths with '/'.",
+   "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+     "pattern": {
+      "type": "string"
+     },
+     "path": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     },
+     "limit": {
+      "default": 200,
+      "type": "integer"
+     }
+    },
+    "required": [
+     "pattern"
+    ]
+   },
+   "outputSchema": {
+    "additionalProperties": true,
+    "type": "object"
+   },
+   "annotations": {
+    "readOnlyHint": true,
+    "openWorldHint": false
+   },
+   "_meta": {
+    "anx/capability": "search",
+    "anx/contract": "anx.device/1",
+    "fastmcp": {
+     "tags": []
+    }
+   }
+  },
+  {
+   "name": "file_grep",
+   "title": "Search file contents",
+   "description": "Search file contents for a regular expression under path (a directory or one file; default: the session's workdir). output='content' (default) returns 'file:line:text' lines (context lines use '-', groups are split by '--'); 'files' returns only the matching files; 'count' returns matches per file. glob limits which files are searched ('*.py', 'src/**/*.ts'). fixed_strings=true searches for the literal text. Uses ripgrep when installed (it skips .gitignore'd and hidden files), else a built-in search; dependency and cache directories are skipped either way. Paths are relative to path.",
+   "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+     "pattern": {
+      "type": "string"
+     },
+     "path": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     },
+     "glob": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     },
+     "output": {
+      "default": "content",
+      "enum": [
+       "content",
+       "files",
+       "count"
+      ],
+      "type": "string"
+     },
+     "ignore_case": {
+      "default": false,
+      "type": "boolean"
+     },
+     "fixed_strings": {
+      "default": false,
+      "type": "boolean"
+     },
+     "context": {
+      "default": 0,
+      "type": "integer"
+     },
+     "limit": {
+      "default": 200,
+      "type": "integer"
+     }
+    },
+    "required": [
+     "pattern"
+    ]
+   },
+   "outputSchema": {
+    "additionalProperties": true,
+    "type": "object"
+   },
+   "annotations": {
+    "readOnlyHint": true,
+    "openWorldHint": false
+   },
+   "_meta": {
+    "anx/capability": "search",
+    "anx/contract": "anx.device/1",
+    "fastmcp": {
+     "tags": []
+    }
+   }
+  },
+  {
+   "name": "file_write",
+   "title": "Write a file",
+   "description": "Write UTF-8 text to a file. mode is overwrite (default), append, or create (fails if the file exists). Missing parent directories are created. For edits to existing source files prefer edit_file or patch_file.",
+   "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+     "path": {
+      "type": "string"
+     },
+     "content": {
+      "type": "string"
+     },
+     "mode": {
+      "default": "overwrite",
+      "enum": [
+       "overwrite",
+       "append",
+       "create"
+      ],
+      "type": "string"
+     }
+    },
+    "required": [
+     "path",
+     "content"
+    ]
+   },
+   "outputSchema": {
+    "additionalProperties": true,
+    "type": "object"
+   },
+   "annotations": {
+    "readOnlyHint": false,
+    "destructiveHint": false,
+    "idempotentHint": false,
+    "openWorldHint": false
+   },
+   "_meta": {
+    "anx/capability": "files",
+    "anx/contract": "anx.device/1",
+    "fastmcp": {
+     "tags": []
+    }
+   }
+  },
+  {
+   "name": "agent_sessions",
+   "title": "Find agent sessions",
+   "description": "Find the newest Claude Code (kind=claude) or Codex (kind=codex) session whose working directory is workdir (default: default_workdir). Returns its id, a confidence (high, low or none) and up to five candidates with modification times.",
+   "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+     "kind": {
+      "enum": [
+       "claude",
+       "codex"
+      ],
+      "type": "string"
+     },
+     "workdir": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null
+     }
+    },
+    "required": [
+     "kind"
+    ]
+   },
+   "outputSchema": {
+    "additionalProperties": true,
+    "type": "object"
+   },
+   "annotations": {
+    "readOnlyHint": true,
+    "openWorldHint": false
+   },
+   "_meta": {
+    "anx/capability": "agents",
+    "anx/contract": "anx.device/1",
+    "fastmcp": {
+     "tags": []
+    }
+   }
+  }
+ ]
+}

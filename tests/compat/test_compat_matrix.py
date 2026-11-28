@@ -137,6 +137,7 @@ MATRIX = [("legacy", "legacy"), ("current", "legacy"), ("current", "current"), (
 async def test_agent_gateway_matrix_baseline(tmp_path, monkeypatch, agent_kind, gateway_kind):
     cloud_module = package(gateway_kind, "cloud")
     federation = package(gateway_kind, "federation")
+    gateway_mod = package(gateway_kind, "gateway")
     agent_module = package(agent_kind, "agent")
     monkeypatch.setenv("SERVER_TOKEN", SERVER_TOKEN)
     monkeypatch.setenv("AGENT_TOKEN", AGENT_TOKEN)
@@ -155,7 +156,9 @@ async def test_agent_gateway_matrix_baseline(tmp_path, monkeypatch, agent_kind, 
         async with Client(StreamableHttpTransport(f"http://127.0.0.1:{port}/mcp", auth=SERVER_TOKEN)) as client:
             listed = [tool.name for tool in await client.list_tools()]
             assert len(listed) == len(set(listed)), "direct tools must not be duplicated"
-            assert set(listed) == federation.RESERVED_TOOLS | DEVICE_TOOLS
+            # 0.8.35 defaults: legacy aliases and rare gateway tools are unlisted (still callable).
+            hidden = set(getattr(gateway_mod, "LEGACY_TOOL_NAMES", ())) | set(getattr(gateway_mod, "HIDDEN_GATEWAY_TOOLS", ()))
+            assert set(listed) == (federation.RESERVED_TOOLS - hidden) | DEVICE_TOOLS
 
             workspaces = (await client.call_tool("workspace_list")).data["workspaces"]
             assert [(item["agent_id"], item["workspace"]) for item in workspaces] == [(AGENT_ID, "project")]

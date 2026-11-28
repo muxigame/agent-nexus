@@ -24,6 +24,12 @@
       "propertyNames": {"pattern": "^[a-z][a-z0-9_]{0,31}$"},
       "additionalProperties": {"$ref": "#/$defs/capability"}
     },
+    "shells": {
+      "description": "exec_command's shells on this device, the default first (bash, sh, zsh, pwsh, powershell, cmd).",
+      "type": "array", "items": {"type": "string", "maxLength": 32}, "maxItems": 16
+    },
+    "shell_default": {"type": "string", "maxLength": 32},
+    "shell_paths": {"type": "object", "additionalProperties": {"type": "string", "maxLength": 400}},
     "agent_runtimes": {
       "type": "object",
       "additionalProperties": {
@@ -49,7 +55,7 @@
     }
   },
   "x-anx-core-capabilities": ["info", "notify", "files", "time"],
-  "x-anx-optional-tools": {},
+  "x-anx-optional-tools": {"exec": ["exec_wait"]},
   "x-anx-standard-tools": {
     "info": ["device_info"],
     "notify": ["notify"],

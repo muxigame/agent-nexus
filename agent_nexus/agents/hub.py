@@ -98,8 +98,11 @@ def configured_workspaces(root: Path) -> list[dict]:
     return out
 
 
-#: Agent Nexus tools that only read (claude readonly / ask: allowed without a prompt).
-READ_TOOLS = ("device_list", "curr_time", "device_info", "file_read", "file_list", "file_stat", "file_glob",
+#: Agent Nexus tools that only read (claude readonly / ask: allowed without a prompt). exec_wait only
+#: waits for and reads a command that was already approved. Tools the gateway keeps behind toolsearch
+#: (curr_time, device_info, ...; design.md §20.1) still pass when called by name; through tooluse
+#: they ask, like any tooluse call.
+READ_TOOLS = ("device_list", "curr_time", "device_info", "exec_wait", "file_read", "file_list", "file_stat", "file_glob",
               "file_grep", "view_image", "mail_inbox", "mail_read", "mail_who", "mail_status", "mcplist", "mcpdetail",
               "toolsearch", "file_copy_status", "file_copy_list")
 #: Agent Nexus tools that edit files on the workspace's device (gateway mode, ``edits``: without a prompt).

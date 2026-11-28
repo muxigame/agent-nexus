@@ -46,6 +46,7 @@ from . import manager_asks as manager_asks_mod
 from . import search as search_mod
 from .audit import AuditLog
 from .exec_runtime import MAX_WAIT_MS, UnifiedExecManager
+from . import shells as shells_mod
 from .platform import CONTRACT, Contract
 if sys.platform == "win32":
     from .control import ControlError, ControlOptions, ControlSession
@@ -272,6 +273,10 @@ TOOL_ANNOTATIONS: dict[str, ToolAnnotations] = {
     ),
     "write_stdin": ToolAnnotations(
         read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=True
+    ),
+    # Only waits for (and reads) a command that is already running.
+    "exec_wait": ToolAnnotations(
+        read_only_hint=True, destructive_hint=False, idempotent_hint=False, open_world_hint=False
     ),
     "exec_kill": ToolAnnotations(
         read_only_hint=False, destructive_hint=False, idempotent_hint=True, open_world_hint=False
@@ -543,15 +548,12 @@ class DeviceServer:
             name="exec_command",
             title="Run a command",
             description=(
-                f"Run a command and return its output and exit_code. cmd is a {self._shell_label()} "
-                "command line; shell='powershell' or shell='cmd' runs another shell instead. "
-                f"The call waits up to yield_time_ms (default 10000, max {MAX_WAIT_MS}) and returns as "
-                "soon as the command exits; a command still running then returns a session_id: poll "
-                "it or type into it with write_stdin, stop it with exec_kill. Pass a long "
-                "yield_time_ms for builds and tests, a short one to start a server. Output beyond "
-                "max_output_tokens (about 4 characters each, default 10000) keeps its head and tail. "
-                "workdir defaults to the session's workdir. For reading, searching and editing files "
-                "prefer file_read, file_grep, file_glob and edit_file: they need no quoting."
+                f"Run a command in a shell and return its output and exit code. shell: "
+                f"{'|'.join(shells_mod.SHELL_NAMES)} (default here: {self.exec_manager.default_shell_name()}; "
+                "device_list shows each device's shells). Waits up to yield_time_ms (default "
+                f"10000, max {self._wait_cap_ms()}); a command still running returns a session_id: "
+                "call exec_wait(session_id) until it exits. stdin: text fed to the command, then EOF. "
+                "For files prefer file_read/file_grep/edit_file."
             ),
         )
         async def exec_command(
@@ -562,6 +564,7 @@ class DeviceServer:
             shell: str | None = None,
             login: bool | None = None,
             tty: bool = False,
+            stdin: str | None = None,
         ) -> dict[str, Any]:
             try:
                 result = await self.exec_manager.exec_command(
@@ -572,6 +575,7 @@ class DeviceServer:
                     max_output_tokens=max_output_tokens,
                     shell=shell,
                     login=login,
+                    stdin=stdin,
                 )
             except (PolicyError, RuntimeError, ValueError) as exc:
                 self._record("exec_command", None, ok=False, error=str(exc), cmd=cmd[:300])
@@ -583,11 +587,9 @@ class DeviceServer:
             name="write_stdin",
             title="Send command input or wait for output",
             description=(
-                "Send characters to a command that exec_command left running, then return the output "
-                "it has produced since the last call (and exit_code once it has exited). chars='' "
-                "just waits for output: up to yield_time_ms (default 5000, or 250 after writing; max "
-                f"{MAX_WAIT_MS}), returning early when the command exits. Characters are sent exactly "
-                "as given, so end a line with '\\n'; chars='\\u0003' stops the command."
+                "Type chars into a command exec_command left running and return its new output "
+                f"(waits yield_time_ms: default 250, max {self._wait_cap_ms()}). End a line with '\\n'; "
+                "'\\u0003' stops it. To only wait, use exec_wait."
             ),
         )
         async def write_stdin(
@@ -610,10 +612,32 @@ class DeviceServer:
             return result
 
         @tool(
+            name="exec_wait",
+            title="Wait for a running command",
+            description=(
+                "Wait for a command exec_command left running: returns its new output, and exit_code "
+                f"once it exits. timeout_ms default 30000, max {self._wait_cap_ms()}; still running "
+                "after it: call exec_wait again with the same session_id."
+            ),
+        )
+        async def exec_wait(
+            session_id: int,
+            timeout_ms: float | None = None,
+            max_output_tokens: float | None = None,
+        ) -> dict[str, Any]:
+            try:
+                result = await self.exec_manager.exec_wait(session_id, timeout_ms, max_output_tokens)
+            except (KeyError, RuntimeError, ValueError) as exc:
+                self._record("exec_wait", None, ok=False, session_id=session_id, error=str(exc))
+                return self._err(str(exc))
+            self._record("exec_wait", result, ok=True, session_id=session_id)
+            return result
+
+        @tool(
             name="exec_kill",
             title="Stop a command",
             description=(
-                "Terminate a still-running exec_command process and everything it started."
+                "Stop a running exec_command session and everything it started."
             ),
         )
         async def exec_kill(session_id: int) -> dict[str, Any]:
@@ -627,7 +651,9 @@ class DeviceServer:
         @tool(
             name="exec_list",
             title="List running commands",
-            description="List resumable exec_command processes currently held by this MCP server.",
+            description=(
+                "List the exec_command sessions still held (running or with unread output)."
+            ),
         )
         async def exec_list() -> dict[str, Any]:
             sessions = self.exec_manager.list_sessions()
@@ -637,13 +663,9 @@ class DeviceServer:
             name="edit_file",
             title="Edit a file",
             description=(
-                "Replace exact text in one file: old_string must match the file character for "
-                "character (copy it from file_read, without line-number prefixes) and occur exactly "
-                "once, unless replace_all=true replaces every occurrence. Include enough surrounding "
-                "lines to make it unique. Line endings may be given as LF: the file's own CRLF/LF, "
-                "BOM and encoding (UTF-8 or GBK) are kept. The result has a numbered snippet of the "
-                "edited lines, so there is no need to read the file again. Use file_write to create "
-                "a file, patch_file for many changes at once."
+                "Replace exact text in one file: old_string must occur once (or replace_all=true). "
+                "Copy it from file_read without line numbers; encoding, BOM and CRLF are kept. "
+                "Returns a numbered snippet of the change."
             ),
         )
         async def edit_file(path: str, old_string: str, new_string: str,
@@ -661,12 +683,8 @@ class DeviceServer:
             name="patch_file",
             title="Apply a patch",
             description=(
-                "Apply a unified diff (the output format of `git diff` or `diff -u`) to one or more "
-                "files: '--- a/path' and '+++ b/path' headers, '@@ -start,count +start,count @@' "
-                "hunks, /dev/null to create or delete a file, git 'rename from'/'rename to'. Relative "
-                "paths start at workdir (default: default_workdir). All files change or none do; "
-                "dry_run=true checks the patch without writing. Hunks may have drifted: the nearest "
-                "matching position is used and reported."
+                "Apply a unified diff (git diff / diff -u format) to one or more files, all or nothing. "
+                "Relative paths start at workdir; dry_run=true only checks."
             ),
         )
         async def patch_file(patch: str, workdir: str | None = None, dry_run: bool = False) -> dict[str, Any]:
@@ -683,10 +701,8 @@ class DeviceServer:
             name="view_image",
             title="View a local image",
             description=(
-                "View a local image file when visual inspection is needed. Returns MCP image "
-                "content for the model plus a temporary HTTPS URL. If the image is important "
-                "for the user to see, or the user explicitly asks to see it, include that URL "
-                "in the assistant response."
+                "Show a local image to the model; also returns a temporary HTTPS URL to give the user "
+                "when they should see it."
             ),
         )
         async def view_image(
@@ -748,9 +764,8 @@ class DeviceServer:
             name="update_plan",
             title="Update the task plan",
             description=(
-                "Updates the task plan. Provide an optional explanation and plan items with "
-                "step/status. Status must be pending, in_progress, or completed; at most one "
-                "item may be in_progress."
+                "Replace the task plan: items with step and status (pending, in_progress, completed; "
+                "at most one in_progress) and an optional explanation."
             ),
         )
         async def update_plan(
@@ -789,27 +804,32 @@ class DeviceServer:
             name="sleep",
             title="Wait for a duration",
             description=(
-                "Pause this tool call for duration_ms milliseconds. "
-                "It cannot be interrupted by new chat input mid-call."
+                f"Wait duration_ms milliseconds (one call waits at most {self._wait_cap_ms()}; "
+                "remaining_ms says how much is left)."
             ),
         )
         async def sleep(duration_ms: int) -> dict[str, Any]:
             if not 1 <= int(duration_ms) <= 43_200_000:
                 return self._err("duration_ms must be between 1 and 43200000")
             started = time.time()
-            await asyncio.sleep(duration_ms / 1000.0)
-            return {
+            cap_ms = self._wait_cap_ms()
+            slept = min(int(duration_ms), cap_ms)
+            await asyncio.sleep(slept / 1000.0)
+            result: dict[str, Any] = {
                 "status": "ok",
                 "wall_time_seconds": round(time.time() - started, 4),
                 "message": "Sleep completed.",
             }
+            if slept < int(duration_ms):
+                result.update(slept_ms=slept, remaining_ms=int(duration_ms) - slept,
+                              message=f"已等待 {slept // 1000} 秒（单次上限）；还需等待请再次调用 sleep")
+            return result
 
         @tool(
             name="companion_routes",
             title="List GPT Companion routes",
             description=(
-                "Show GPT Companion's saved ChatGPT conversation routes and which saved route, "
-                "if any, is currently open. Useful before creating a watcher."
+                "GPT Companion's saved ChatGPT routes and the one open now (before watch_create)."
             ),
         )
         async def companion_routes() -> dict[str, Any]:
@@ -903,14 +923,9 @@ class DeviceServer:
             name="request_user_input",
             title="Ask the user and wait for an answer",
             description=(
-                "Ask the person at this machine a question and wait for their answer. The question "
-                "appears in the chatx companion window with the options as radio buttons "
-                "(kind='single'), checkboxes (kind='multi'), or a text box (kind='text'); set "
-                "allow_custom to add a free-text box beside the options. Returns the chosen option "
-                "values in 'selected' and any typed text in 'text'. Use this instead of guessing "
-                "when a decision is genuinely the user's to make. If nobody answers within the "
-                "timeout the call returns answered=false with a question_id -- the question stays "
-                "on screen and request_user_input_result collects the answer later."
+                "Ask the person at this device a question and wait for the answer: kind single, multi "
+                "(with options) or text; allow_custom adds a text box. Unanswered within timeout_s: "
+                "returns a question_id for request_user_input_result."
             ),
         )
         async def request_user_input(
@@ -930,6 +945,9 @@ class DeviceServer:
             budget = self.config.ask_timeout_s if timeout_s is None else timeout_s
             if not 1.0 <= budget <= 3600.0:
                 return self._err("timeout_s must be between 1 and 3600 seconds")
+            # One call never outlives the client's own timeout; the question stays
+            # open and request_user_input_result collects the answer.
+            budget = min(budget, self._wait_cap_s())
 
             gateway = await _gateway_ask(question, title, kind, options, allow_custom)
             if gateway is not None:
@@ -969,9 +987,8 @@ class DeviceServer:
             name="request_user_input_async",
             title="Ask the user without waiting",
             description=(
-                "Post a question to the chatx companion window and return its question_id "
-                "immediately, without waiting. Use this to ask something while continuing to work; "
-                "collect the answer with request_user_input_result."
+                "Ask the person at this device a question without waiting; returns a question_id for "
+                "request_user_input_result."
             ),
         )
         async def request_user_input_async(
@@ -1014,9 +1031,7 @@ class DeviceServer:
             name="request_user_input_result",
             title="Get the answer to a question",
             description=(
-                "Read the current state of a question asked earlier: answered with the user's "
-                "choices, still pending, or skipped by the user. Optionally wait up to wait_s "
-                "seconds for an answer that has not arrived yet."
+                "The answer to an earlier question (answered, pending or skipped); wait_s waits for it."
             ),
         )
         async def request_user_input_result(
@@ -1027,6 +1042,7 @@ class DeviceServer:
                 return self._err("question_id cannot be empty")
             if not 0.0 <= wait_s <= 3600.0:
                 return self._err("wait_s must be between 0 and 3600 seconds")
+            wait_s = min(wait_s, self._wait_cap_s())
 
             deadline = time.monotonic() + wait_s
             if question_id.strip().startswith("q_"):
@@ -1048,10 +1064,8 @@ class DeviceServer:
             name="watch_create",
             title="Create a background watcher",
             description=(
-                "Create a persistent watcher. kind=session watches an exec_command session exit; "
-                "kind=log scans newly appended log text for regex patterns; kind=file watches one "
-                "file for create/change/delete; kind=glob watches a directory for newly matching files. "
-                "Events are persisted in SQLite and routed through GPT Companion to a saved chat."
+                "Create a persistent watcher routed through GPT Companion: kind session (exec session "
+                "exit), log (regex on new log lines), file (create/change/delete) or glob (new files)."
             ),
         )
         async def watch_create(
@@ -1083,9 +1097,8 @@ class DeviceServer:
             name="watch_training",
             title="Monitor model training",
             description=(
-                "Convenience watcher for model training. Can watch a long-running exec session, "
-                "new log errors, and newly-created checkpoint files together as one group. "
-                "At least one of session_id, log_path, or checkpoint_glob is required."
+                "Watch model training (an exec session, log errors and new checkpoints) as one group; "
+                "needs session_id, log_path or checkpoint_glob."
             ),
         )
         async def watch_training(
@@ -1513,9 +1526,8 @@ class DeviceServer:
             name="device_info",
             title="Get device information",
             description=(
-                "Describe this device under the anx.device/1 contract: hostname, platform, OS, "
-                "form, the capabilities it declares (with runtime availability and the reason when "
-                "one is unavailable) and which agent runtimes (claude, codex, GPT Companion) exist here."
+                "This device: hostname, platform, OS, capabilities (with availability), shells and "
+                "agent runtimes."
             ),
         )
         async def device_info() -> dict[str, Any]:
@@ -1525,10 +1537,8 @@ class DeviceServer:
             name="notify",
             title="Send a notification",
             description=(
-                "Show a notification to the person at this device (Windows: a toast, falling back to "
-                "a tray balloon; Linux: notify-send). level is info, warn or urgent. actions are up to "
-                f"{MAX_NOTIFY_ACTIONS} buttons (id, label, optional link); a link opens when its button is "
-                "clicked. dry_run=true validates and reports what would be shown without showing it."
+                "Show a notification on this device; level info, warn or urgent; up to "
+                f"{MAX_NOTIFY_ACTIONS} buttons (id, label, link); dry_run=true only validates."
             ),
         )
         async def notify(
@@ -1581,9 +1591,8 @@ class DeviceServer:
             name="file_list",
             title="List a directory",
             description=(
-                "List a directory (default: default_workdir): name, type, size and modification time "
-                "of each entry, directories first. pattern is an optional glob such as '*.py'. "
-                "Paths obey the configured allowed_roots."
+                "List a directory (default: default_workdir), directories first; pattern is an "
+                "optional glob such as '*.py'."
             ),
         )
         async def file_list(path: str | None = None, pattern: str | None = None, limit: int = 200) -> dict[str, Any]:
@@ -1601,12 +1610,8 @@ class DeviceServer:
             name="file_read",
             title="Read a file",
             description=(
-                "Read a text file: limit lines starting at the 0-based line offset (line N of the "
-                "file is offset N-1). The result gives total_lines and next_offset to continue. "
-                "content always has LF line endings; line_ending='crlf' marks a CRLF file and "
-                "encoding appears when the file is not UTF-8 (GBK is decoded). line_numbers=true "
-                "prefixes each line with its number and a tab, for orientation; leave it off when "
-                "copying text into edit_file. Binary files are refused (images: view_image)."
+                "Read a text file: limit lines from 0-based offset; returns total_lines and next_offset. "
+                "line_numbers=true for orientation (not when copying into edit_file). Images: view_image."
             ),
         )
         async def file_read(path: str, offset: int = 0, limit: int = files_mod.DEFAULT_READ_LINES,
@@ -1627,12 +1632,8 @@ class DeviceServer:
             name="file_glob",
             title="Find files by name",
             description=(
-                "Find files under path (default: the session's workdir) whose name or relative path "
-                "matches a glob, newest first. A pattern without '/' matches file names at any depth "
-                "('*.py', 'README*'); with '/' it matches the path relative to path, '**' spanning "
-                "directories ('src/**/test_*.py'). {a,b} and [abc] work. .git, node_modules, .venv, "
-                "__pycache__ and similar are skipped unless the pattern names them. Results are "
-                "relative paths with '/'."
+                "Find files whose name (or, with '/', relative path) matches a glob such as '*.py' or "
+                "'src/**/test_*.py', newest first; .git, node_modules and the like are skipped."
             ),
         )
         async def file_glob(pattern: str, path: str | None = None, limit: int = 200) -> dict[str, Any]:
@@ -1642,14 +1643,9 @@ class DeviceServer:
             name="file_grep",
             title="Search file contents",
             description=(
-                "Search file contents for a regular expression under path (a directory or one file; "
-                "default: the session's workdir). output='content' (default) returns "
-                "'file:line:text' lines (context lines use '-', groups are split by '--'); "
-                "'files' returns only the matching files; 'count' returns matches per file. glob "
-                "limits which files are searched ('*.py', 'src/**/*.ts'). fixed_strings=true "
-                "searches for the literal text. Uses ripgrep when installed (it skips .gitignore'd "
-                "and hidden files), else a built-in search; dependency and cache directories are "
-                "skipped either way. Paths are relative to path."
+                "Search file contents for a regex under path (default: workdir). output: content "
+                "(file:line:text), files or count; glob limits files; fixed_strings for literal text. "
+                "Uses ripgrep when installed."
             ),
         )
         async def file_grep(pattern: str, path: str | None = None, glob: str | None = None,
@@ -1665,9 +1661,8 @@ class DeviceServer:
             name="file_write",
             title="Write a file",
             description=(
-                "Write UTF-8 text to a file. mode is overwrite (default), append, or create (fails if the "
-                "file exists). Missing parent directories are created. For edits to existing source "
-                "files prefer edit_file or patch_file."
+                "Write UTF-8 text to a file; mode overwrite (default), append or create. Parent "
+                "directories are created. To change source files prefer edit_file."
             ),
         )
         async def file_write(path: str, content: str,
@@ -1678,9 +1673,8 @@ class DeviceServer:
             name="agent_sessions",
             title="Find agent sessions",
             description=(
-                "Find the newest Claude Code (kind=claude) or Codex (kind=codex) session whose working "
-                "directory is workdir (default: default_workdir). Returns its id, a confidence "
-                "(high, low or none) and up to five candidates with modification times."
+                "Find the newest Claude Code (kind=claude) or Codex (kind=codex) session whose workdir "
+                "is workdir; returns its id, confidence and candidates."
             ),
         )
         async def agent_sessions(kind: Literal["claude", "codex"], workdir: str | None = None) -> dict[str, Any]:
@@ -1690,6 +1684,29 @@ class DeviceServer:
             except (PolicyError, ValueError, OSError) as exc:
                 return {"status": "error", "error": str(exc)}
             return {"status": "ok", **result}
+
+    def _wait_cap_ms(self) -> int:
+        return int(self.exec_manager.max_wait_ms)
+
+    def _wait_cap_s(self) -> float:
+        return self.exec_manager.max_wait_ms / 1000.0
+
+    async def shells_info(self) -> dict[str, Any]:
+        """The shells exec_command can use here, default first (device_info / device_list)."""
+        found = await self.exec_manager.shells_async()
+        default = self.exec_manager.default_shell_name()
+        names = shells_mod.ordered(found, default)
+        if default not in names:
+            names.insert(0, default)
+        paths = {}
+        for name in names:
+            item = found.get(name)
+            if item is not None and (sys.platform == "win32" or item.kind != "native"):
+                paths[name] = item.path + ("" if item.kind == "native" else f" ({item.kind})")
+        info: dict[str, Any] = {"shells": names, "shell_default": default}
+        if paths:
+            info["shell_paths"] = paths
+        return info
 
     def _shell_label(self) -> str:
         """How exec_command's description names the default shell."""
@@ -1743,6 +1760,7 @@ class DeviceServer:
             "reachable": "always",
             "capabilities": capabilities,
             "agent_runtimes": runtimes,
+            **(await self.shells_info()),
         }
 
 

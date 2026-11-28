@@ -48,6 +48,10 @@ class Limits:
     finished_session_ttl_s: float = 600.0
     default_wait_s: float = 30.0
     max_wait_s: float = 180.0
+    #: Longest one tool call may block (exec_command, write_stdin, exec_wait,
+    #: sleep, request_user_input). MCP clients cut a call at about 60 s, so a
+    #: wait returns a resumable handle before that.
+    call_wait_max_s: float = 50.0
     #: When a command emits more than ``max_output_chars``, the full text is
     #: spilled to a file so the model can read the rest instead of losing it.
     spill_enabled: bool = True
@@ -68,6 +72,7 @@ class LimitsSettings(BaseModel):
     finished_session_ttl_s: float = 600.0
     default_wait_s: float = 30.0
     max_wait_s: float = 180.0
+    call_wait_max_s: float = Field(default=50.0, ge=1.0, le=170.0)
     spill_enabled: bool = True
     max_spill_chars: int = 20_000_000
     truncate_head_chars: int = 30_000
@@ -123,6 +128,8 @@ class DeviceSettings(BaseModel):
     #: Roots a session's working directory must live under. Empty = no restriction.
     allowed_roots: list[str] = Field(default_factory=list)
     env: dict[str, str] = Field(default_factory=dict)
+    #: Owner overrides for exec_command's named shells: {"bash": "D:\\Git\\bin\\bash.exe"}.
+    shells: dict[str, str] = Field(default_factory=dict)
     command_deny: list[str] = Field(default_factory=lambda: list(DEFAULT_COMMAND_DENY))
     allow_dangerous: bool = False
     companion_url: str = "http://127.0.0.1:17891"
@@ -147,6 +154,7 @@ class Config:
     default_workdir: str = ""
     allowed_roots: list[str] = field(default_factory=list)
     env: dict[str, str] = field(default_factory=dict)
+    shells: dict[str, str] = field(default_factory=dict)
     command_deny: list[str] = field(default_factory=lambda: list(DEFAULT_COMMAND_DENY))
     allow_dangerous: bool = False
     companion_url: str = "http://127.0.0.1:17891"
@@ -185,6 +193,7 @@ def from_service(service: Service) -> Config:
         default_workdir=settings.default_workdir,
         allowed_roots=list(settings.allowed_roots),
         env=dict(settings.env),
+        shells=dict(settings.shells),
         command_deny=list(settings.command_deny),
         allow_dangerous=settings.allow_dangerous,
         companion_url=settings.companion_url,
@@ -205,6 +214,7 @@ def public_config(config: Config, service: Service | None = None) -> dict[str, A
     """The policy in force, for reports: never a secret."""
     summary: dict[str, Any] = {
         "bash_path": config.bash_path,
+        "shells": dict(config.shells),
         "default_workdir": config.default_workdir or str(Path.home()),
         "allowed_roots": config.allowed_roots or ["<unrestricted>"],
         "allow_dangerous": config.allow_dangerous,
@@ -220,6 +230,7 @@ def public_config(config: Config, service: Service | None = None) -> dict[str, A
             "max_buffer_chars": config.limits.max_buffer_chars,
             "idle_session_ttl_s": config.limits.idle_session_ttl_s,
             "finished_session_ttl_s": config.limits.finished_session_ttl_s,
+            "call_wait_max_s": config.limits.call_wait_max_s,
         },
         "control": {
             "banner_text": config.control.banner_text,

@@ -166,9 +166,12 @@ async def test_failing_device_info_falls_back_to_a_degraded_block(tmp_path, monk
         block = record.hellos[0]["catalog"]["device"]
         assert block["degraded"] is True and block["capabilities"] == {"info": {"v": 1}}
         assert block["hostname"] == HOST_A
-        # A degraded device is not filtered: its tools stay exposed.
+        # A degraded device is not filtered: its tools stay exposed (screenshot is found through
+        # toolsearch since 0.8.35, and callable by name).
         async with mcp_client(port) as client:
-            assert "screenshot" in {tool.name for tool in await client.list_tools()}
+            assert "exec_command" in {tool.name for tool in await client.list_tools()}
+            found = (await client.call_tool("toolsearch", {"query": "screenshot"})).data["tools"]
+            assert found and found[0]["name"] == "screenshot"
 
 
 # -- gateway exposure and errors --------------------------------------------------------
@@ -178,8 +181,10 @@ async def test_missing_capability_error_names_capability_platform_and_reason(tmp
         await start_contract_agent(tmp_path, port, agents, agent_id=SECOND_ID, token_env="SECOND_TOKEN",
                                    platform="linux", hostname="host-linux")
         async with mcp_client(port) as client:
-            # Before a device is chosen tools/list is the union; screenshot comes from the Windows device.
-            assert "screenshot" in {tool.name for tool in await client.list_tools()}
+            # Before a device is chosen the tools are the union; screenshot comes from the Windows device
+            # (unlisted since 0.8.35, found by toolsearch).
+            found = (await client.call_tool("toolsearch", {"query": "screenshot"})).data["tools"]
+            assert any(item["name"] == "screenshot" for item in found)
             selected = (await client.call_tool("use_device", {"device_id": SECOND_ID, "workdir": "project"})).data
             handle = selected["workspace_id"]
             direct = await client.call_tool("screenshot", {"workspace_id": handle}, raise_on_error=False)

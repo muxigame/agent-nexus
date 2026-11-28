@@ -22,7 +22,7 @@ CAPABILITIES: dict[str, dict[str, Any]] = {
     "files": {"v": 1, "tier": "core", "tools": ["file_list", "file_read", "file_write", "file_stat"]},
     "time": {"v": 1, "tier": "core", "tools": ["curr_time", "sleep"]},
     # -- standard -----------------------------------------------------------
-    "exec": {"v": 1, "tier": "standard", "tools": ["exec_command", "write_stdin", "exec_kill", "exec_list"]},
+    "exec": {"v": 1, "tier": "standard", "tools": ["exec_command", "write_stdin", "exec_wait", "exec_kill", "exec_list"]},
     "edit": {"v": 1, "tier": "standard", "tools": ["edit_file", "patch_file"]},
     "search": {"v": 1, "tier": "standard", "tools": ["file_glob", "file_grep"]},
     "plan": {"v": 1, "tier": "standard", "tools": ["update_plan"]},
