@@ -5,7 +5,9 @@ The same rules are implemented by ``find_root`` in the desktop shell
 
 1. ``ANX_ROOT``, else the legacy ``MCPM_ROOT``.
 2. Development: the nearest directory upward (from the working directory, then
-   from this package) holding ``agent-nexus.json`` or ``mcp-manager.json``.
+   from this package) holding ``agent-nexus.json`` or ``mcp-manager.json``. A
+   versioned runtime (``<root>/runtime/<tag>/`` with ``.anx-runtime-complete``)
+   is never the root: its bundled config stands for ``<root>``.
 3. Installed: ``%LOCALAPPDATA%\\AgentNexus`` / ``$XDG_DATA_HOME/agent-nexus``.
    The legacy installed root (``%LOCALAPPDATA%\\Roc\\MCPManager\\client``,
    ``~/.local/share/roc-mcp-manager/client``) is never used in place: it stays
@@ -117,11 +119,33 @@ def legacy_installed_root(environ: Mapping[str, str] | None = None) -> Path | No
     return base / (LEGACY_WINDOWS_DATA_DIR if sys.platform == "win32" else LEGACY_LINUX_DATA_DIR)
 
 
-def default_root(environ: Mapping[str, str] | None = None, cwd: Path | None = None) -> Path:
+#: Written by the desktop shell into a finished versioned runtime (``<root>/runtime/<version>-<hash>/``).
+RUNTIME_MARKER = ".anx-runtime-complete"
+
+
+def runtime_root(path: Path) -> Path | None:
+    """The data root when ``path`` lies inside an installed versioned runtime (``<root>/runtime/<tag>/...`` with the
+    completion marker), else None. Such a runtime also holds the bundled ``agent-nexus.json``, which must not be
+    taken for the root (an ``anx`` launched from the runtime's venv, e.g. the per-run or PATH shim)."""
+    for parent in [path, *path.parents]:
+        if parent.parent.name == "runtime" and (parent / RUNTIME_MARKER).is_file():
+            return parent.parent.parent
+    return None
+
+
+def default_root(environ: Mapping[str, str] | None = None, cwd: Path | None = None,
+                 package: Path | None = None) -> Path:
     explicit = env_root(environ)
     if explicit is not None:
         return explicit
-    found = find_root([cwd or Path.cwd(), Path(__file__).resolve().parent])
+    package = package or Path(__file__).resolve().parent
+    found = find_root([cwd or Path.cwd()])
+    if found is not None:
+        return runtime_root(found) or found
+    runtime = runtime_root(package)
+    if runtime is not None:
+        return runtime
+    found = find_root([package])
     if found is not None:
         return found
     installed = installed_root(environ)

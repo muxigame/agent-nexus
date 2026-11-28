@@ -120,3 +120,13 @@ def test_package_recommends_rather_than_depends_on_the_desktop():
     recommends = next(line for line in text.splitlines() if line.startswith("Recommends:"))
     for desktop in ("python3-gi", "gir1.2-gtk-3.0", "gir1.2-webkit2-4.1", "xdg-utils"):
         assert desktop not in depends and desktop in recommends
+
+
+def test_usr_bin_anx_is_agent_nexus_anx(launcher, monkeypatch):
+    """/usr/bin/anx runs `agent-nexus anx "$@"`: device commands as the caller, without sudo."""
+    text = BUILD.read_text(encoding="utf-8")
+    assert '''entries["usr/bin/anx"] = (f'#!/bin/sh\\nexec /{LIB}{LAUNCHER} anx "$@"\\n'.encode(), 0o755)''' in text
+    seen = []
+    monkeypatch.setattr(launcher, "device_cli", lambda rest: seen.append(rest) or 0)
+    assert launcher.main(["anx", "exec", "nas", "--", "uname", "-a"]) == 0
+    assert seen == [["exec", "nas", "--", "uname", "-a"]]

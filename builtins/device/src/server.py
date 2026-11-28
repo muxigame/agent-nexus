@@ -281,6 +281,10 @@ TOOL_ANNOTATIONS: dict[str, ToolAnnotations] = {
     "exec_kill": ToolAnnotations(
         read_only_hint=False, destructive_hint=False, idempotent_hint=True, open_world_hint=False
     ),
+    # Internal (the gateway's wait URL): reads output without consuming it.
+    "exec_tail": ToolAnnotations(
+        read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=False
+    ),
     # Asking changes nothing on the machine, but it does put a card in front of
     # a person and wait for them, so it is not "read-only" in the sense a model
     # should treat as free.
@@ -527,7 +531,7 @@ class DeviceServer:
     def _register_tools(self) -> None:
         mcp = self.mcp
 
-        def tool(*, name: str, **kwargs: Any) -> Any:
+        def tool(*, name: str, internal: bool = False, **kwargs: Any) -> Any:
             """``mcp.tool`` with this tool's entry from ``TOOL_ANNOTATIONS``.
 
             Keeping the hints in one table rather than on 17 decorators is what
@@ -542,6 +546,9 @@ class DeviceServer:
             if capability is None:
                 return lambda function: function
             meta = {"anx/capability": capability, "anx/contract": CONTRACT}
+            if internal:
+                # Hidden from tools/list and toolsearch by the gateway (design 5.2 rule 4).
+                meta["anx/internal"] = True
             return mcp.tool(name=name, annotations=TOOL_ANNOTATIONS[name], meta=meta, **kwargs)
 
         @tool(
@@ -632,6 +639,28 @@ class DeviceServer:
                 return self._err(str(exc))
             self._record("exec_wait", result, ok=True, session_id=session_id)
             return result
+
+        @tool(
+            name="exec_tail",
+            internal=True,
+            title="Follow a command's output",
+            description=(
+                "Internal: output of a running exec session after seq `since`, without consuming it "
+                "(exec_wait still returns it). job is the id from the exec result. Waits up to timeout_ms "
+                f"(max {self._wait_cap_ms()}) for new output or the exit."
+            ),
+        )
+        async def exec_tail(
+            session_id: int,
+            job: str,
+            since: int = 0,
+            timeout_ms: float | None = None,
+            max_chars: int | None = None,
+        ) -> dict[str, Any]:
+            try:
+                return await self.exec_manager.exec_tail(session_id, job, since, timeout_ms, max_chars)
+            except (KeyError, RuntimeError, ValueError) as exc:
+                return self._err(str(exc))
 
         @tool(
             name="exec_kill",

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import contextlib
+import json
 import asyncio
 import logging
 import re
@@ -11,7 +12,7 @@ from typing import Any, Callable
 from uuid import uuid4
 
 from fastmcp import Context, FastMCP
-from fastmcp.server.dependencies import get_access_token, get_context
+from fastmcp.server.dependencies import get_access_token, get_context, get_http_request
 from fastmcp.server.middleware import Middleware
 from fastmcp.server.providers import Provider
 from fastmcp.tools.base import ToolResult
@@ -29,6 +30,7 @@ from .mailbox import DEVICE_ASK_NAME, ME, Mailbox, mailbox_config
 from .store import GatewayStore
 from .escalation import Escalation
 from .wake import WakeRouter
+from .wait_urls import WaitTokens, wait_hint
 
 log = logging.getLogger(__name__)
 
@@ -129,6 +131,14 @@ EXEC_TEXT_TOOLS = frozenset({"exec_command", "write_stdin", "exec_wait", "exec_k
 WAIT_ARGUMENTS = {"exec_command": (("yield_time_ms", 1000),), "write_stdin": (("yield_time_ms", 1000),),
                   "exec_wait": (("timeout_ms", 1000),), "sleep": (("duration_ms", 1000),),
                   "request_user_input": (("timeout_s", 1),), "request_user_input_result": (("wait_s", 1),)}
+#: ``?wait_max=<s>`` on the MCP URL (the entries the client writes for Codex / Gemini CLI with
+#: 延长 MCP 等待): that client's own per-call wait cap instead of ``tool_wait_max_s``. Longer waits
+#: run as several device calls of at most ``tool_wait_max_s`` each (Gateway._segmented).
+WAIT_MAX_PARAM = "wait_max"
+WAIT_MAX_FLOOR_S = 5
+WAIT_MAX_CEILING_S = 86400
+#: Tools whose wait the gateway can split into device calls (exec_wait for the rest of the wait).
+SEGMENTED_TOOLS = frozenset({"exec_command", "write_stdin", "exec_wait", "sleep"})
 PROGRESS_INTERVAL_S = 10.0
 WORKSPACE_ID_SCHEMA = {"type": "string", "description": "Device handle from use_device; default: current device."}
 EXEC_WAIT_DESCRIPTION = ("Wait for a command exec_command left running: returns its new output, and exit_code "
@@ -136,12 +146,12 @@ EXEC_WAIT_DESCRIPTION = ("Wait for a command exec_command left running: returns 
                          "exec_wait again with the same session_id.")
 
 INSTRUCTIONS = (
-    "Agent Nexus runs tools on the owner's devices. device_list lists them (with their shells, default "
-    "first); use_device(device_id, session_name, kind) returns a workspace_id: pass it on every call meant "
-    "for that device, mail_* and ask_user included. Without workspace_id a call goes to this device "
-    "(local MCP) or the default device (several online and no default: refused). "
-    "exec_command runs a shell command; when it returns a session_id, call exec_wait. "
-    "Desktop control, watchers, plugins and connectors: toolsearch(query), then tooluse(tool, arguments). "
+    "Agent Nexus runs tools on the owner's devices. device_list lists them (shells: default first); "
+    "use_device(device_id, session_name, kind) returns a workspace_id: pass it on every call for that "
+    "device, mail_* and ask_user included. Without it a call goes to this device (local MCP) or the "
+    "default device. exec_command runs a shell command; still running: exec_wait, or for long jobs wait "
+    "on its wait URL with your own shell (curl -sN URL; curl.exe on Windows), in the background if you can. "
+    "Desktop control, watchers, plugins, connectors: toolsearch(query), then tooluse(tool, arguments). "
     "mail_* exchange mail with other sessions; ask_user asks the owner. Nothing is retried automatically."
 )
 
@@ -278,8 +288,9 @@ def _fmt_seconds(value: Any) -> str:
         return ""
 
 
-def exec_text(data: dict, device: str) -> tuple[str, bool]:
-    """A device exec result as one header line plus the raw output; (text, is_error)."""
+def exec_text(data: dict, device: str, *, windows: bool = False) -> tuple[str, bool]:
+    """A device exec result as one header line plus the raw output; (text, is_error).
+    ``windows``: the wait hint says ``curl.exe`` (the caller's shell runs on Windows)."""
     shell = data.get("shell") if isinstance(data.get("shell"), str) else None
     output = data.get("output") if isinstance(data.get("output"), str) else ""
     if data.get("status") == "error":
@@ -292,6 +303,9 @@ def exec_text(data: dict, device: str) -> tuple[str, bool]:
     if code is None and session is not None:
         parts = ["running", f"session {session}", wall, device, shell]
         head = "[" + " · ".join(part for part in parts if part) + f"] exec_wait(session_id={session}) to continue"
+        if isinstance(data.get("wait_url"), str):
+            head += (f"\nwait: {wait_hint(data['wait_url'], windows=windows)}  (streams the output; done when the "
+                     "last line is [anx] exit N or [anx] killed, else run it again)")
     else:
         parts = [f"exit {code}", wall, device, shell]
         head = "[" + " · ".join(part for part in parts if part) + "]"
@@ -308,6 +322,37 @@ def _client_id() -> str | None:
         if token is not None and isinstance(getattr(token, "client_id", None), str):
             return token.client_id[:200]
     return None
+
+
+def request_wait_max() -> int | None:
+    """``wait_max`` from the MCP request's URL query (seconds, clamped), None without one."""
+    try:
+        request = get_http_request()
+    except RuntimeError:
+        return None
+    raw = str(request.query_params.get(WAIT_MAX_PARAM) or "")
+    if not raw.isdigit() or len(raw) > 7:
+        return None
+    return max(WAIT_MAX_FLOOR_S, min(int(raw), WAIT_MAX_CEILING_S))
+
+
+def _loopback_base(value: str | None) -> str | None:
+    """``x-anx-wait-base`` as a 本机 MCP sends it: exactly ``http://127.0.0.1:<port>``."""
+    match = re.fullmatch(r"http://127\.0\.0\.1:(\d{1,5})", value or "")
+    if match and 0 < int(match.group(1)) < 65536:
+        return match.group(0)
+    return None
+
+
+def _result_error(result: Any) -> str:
+    """A failed device tool result's error text, short."""
+    data = result.get("structuredContent") if isinstance(result, dict) else None
+    if isinstance(data, dict) and data.get("error"):
+        return str(data["error"])
+    for item in (result.get("content") or []) if isinstance(result, dict) else []:
+        if isinstance(item, dict) and item.get("type") == "text" and item.get("text"):
+            return str(item["text"])
+    return "the device call failed"
 
 
 def caller_device() -> str | None:
@@ -446,6 +491,44 @@ class Gateway:
         self.file_copy = FileCopyService(hub, self.devices)
         # file_copy_status(wait_ms): the same per-call wait limit (the last device ask adds a 5 s grace).
         self.file_copy.wait_max_ms = int(min(50.0, self.tool_wait_max_s) * 1000)
+        #: Wait URLs (wait_urls.py); ``public_url`` is the gateway's own, set by build_cloud_app.
+        self.wait_urls = WaitTokens()
+        self.public_url: str | None = None
+
+    def client_wait_max_s(self) -> float:
+        """This request's wait cap: ``?wait_max=`` on the MCP URL, else ``tool_wait_max_s``."""
+        value = request_wait_max()
+        return float(value) if value is not None else self.tool_wait_max_s
+
+    def wait_url(self, kind: str, **key: Any) -> str | None:
+        """A wait URL for a running job, for this caller (None when it has nowhere to point)."""
+        via = caller_device()
+        base = None
+        if via is not None:
+            # Through a device's 本机 MCP: its loopback relay, which adds the device credential.
+            with contextlib.suppress(RuntimeError):
+                base = _loopback_base(get_http_request().headers.get("x-anx-wait-base"))
+            minter = f"device:{via}"
+        else:
+            base = (self.public_url or "").rstrip("/") or None
+            minter = _client_id() or "owner"
+        if base is None:
+            return None
+        token = self.wait_urls.mint(kind, minter=minter, **key)
+        return f"{base}/wait/{token}" if token else None
+
+    def caller_windows(self) -> bool:
+        """The MCP caller's shell runs on Windows: a call through a Windows device's 本机 MCP (its
+        wait URL is that device's loopback relay, so the agent's shell is on that machine)."""
+        via = caller_device()
+        peer = self.hub.peers.get(via) if via else None
+        return peer is not None and device_block(peer.catalog).get("platform") == "windows"
+
+    def check_caller_lock(self) -> None:
+        via = caller_device()
+        peer = self.hub.peers.get(via) if via else None
+        if via and (peer is None or getattr(peer, "locked", False)):
+            raise RoutingError("locked: 这台设备已锁定，解锁后才能操作其他设备")
 
     async def selection(self, workspace_id: str | None = None) -> dict | None:
         """Where a call without mcp_id goes: its workspace_id, else the session's use_device choice,
@@ -513,7 +596,8 @@ class Gateway:
             requested = float(timeout_s)
         except (TypeError, ValueError):
             raise RoutingError("timeout_s must be a number") from None
-        return max(0.0, min(requested, self.tool_wait_max_s, self.hub.timeout - 10))
+        # mail_wait / ask_user wait in the gateway itself (no device call): the client's cap only.
+        return max(0.0, min(requested, self.client_wait_max_s()))
 
     async def caller_handle(self, workspace_id: str | None) -> str | None:
         """The handle a mail tool call acts through: its workspace_id, else the session's selection."""
@@ -663,6 +747,7 @@ class Gateway:
         interval = float(self.mailbox_config["retention"]["interval_s"]) or 86400.0
         while True:
             await asyncio.sleep(min(interval, 300.0))
+            self.wait_urls.prune()
             try:
                 removed = await asyncio.to_thread(self.mailbox.retention)
                 if any(removed.values()):
@@ -760,7 +845,8 @@ class Gateway:
             raise RoutingError("invalid tool arguments: " + "; ".join(error.message for error in problems[:3]))
         if is_device and tool == "exec_command":
             self.check_old_device_shell(peer, descriptor, arguments)
-        clamped = self.clamp_waits(upstream_tool, arguments) if is_device else {}
+        cap = self.client_wait_max_s()
+        clamped = self.clamp_waits(upstream_tool, arguments, cap) if is_device else {}
         selection = await self.selection(workspace_id)
         if workspace_id and selection and selection["agent_id"] != peer.agent_id:
             raise RoutingError("workspace_id belongs to a different manager than mcp_id")
@@ -790,14 +876,114 @@ class Gateway:
             scope = "default"
         if selection:
             scope = selection.get("scope", scope)
+        wait_s = self._wait_of(upstream_tool, arguments) if is_device and upstream_tool in SEGMENTED_TOOLS else None
+        segmented = wait_s is not None and wait_s > self.tool_wait_max_s + 0.001
         try:
             async with progress_heartbeat(f"{tool} ({self.devices.display_name(peer.agent_id)})"):
-                result = await peer.call("tool_call", {"mcp": name, "tool": upstream_tool, "arguments": arguments,
-                                                       "workspace": workspace_name, "scope": scope})
+                if segmented:
+                    result = await self._segmented(peer, name, mcp, upstream_tool, arguments, workspace_name, scope)
+                else:
+                    result = await peer.call("tool_call", {"mcp": name, "tool": upstream_tool, "arguments": arguments,
+                                                           "workspace": workspace_name, "scope": scope})
         except asyncio.TimeoutError:
             raise RoutingError("local MCP call timed out; execution outcome may be unknown") from None
         result = ToolResult.from_mcp_result(CallToolResult.model_validate(result))
-        return self.present(peer, tool, result, clamped=clamped) if is_device else result
+        return self.present(peer, tool, result, clamped=clamped, mcp_name=name) if is_device else result
+
+    @staticmethod
+    def _wait_of(tool: str, arguments: dict) -> float | None:
+        """The requested wait of a segmentable call, in seconds (None: the device default)."""
+        for argument, factor in WAIT_ARGUMENTS.get(tool, ()):
+            value = arguments.get(argument)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                return float(value) / factor
+        return None
+
+    async def _segmented(self, peer: Peer, name: str, mcp: dict, tool: str, arguments: dict,
+                         workspace: str | None, scope: str) -> dict:
+        """One long wait as device calls of at most ``tool_wait_max_s`` each (each within Peer.call's
+        budget and the device's own call cap); the outputs are joined into one result.
+
+        A client that disconnects cancels this coroutine, and with it the device call in flight
+        (Peer.call sends cancel); the command itself keeps running."""
+        seg = self.tool_wait_max_s
+        argument, factor = WAIT_ARGUMENTS[tool][0]
+        deadline = time.monotonic() + float(arguments[argument]) / factor
+
+        async def device(tool_name: str, args: dict) -> dict:
+            return await peer.call("tool_call", {"mcp": name, "tool": tool_name, "arguments": args,
+                                                 "workspace": workspace, "scope": scope})
+
+        def as_number(seconds: float) -> int:
+            return max(1, int(seconds * factor))
+
+        if tool == "sleep":
+            result: dict = {}
+            while True:
+                left = deadline - time.monotonic()
+                if left <= 0.05 and result:
+                    return result
+                self.check_caller_lock()
+                result = await device("sleep", {**arguments, argument: as_number(max(0.05, min(seg, left)))})
+                if not isinstance(result, dict) or result.get("isError"):
+                    return result
+
+        result = await device(tool, {**arguments, argument: as_number(seg)})
+        outputs: list[str] = []
+        good: dict | None = None  # the last segment that succeeded (its structuredContent)
+        interrupted: str | None = None
+        has_wait = any(entry.get("name") == "exec_wait" for entry in mcp.get("tools", []))
+        while True:
+            data = result.get("structuredContent") if isinstance(result, dict) else None
+            if not isinstance(data, dict) or result.get("isError") or data.get("status") == "error":
+                if good is not None:
+                    # A later segment failed (the plugin restarted, ...): the earlier segments' output
+                    # was already taken from the device, so it is returned rather than lost.
+                    interrupted = _result_error(result)
+                break
+            good = data
+            outputs.append(data.get("output") if isinstance(data.get("output"), str) else "")
+            session = data.get("session_id")
+            if data.get("exit_code") is not None or session is None:
+                break
+            left = deadline - time.monotonic()
+            if left < 0.5:
+                break
+            extra = ({"max_output_tokens": arguments["max_output_tokens"]}
+                     if arguments.get("max_output_tokens") is not None else {})
+            try:
+                self.check_caller_lock()
+                if has_wait:
+                    result = await device("exec_wait", {"session_id": session,
+                                                        "timeout_ms": int(min(seg, left) * 1000), **extra})
+                else:  # a device older than exec_wait (0.8.34)
+                    result = await device("write_stdin", {"session_id": session, "chars": "",
+                                                          "yield_time_ms": int(min(seg, left) * 1000), **extra})
+            except (RoutingError, ConnectionError, OSError, asyncio.TimeoutError) as exc:
+                interrupted = str(exc) or type(exc).__name__
+                break
+        if good is None:
+            return result
+        if len(outputs) <= 1 and interrupted is None:
+            return result
+        data = dict(good)
+        if interrupted is not None:
+            # Still running as far as anyone knows: no exit code, the session id to continue with.
+            data.pop("exit_code", None)
+            note = f"wait interrupted: {interrupted[:300]}; call exec_wait to continue"
+            data["note"] = f"{data['note']}; {note}" if isinstance(data.get("note"), str) and data["note"] else note
+        text = "".join(outputs)
+        tokens = arguments.get("max_output_tokens")
+        limit = max(1, int(tokens)) * 4 if isinstance(tokens, (int, float)) and not isinstance(tokens, bool) else 40_000
+        if len(text) > limit:
+            head = limit * 3 // 5
+            tail = limit - head
+            omitted = len(text) - head - tail
+            data["original_token_count"] = (len(text) + 3) // 4
+            text = text[:head] + f"\n... [output truncated: {omitted} characters omitted] ...\n" + text[-tail:]
+        data["output"] = text
+        return {"content": [{"type": "text", "text": json.dumps(data, ensure_ascii=False)}],
+                "structuredContent": data, "isError": False}
 
     def check_old_device_shell(self, peer: Peer, descriptor: dict, arguments: dict) -> None:
         """A 0.8.34 Windows device without Git Bash passes shell='bash' straight to CreateProcess,
@@ -811,14 +997,20 @@ class Gateway:
             raise RoutingError(f"shell {shell!r} is not available on {self.devices.display_name(peer.agent_id)}; "
                                "available: powershell, cmd (default: powershell)")
 
-    def clamp_waits(self, tool: str, arguments: dict) -> dict:
-        """Cap a device tool's blocking arguments at ``tool_wait_max_s`` (in place); returns what was cut.
+    def clamp_waits(self, tool: str, arguments: dict, cap_s: float | None = None) -> dict:
+        """Cap a device tool's blocking arguments (in place); returns what was cut.
 
+        ``cap_s``: this client's cap (``?wait_max=``); exec and sleep waits above
+        ``tool_wait_max_s`` are then split into device calls. Every other wait stays at
+        ``tool_wait_max_s`` (request_user_input is the device's own ask timeout).
         Old devices allowed waits longer than any MCP client keeps a call open
         (exec 150 s, request_user_input 240 s by default): they return a handle instead."""
         clamped = {}
+        limit = self.tool_wait_max_s
+        if cap_s is not None and tool in SEGMENTED_TOOLS:
+            limit = float(cap_s)
         for argument, factor in WAIT_ARGUMENTS.get(tool, ()):
-            cap = self.tool_wait_max_s * factor
+            cap = limit * factor
             value = arguments.get(argument)
             if value is None:
                 if tool == "request_user_input":
@@ -829,7 +1021,8 @@ class Gateway:
                 clamped[argument] = (value, arguments[argument])
         return clamped
 
-    def present(self, peer: Peer, tool: str, result: ToolResult, *, clamped: dict | None = None) -> ToolResult:
+    def present(self, peer: Peer, tool: str, result: ToolResult, *, clamped: dict | None = None,
+                mcp_name: str | None = None) -> ToolResult:
         """How a device tool's result reaches the model.
 
         exec tools: one header line (exit code or running session, time, device, shell) and the
@@ -839,9 +1032,20 @@ class Gateway:
         data = result.structured_content
         if tool in EXEC_TEXT_TOOLS and isinstance(data, dict) and ("output" in data or data.get("status") == "error") \
                 and not result.is_error:
-            text, failed = exec_text(data, device)
-            meta = {**(result.meta or {}),
-                    "anx/exec": {key: value for key, value in data.items() if key != "output"}}
+            fields = {key: value for key, value in data.items() if key != "output"}
+            session = data.get("session_id")
+            if data.get("exit_code") is None and session is not None and data.get("status") != "error" \
+                    and mcp_name is not None and tool != "exec_kill" and isinstance(session, int):
+                url = self.wait_url("exec", agent_id=peer.agent_id, mcp=mcp_name, session_id=session,
+                                    job=data.get("job") if isinstance(data.get("job"), str) else None,
+                                    since=data.get("seq") if isinstance(data.get("seq"), int) else 0)
+                if url:
+                    data = {**data, "wait_url": url}
+                    fields["wait_url"] = url
+            elif isinstance(session, int) and data.get("exit_code") is not None:
+                self.wait_urls.ended("exec", peer.agent_id, session_id=session)
+            text, failed = exec_text(data, device, windows="wait_url" in data and self.caller_windows())
+            meta = {**(result.meta or {}), "anx/exec": fields}
             return ToolResult(content=[TextContent(type="text", text=text)], meta=meta, is_error=failed)
         notes = []
         if clamped and tool == "sleep":
@@ -1112,6 +1316,8 @@ class Gateway:
             # The client's 锁定 (private-network model): a locked device can be operated on
             # but may not operate on other devices. Reported on connect and on every change.
             peer.locked = bool(args.get("locked"))
+            if peer.locked:
+                self.wait_urls.revoke_device(peer.agent_id)
             return {"locked": peer.locked}
         if op == "links_report":
             # How this device reaches the others right now; the console's 拓扑 draws all of them.
@@ -1559,6 +1765,11 @@ class WorkspaceProvider(Provider):
         descriptor = english_metadata(descriptor)
         if descriptor.get("name") == "exec_command" and (peer is None or peer.agent_id != caller_device()):
             descriptor = {**descriptor, "description": neutral_exec_description(descriptor.get("description") or "")}
+        cap = self.gateway.client_wait_max_s()
+        if cap > self.gateway.tool_wait_max_s and descriptor.get("name") in SEGMENTED_TOOLS:
+            # A client with ?wait_max= (延长 MCP 等待): the gateway splits its longer waits.
+            descriptor = {**descriptor, "description": re.sub(r"\bmax \d+\b", f"max {int(cap * 1000)}",
+                                                              descriptor.get("description") or "")}
         compact = self.gateway.tool_listing == "compact"
         # Validation uses the device's own schema: compacting (X | null -> X) is applied to the
         # listing only (NexusServer.lean_meta), so a nested explicit null stays valid.

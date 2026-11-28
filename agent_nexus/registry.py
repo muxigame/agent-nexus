@@ -199,8 +199,8 @@ class ManagerConfig:
     files: bool = True
     #: ``files.jobs``: run file_copy jobs here (``fxjob/1``): the bytes go straight between devices (default on).
     files_jobs: bool = True
-    #: ``mcp_local``: the 本机 MCP on ``/mcp`` of this console (``{enabled, auto_config, peers}``, all optional;
-    #: see :func:`agent_nexus.local_mcp.settings_of` for the defaults).
+    #: ``mcp_local``: the 本机 MCP on ``/mcp`` of this console (``{enabled, auto_config, extended_wait, peers}``,
+    #: all optional; see :func:`agent_nexus.local_mcp.settings_of` for the defaults).
     mcp_local: dict = field(default_factory=dict)
 
     @property

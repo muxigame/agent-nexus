@@ -126,15 +126,95 @@ fn migrate(from: &Path, to: &Path) -> Result<(), String> {
 /// with `/T` would apply the folder's (OI)(CI) entries to each file, where they mean nothing, and
 /// leave files that nobody -- SYSTEM included -- can open.)
 fn protect(path: &Path) {
-    if path.is_dir() {
-        let target = path.display().to_string();
-        let (ok, out) = run("icacls", &[&target, "/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F",
-                                        "*S-1-5-32-544:(OI)(CI)F", "/Q"]);
-        if !ok { say(&format!("icacls {target}: {out}")); }
-        let children = format!("{target}\\*");
-        let (ok, out) = run("icacls", &[&children, "/reset", "/T", "/C", "/Q"]);
-        if !ok { say(&format!("icacls {children} /reset: {out}")); }
+    if path.is_dir() { lock_down(path, &["*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F"]); }
+}
+
+/// The folder (and everything below it) owned by Administrators, with exactly `grants` (inherited by
+/// every child). Ownership first: an owner keeps an implicit WRITE_DAC, so a folder or file a standard
+/// user created (squatted before the install, planted while it ran) could otherwise be opened again by
+/// them. `/reset` before `/inheritance:r` drops explicit ACEs such an owner may have added.
+fn lock_down(path: &Path, grants: &[&str]) {
+    let target = path.display().to_string();
+    let (ok, out) = run("takeown", &["/F", &target, "/R", "/A", "/D", "Y"]);
+    if !ok { say(&format!("takeown {target}: {out}")); }
+    let (ok, out) = run("icacls", &[&target, "/setowner", "*S-1-5-32-544", "/T", "/C", "/Q"]);
+    if !ok { say(&format!("icacls {target} /setowner: {out}")); }
+    let (ok, out) = run("icacls", &[&target, "/reset", "/Q"]);
+    if !ok { say(&format!("icacls {target} /reset: {out}")); }
+    let mut args = vec![target.as_str(), "/inheritance:r", "/grant:r"];
+    args.extend_from_slice(grants);
+    args.push("/Q");
+    let (ok, out) = run("icacls", &args);
+    if !ok { say(&format!("icacls {target}: {out}")); }
+    let children = format!("{target}\\*");
+    let (ok, out) = run("icacls", &[&children, "/reset", "/T", "/C", "/Q"]);
+    if !ok { say(&format!("icacls {children} /reset: {out}")); }
+}
+
+/// Readable, not writable, by standard users: the runtime the service (LocalSystem) runs. ProgramData's
+/// inherited ACL lets every user create files below it, so a planted `.pth`, `sitecustomize.py` or DLL in
+/// the venv would run as SYSTEM (and as any administrator who runs `anx`).
+fn protect_read_only(path: &Path) {
+    if path.is_dir() { lock_down(path, &["*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", "*S-1-5-32-545:(OI)(CI)RX"]); }
+}
+
+/// `HKLM\Software\AgentNexus` value: `runtime` and `tools` have been locked down (and emptied) once.
+/// In HKLM, which only administrators can write: a marker file under the data root could be planted.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+const PROTECTED_KEY: &str = r"Software\AgentNexus";  // the key cli_path.rs also uses
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+const PROTECTED_VALUE: &str = "RuntimeProtected";
+
+fn protected_before() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        use winreg::{enums::HKEY_LOCAL_MACHINE, RegKey};
+        RegKey::predef(HKEY_LOCAL_MACHINE).open_subkey(PROTECTED_KEY)
+            .and_then(|key| key.get_value::<u32, _>(PROTECTED_VALUE)).map(|v| v == 1).unwrap_or(false)
     }
+    #[cfg(not(target_os = "windows"))]
+    { false }
+}
+
+fn set_protected(on: bool) {
+    #[cfg(target_os = "windows")]
+    {
+        use winreg::{enums::HKEY_LOCAL_MACHINE, RegKey};
+        let machine = RegKey::predef(HKEY_LOCAL_MACHINE);
+        if on {
+            if let Ok((key, _)) = machine.create_subkey(PROTECTED_KEY) { let _ = key.set_value(PROTECTED_VALUE, &1u32); }
+        } else if let Ok(key) = machine.open_subkey_with_flags(PROTECTED_KEY, winreg::enums::KEY_SET_VALUE) {
+            let _ = key.delete_value(PROTECTED_VALUE);
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    { let _ = on; }
+}
+
+/// Before anything is extracted into them: `runtime` and `tools` (prepended to PATH as a fallback) exist,
+/// owned by Administrators, readable but not writable by standard users. The first time (a fresh install,
+/// an upgrade from a version without this, or the data root re-created after an uninstall) whatever is
+/// already in them is untrusted -- a standard user could have written it -- and is moved away, so the
+/// runtime is extracted and synced afresh.
+fn secure_runtime_dirs(root: &Path) -> Result<(), String> {
+    let fresh = !protected_before();
+    for name in ["runtime", "tools"] {
+        let dir = root.join(name);
+        if fresh && dir.exists() {
+            let aside = root.join(format!("{name}.untrusted-{}", std::process::id()));
+            // Take it over first: a squatted folder may deny even its own removal to others.
+            lock_down(&dir, &["*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F"]);
+            if fs::rename(&dir, &aside).is_ok() {
+                let _ = fs::remove_dir_all(&aside);
+            } else {
+                fs::remove_dir_all(&dir).map_err(|e| format!("无法清理 {}（请关闭正在使用它的程序后重试）：{e}", dir.display()))?;
+            }
+        }
+        fs::create_dir_all(&dir).map_err(|e| format!("无法创建 {}：{e}", dir.display()))?;
+        protect_read_only(&dir);
+    }
+    set_protected(true);
+    Ok(())
 }
 
 /// accounts.default: plugins and terminals run as whoever is at the screen (kept when set).
@@ -255,10 +335,13 @@ pub fn setup() -> Result<(), String> {
         if let Some(from) = pick(&users) { migrate(&from, &root)?; }
     }
     crate::bootstrap::set_root(root.clone());
+    // Locked down before the runtime is extracted into it (a file planted meanwhile would run as SYSTEM).
+    secure_runtime_dirs(&root)?;
     crate::bootstrap::prepare_for_service(&root)?;
     default_account(&root);
     protect(&root.join("secrets"));
     protect(&root.join(".anx"));
+    protect_read_only(&root.join("runtime"));  // what extraction created: owned by Administrators too
     fs::write(root.join(MARKER), "1\n").map_err(|e| e.to_string())?;
     register_service(&exe)?;
     logon_entry(&exe, true);
@@ -277,6 +360,8 @@ pub fn remove() {
     run("sc.exe", &["delete", SERVICE]);
     if let Ok(exe) = env::current_exe() { logon_entry(&exe, false); }
     let _ = fs::remove_file(system_root().join(MARKER));
+    // The data root may be deleted after this and re-created by anyone: the next install trusts nothing in it.
+    set_protected(false);
 }
 
 #[cfg(test)]

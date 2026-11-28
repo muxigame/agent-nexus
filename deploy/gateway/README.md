@@ -145,6 +145,11 @@ token on a bearer-only gateway. One sign-in also covers the `/inbox/` PWA.
   (files missing locally are redirected to `release_url`; links are listed on the page).
 - nginx: the console, `/auth/*`, `/api/*`, `/downloads*` and `/enroll` go to the gateway
   like every other path (`nginx.example.conf` already proxies `/`).
+- **Wait URLs** (`/wait/<token>`, README "长命令的等待地址"): the token in the path is the credential
+  for one job's output. The gateway's own access log (`log_requests`) shows it as `/wait/***`; nginx
+  logs full paths, so keep `access_log off` for `location /wait/` (as in `nginx.example.conf`, which also
+  gives those streams a long `proxy_read_timeout`), or log `$uri` through a `map` that drops the token.
+  `/media/<token>` has the same property.
 
 ## Deploying from GitHub Actions
 

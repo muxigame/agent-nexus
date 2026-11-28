@@ -83,11 +83,30 @@ def is_loopback(host: str | None) -> bool:
 
 
 def settings_of(data: Any) -> dict:
-    """``mcp_local`` of agent-nexus.json, with defaults: ``{enabled, auto_config, peers}``."""
+    """``mcp_local`` of agent-nexus.json, with defaults: ``{enabled, auto_config, extended_wait, peers}``.
+
+    ``extended_wait`` (延长 MCP 等待): our Codex / Gemini CLI entries get a 24 h tool timeout and ``?wait_max=``
+    (agents/mcp_link.py); applied by the client's reconcile."""
     data = data if isinstance(data, dict) else {}
     peers = data.get("peers")
     return {"enabled": data.get("enabled") is not False, "auto_config": data.get("auto_config") is not False,
+            "extended_wait": data.get("extended_wait") is not False,
             "peers": peers if peers in PEERS else "any"}
+
+
+def wait_max_of(scope: dict) -> int | None:
+    """``wait_max`` of the request's query string: digits only, at most 86400; every other key is dropped."""
+    from urllib.parse import parse_qs
+    try:
+        query = parse_qs((scope.get("query_string") or b"").decode("latin-1"), max_num_fields=20)
+    except ValueError:
+        return None
+    values = query.get("wait_max") or []
+    raw = values[0] if values else ""
+    if not raw.isdigit() or len(raw) > 6:
+        return None
+    value = int(raw)
+    return value if 0 < value <= 86400 else None
 
 
 def _headers(scope: dict) -> dict[str, str]:
@@ -325,6 +344,11 @@ class LocalMcp:
         await self._serve(scope, receive, send, local=False)
 
     @property
+    def wait_app(self) -> "WaitRelay":
+        """The ASGI app of ``/wait/{token}`` (see :class:`WaitRelay`)."""
+        return WaitRelay(self)
+
+    @property
     def self_app(self) -> "SelfEndpoint":
         """The ASGI app of ``/mcp/self`` (see :class:`SelfEndpoint`)."""
         return SelfEndpoint(self)
@@ -495,6 +519,12 @@ class LocalMcp:
             from . import remote
             forward.update(remote.headers(agent_id, token))
             url = origin.rstrip("/") + mcp_path + "/device"
+            # 延长 MCP 等待: the CLI entry's ?wait_max= (only that key, digits only) is this client's cap.
+            wait_max = wait_max_of(scope)
+            if wait_max is not None:
+                url += f"?wait_max={wait_max}"
+            # wait URLs handed to this CLI point at this console's loopback relay (/wait/<token>)
+            forward["x-anx-wait-base"] = f"http://127.0.0.1:{int(self.cfg.port)}"
             unreachable = "offline"
         # the body is streamed on as it comes: never let a proxy in front of the gateway compress it
         forward["accept-encoding"] = "identity"
@@ -614,3 +644,91 @@ class SelfEndpoint:
 
     async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
         await self.owner._serve(scope, receive, send, local=True)
+
+
+class WaitRelay:
+    """``GET /wait/{token}`` on the local console: a wait URL handed out through this device's 本机 MCP.
+
+    The same checks as ``/mcp`` (loopback client and Host, enabled, the peers rule, the lock, joined), then
+    the gateway's ``/wait/<token>`` with this device's credential, streamed on until it ends or the caller
+    leaves (closing the upstream ends the gateway's stream, which cancels the device's wait)."""
+
+    def __init__(self, owner: LocalMcp):
+        self.owner = owner
+
+    async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
+        from .wait_urls import NOT_FOUND, PLAIN_HEADERS, TOKEN_RE, plain, watch_disconnect
+        if scope.get("type") != "http":
+            return
+        owner = self.owner
+        headers = _headers(scope)
+        settings = owner.settings
+        client = scope.get("client") or ("", 0)
+        if not settings["enabled"] or not is_loopback(getattr(owner.cfg, "host", "127.0.0.1")):
+            await plain(send, 404, "not found\n")
+            return
+        if not is_loopback(client[0]) or headers.get("host") not in owner.hosts:
+            await plain(send, 403, "forbidden\n")
+            return
+        if scope.get("method") != "GET":
+            await plain(send, 405, "method not allowed\n")
+            return
+        if settings["peers"] == "accounts" and not owner.peer_allowed(scope):
+            await plain(send, 403, "forbidden: 这个账户不能使用本机 MCP（mcp_local.peers = accounts）\n")
+            return
+        state = owner.state()
+        if state != "ready":
+            await plain(send, 423 if state == "locked" else 503, f"[anx] {REASONS.get(state, state)}\n")
+            return
+        token = str(scope.get("path") or "").rsplit("/", 1)[-1]
+        if not TOKEN_RE.match(token):
+            await plain(send, 404, NOT_FOUND)
+            return
+        import httpx
+        try:
+            origin, agent_id, credential = await owner.credentials()
+        except Exception:  # noqa: BLE001
+            await plain(send, 503, f"[anx] {REASONS['not_joined']}\n")
+            return
+        from . import remote
+        forward = {**remote.headers(agent_id, credential), "accept-encoding": "identity"}
+        query = (scope.get("query_string") or b"").decode("latin-1")
+        url = origin.rstrip("/") + "/wait/" + token + ("?quiet=1" if "quiet=1" in query.split("&") else "")
+        client_http = owner._http()
+        timeout = httpx.Timeout(connect=10.0, read=None, write=30.0, pool=10.0)
+        try:
+            upstream = await client_http.send(client_http.build_request("GET", url, headers=forward, timeout=timeout),
+                                              stream=True)
+        except (httpx.HTTPError, OSError):
+            await plain(send, 502, f"[anx] {REASONS['offline']}\n")
+            return
+        try:
+            if upstream.status_code != 200:
+                await upstream.aread()
+                await plain(send, upstream.status_code if upstream.status_code in (404, 423, 429) else 502,
+                            NOT_FOUND if upstream.status_code == 404 else f"[anx] gateway: {upstream.status_code}\n")
+                return
+            await send({"type": "http.response.start", "status": 200, "headers": list(PLAIN_HEADERS)})
+
+            async def pump() -> None:
+                async for chunk in upstream.aiter_bytes():
+                    await send({"type": "http.response.body", "body": chunk, "more_body": True})
+
+            streaming = asyncio.ensure_future(pump())
+            watcher = asyncio.ensure_future(watch_disconnect(receive))
+            try:
+                await asyncio.wait({streaming, watcher}, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                for task in (streaming, watcher):
+                    if not task.done():
+                        task.cancel()
+                for task in (streaming, watcher):
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await task
+            if streaming.done() and not streaming.cancelled():
+                tail = b"" if streaming.exception() is None else "\n[anx] gateway connection lost; job may still be running\n".encode()
+                with contextlib.suppress(Exception):
+                    await send({"type": "http.response.body", "body": tail})
+        finally:
+            with contextlib.suppress(Exception):
+                await upstream.aclose()

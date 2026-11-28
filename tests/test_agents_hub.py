@@ -891,3 +891,13 @@ def test_devices_cli_hint_example_for_powershell():
     text = hub_mod.devices_cli_hint(kind="claude", adapter="claude-stream", permission="ask", runnable=True,
                                     local_state="ready", windows=True)
     assert "anx exec nas --stdin <<'EOF'" in text and "OutputEncoding" not in text
+
+
+def test_devices_cli_hint_names_run_in_background_only_for_claude():
+    claude = hub_mod.devices_cli_hint(kind="claude", adapter="claude-stream", permission="ask", runnable=True,
+                                      local_state="ready")
+    assert "run_in_background" in claude
+    for kind, adapter in (("codex", "codex-exec"), ("gemini", "acp")):
+        text = hub_mod.devices_cli_hint(kind=kind, adapter=adapter, permission="full", runnable=True,
+                                        local_state="ready")
+        assert "run_in_background" not in text and "--detach" in text and "anx wait" in text

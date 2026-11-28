@@ -132,9 +132,9 @@ def test_the_writer_runs_as_the_cli_user(tmp_path):
 # -- the decision table ------------------------------------------------------------------------------------------
 
 class FakeLocal:
-    def __init__(self, state="ready", auto=True, url=URL):
+    def __init__(self, state="ready", auto=True, url=URL, extended_wait=False):
         self._state, self.url = state, url
-        self.settings = {"enabled": True, "auto_config": auto, "peers": "any"}
+        self.settings = {"enabled": True, "auto_config": auto, "peers": "any", "extended_wait": extended_wait}
 
     def state(self):
         return self._state
@@ -150,9 +150,10 @@ def link(tmp_path, local=None, kinds=("codex", "gemini", "claude")):
     defs = {kind: types.SimpleNamespace(kind=kind) for kind in kinds}
     writes = []
 
-    def writer(account, kind, url, *, remove=False, drop_empty=False):
+    def writer(account, kind, url, *, remove=False, drop_empty=False, timeout=mcp_link.STANDARD):
         writes.append((kind, "remove" if remove else "add", url))
-        return mcp_link.write(kind, url, remove=remove, home=home, env=env, drop_empty=drop_empty, use_cli=False)
+        return mcp_link.write(kind, url, remove=remove, home=home, env=env, drop_empty=drop_empty, use_cli=False,
+                              timeout=timeout)
     lk = mcp_link.MCPLink(tmp_path, local_mcp=local or FakeLocal(), accounts=lambda: [None],
                           definitions=lambda: defs, gateway_host=lambda: "gw.example", writer=writer,
                           locate=lambda d, e: "/usr/bin/" + d.kind)
@@ -406,3 +407,179 @@ def test_config_files_saved_with_a_bom_are_read(tmp_path):
     for kind in ("codex", "gemini"):
         found = mcp_probe.nexus_entries(kind, home, env_for(home), "gw.example", "http://127.0.0.1:8399/mcp")
         assert found["local"] == ["agent-nexus"], kind
+
+
+# -- 延长 MCP 等待 (mcp_local.extended_wait) ---------------------------------------------------------------------
+
+WAIT_URL = URL + "?wait_max=86100"
+
+
+def codex_entry(home):
+    return tomllib.loads((home / ".codex" / "config.toml").read_text())["mcp_servers"]["agent-nexus"]
+
+
+def gemini_entry(home):
+    return json.loads((home / ".gemini" / "settings.json").read_text())["mcpServers"]["agent-nexus"]
+
+
+def set_codex_timeout(home, value):
+    path = home / ".codex" / "config.toml"
+    lines = [line for line in path.read_text().splitlines(keepends=True) if not line.startswith("tool_timeout_sec")]
+    if value is not None:
+        at = next(n for n, line in enumerate(lines) if line.startswith("url = ")) + 1
+        lines.insert(at, f"tool_timeout_sec = {value}\n")
+    path.write_text("".join(lines))
+
+
+def codex_link(tmp_path, *, extended_wait):
+    local = FakeLocal(extended_wait=extended_wait)
+    lk, home, writes = link(tmp_path, local=local, kinds=("codex",))
+    lk.probe.put("user", "codex", {"state": "absent", "connectors": [], "source": "probe"})
+    return lk, home, local
+
+
+def test_extended_wait_on_and_off_round_trips_to_the_original(tmp_path):
+    lk, home, local = codex_link(tmp_path, extended_wait=True)
+    done = run(lk.reconcile("t"))
+    assert [d["action"] for d in done] == ["add"]  # one write when added while on
+    entry = codex_entry(home)
+    assert entry["url"] == WAIT_URL and entry["tool_timeout_sec"] == 86400
+    assert lk.owned.get("user", "codex")["wait"]["original"] == 900
+    assert lk.view("codex", None)["state"] == "local" and lk.view("codex", None)["wait"]["state"] == "on"
+    assert run(lk.reconcile("again")) == []  # decide() compares without the query: no endless update
+    local.settings["extended_wait"] = False
+    done = run(lk.reconcile("off"))
+    assert [d["action"] for d in done] == ["wait"]
+    entry = codex_entry(home)
+    assert entry == {"url": URL, "tool_timeout_sec": 900, "default_tools_approval_mode": "approve"}
+    assert "wait" not in lk.owned.get("user", "codex")
+    assert run(lk.reconcile("again")) == []
+
+
+def test_an_absent_original_is_removed_again(tmp_path):
+    lk, home, local = codex_link(tmp_path, extended_wait=False)
+    run(lk.reconcile("t"))
+    set_codex_timeout(home, None)  # the user took the key out
+    assert run(lk.reconcile("t")) == []  # the timeout key is never "outdated"
+    local.settings["extended_wait"] = True
+    run(lk.reconcile("on"))
+    assert codex_entry(home)["tool_timeout_sec"] == 86400
+    assert lk.owned.get("user", "codex")["wait"]["absent"] is True
+    local.settings["extended_wait"] = False
+    run(lk.reconcile("off"))
+    assert "tool_timeout_sec" not in codex_entry(home) and codex_entry(home)["url"] == URL
+
+
+def test_a_value_the_user_changed_while_on_is_left_alone(tmp_path):
+    lk, home, local = codex_link(tmp_path, extended_wait=True)
+    run(lk.reconcile("t"))
+    set_codex_timeout(home, 1234)
+    assert run(lk.reconcile("t")) == []
+    assert codex_entry(home)["tool_timeout_sec"] == 1234
+    assert lk.view("codex", None)["wait"] == {"state": "modified", "value": 1234, "seconds": 1234}
+    # a port change keeps the user's value (and our query)
+    local.url = URL2
+    done = run(lk.reconcile("port"))
+    assert done[0]["action"] == "update"
+    assert codex_entry(home)["url"] == URL2 + "?wait_max=86100" and codex_entry(home)["tool_timeout_sec"] == 1234
+    # off: not restored, reported; the URL loses the query (a server cap above the client's would fail calls)
+    local.settings["extended_wait"] = False
+    run(lk.reconcile("off"))
+    assert codex_entry(home) == {"url": URL2, "tool_timeout_sec": 1234, "default_tools_approval_mode": "approve"}
+    assert lk.view("codex", None)["wait"]["state"] == "unrestored"
+    # on again: whatever is there now is the original
+    local.settings["extended_wait"] = True
+    run(lk.reconcile("on"))
+    assert codex_entry(home)["tool_timeout_sec"] == 86400 and lk.owned.get("user", "codex")["wait"]["original"] == 1234
+    local.settings["extended_wait"] = False
+    run(lk.reconcile("off"))
+    assert codex_entry(home)["tool_timeout_sec"] == 1234
+
+
+def test_gemini_uses_milliseconds_and_claude_is_untouched(tmp_path):
+    local = FakeLocal(extended_wait=True)
+    lk, home, writes = link(tmp_path, local=local, kinds=("gemini", "claude"))
+    lk.probe.put("user", "claude", {"state": "absent", "connectors": [], "source": "probe"})
+    run(lk.reconcile("t"))
+    assert gemini_entry(home) == {"httpUrl": WAIT_URL, "timeout": 86400000, "trust": True}
+    claude = json.loads((home / ".claude.json").read_text())["mcpServers"]["agent-nexus"]
+    assert claude == {"type": "http", "url": URL}
+    local.settings["extended_wait"] = False
+    run(lk.reconcile("off"))
+    assert gemini_entry(home) == {"httpUrl": URL, "timeout": 900000, "trust": True}
+
+
+def test_a_users_timeout_is_no_longer_put_back_to_900(tmp_path):
+    lk, home, local = codex_link(tmp_path, extended_wait=False)
+    run(lk.reconcile("t"))
+    set_codex_timeout(home, 60)
+    assert run(lk.reconcile("t")) == []
+    assert codex_entry(home)["tool_timeout_sec"] == 60
+
+
+def test_remove_accepts_our_url_with_the_query_and_the_child_gets_the_timeout(tmp_path):
+    lk, home, local = codex_link(tmp_path, extended_wait=True)
+    run(lk.reconcile("t"))
+    removed = run(lk.action("codex", None, "remove"))
+    assert removed["result"]["ok"] and "agent-nexus" not in (home / ".codex" / "config.toml").read_text()
+    seen = {}
+
+    def runner(argv, env, *, run_as, timeout):
+        seen["argv"] = argv
+        return 0, json.dumps({"ok": True}) + "\n", ""
+    account = types.SimpleNamespace(env=lambda: {}, popen_args=lambda: {})
+    mcp_link.write_as(account, "codex", WAIT_URL, timeout=86400, runner=runner)
+    assert seen["argv"][-2:] == ["--timeout", "86400"]
+    mcp_link.write_as(account, "codex", URL, timeout=None, runner=runner)
+    assert seen["argv"][-1] == "--no-timeout"
+
+
+def test_the_wait_step_keeps_keys_the_user_added_to_our_entry(tmp_path):
+    # an entry written before 延长 MCP 等待 existed, with the user's own keys: turning it on (the first reconcile
+    # after the upgrade) and off sets only url and the timeout, in place
+    lk, home, local = codex_link(tmp_path, extended_wait=False)
+    run(lk.reconcile("t"))
+    path = home / ".codex" / "config.toml"
+    text = path.read_text()
+    text = text.replace("default_tools_approval_mode", "enabled = false  # mine\nstartup_timeout_sec = 30\n"
+                                                       "default_tools_approval_mode")
+    text += '\n[mcp_servers.agent-nexus.env]\nFOO = "bar"\n'
+    path.write_text(text)
+    local.settings["extended_wait"] = True
+    assert [d["action"] for d in run(lk.reconcile("on"))] == ["wait"]
+    entry = codex_entry(home)
+    assert entry["url"] == WAIT_URL and entry["tool_timeout_sec"] == 86400
+    assert entry["enabled"] is False and entry["startup_timeout_sec"] == 30 and entry["env"] == {"FOO": "bar"}
+    assert "enabled = false  # mine" in path.read_text()
+    local.settings["extended_wait"] = False
+    run(lk.reconcile("off"))
+    entry = codex_entry(home)
+    assert entry["url"] == URL and entry["tool_timeout_sec"] == 900
+    assert entry["enabled"] is False and entry["env"] == {"FOO": "bar"}
+
+    # Gemini: the same for includeTools / headers
+    local = FakeLocal(extended_wait=False)
+    (tmp_path / "g").mkdir()
+    glk, ghome, _writes = link(tmp_path / "g", local=local, kinds=("gemini",))
+    run(glk.reconcile("t"))
+    settings = ghome / ".gemini" / "settings.json"
+    data = json.loads(settings.read_text())
+    data["mcpServers"]["agent-nexus"]["includeTools"] = ["exec_command"]
+    settings.write_text(json.dumps(data))
+    local.settings["extended_wait"] = True
+    run(glk.reconcile("on"))
+    assert gemini_entry(ghome) == {"httpUrl": WAIT_URL, "timeout": 86400000, "trust": True,
+                                   "includeTools": ["exec_command"]}
+
+
+def test_an_absent_timeout_is_removed_in_place(tmp_path):
+    lk, home, local = codex_link(tmp_path, extended_wait=False)
+    run(lk.reconcile("t"))
+    set_codex_timeout(home, None)
+    path = home / ".codex" / "config.toml"
+    path.write_text(path.read_text().replace("default_tools_approval_mode", "enabled = true\ndefault_tools_approval_mode"))
+    local.settings["extended_wait"] = True
+    run(lk.reconcile("on"))
+    local.settings["extended_wait"] = False
+    run(lk.reconcile("off"))
+    assert codex_entry(home) == {"url": URL, "enabled": True, "default_tools_approval_mode": "approve"}

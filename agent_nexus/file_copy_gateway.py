@@ -219,9 +219,12 @@ class FileCopyService:
             raise RoutingError("job_id is unknown; it is returned by file_copy")
         return job_id.split(":", 1)[0]
 
-    async def status(self, job_id: str, wait_ms: int = 0) -> dict:
+    async def status(self, job_id: str, wait_ms: int = 0, cap_ms: int | None = None) -> dict:
+        """``cap_ms``: this caller's wait cap (``?wait_max=`` on its MCP URL, or a wait URL's segment);
+        the device is asked in segments of ``DEVICE_WAIT_MAX_MS`` either way."""
         runner = self._runner(job_id)
-        wait_ms = max(0, min(int(wait_ms or 0), int(getattr(self, "wait_max_ms", STATUS_WAIT_MAX_MS))))
+        cap = int(getattr(self, "wait_max_ms", STATUS_WAIT_MAX_MS)) if cap_ms is None else int(cap_ms)
+        wait_ms = max(0, min(int(wait_ms or 0), cap))
         loop = asyncio.get_running_loop()
         deadline = loop.time() + wait_ms / 1000.0
         if runner == "gateway":

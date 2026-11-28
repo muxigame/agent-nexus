@@ -16,6 +16,7 @@
 ; install-mode registry value) stays per-user when the in-app updater runs the installer passively.
 ; The all-users core updates itself with an explicit /AllUsers (agent_nexus/linux_update.py).
 !define MULTIUSER_INSTALLMODE_DEFAULT_CURRENTUSER
+!include WinMessages.nsh  ; WM_SETTINGCHANGE: open Explorer windows pick up the PATH that --install-cli changed
 
 !macro ANX_SHUTDOWN_MANAGER
   IfFileExists "$INSTDIR\agent-nexus.exe" 0 +3
@@ -58,15 +59,29 @@
       DetailPrint "运行环境未能全部准备好（$0），首次打开 Agent Nexus 时会自动补全。"
     ${EndIf}
   ${EndIf}
+  ; anx for the owner's own terminals: $INSTDIR\bin (anx.exe only) appended to this install scope's PATH
+  ; (cli_path.rs; also refreshes the copy after an update). Terminals opened from now on find it.
+  nsExec::ExecToLog '"$INSTDIR\agent-nexus.exe" --install-cli'
+  Pop $0
+  SendMessage ${HWND_BROADCAST} ${WM_SETTINGCHANGE} 0 "STR:Environment" /TIMEOUT=5000
+  ${If} $0 == 0
+    DetailPrint "新开的终端里可以直接运行 anx"
+  ${EndIf}
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL
   ; A real uninstall: the running core first removes the agent-nexus entries it wrote into the CLIs' own MCP
   ; config (as each CLI's user), so no CLI is left pointing at a dead http://127.0.0.1:<port>/mcp.
   ${If} $UpdateMode <> 1
-    IfFileExists "$INSTDIR\agent-nexus.exe" 0 +3
+    ; (LogicLib, not a relative jump: a plugin call such as nsExec::Exec is several instructions)
+    ${If} ${FileExists} "$INSTDIR\agent-nexus.exe"
       DetailPrint "Removing the Agent Nexus MCP entries from the CLIs' config..."
       ExecWait '"$INSTDIR\agent-nexus.exe" --unlink-mcp'
+      ; and the PATH entry --install-cli added (only that one)
+      nsExec::Exec '"$INSTDIR\agent-nexus.exe" --remove-cli'
+      Pop $0
+    ${EndIf}
+    SendMessage ${HWND_BROADCAST} ${WM_SETTINGCHANGE} 0 "STR:Environment" /TIMEOUT=5000
   ${EndIf}
   ${If} $MultiUser.InstallMode == "AllUsers"
     ${If} $UpdateMode <> 1
@@ -84,6 +99,13 @@
   ; An update keeps the user's autostart choice; a real uninstall removes it.
   ${If} $UpdateMode <> 1
     DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "Agent Nexus"
+    ; the anx folder (the uninstaller only removes the files it installed itself)
+    Delete "$INSTDIR\bin\anx.exe"
+    Delete "$INSTDIR\bin\anx.exe.old"
+    Delete "$INSTDIR\bin\anx.exe.new"
+    Delete "$INSTDIR\bin\anx"
+    Delete "$INSTDIR\bin\anx.cmd"
+    RMDir "$INSTDIR\bin"
   ${EndIf}
   ${If} $DeleteAppDataCheckboxState = 1
   ${AndIf} $UpdateMode <> 1

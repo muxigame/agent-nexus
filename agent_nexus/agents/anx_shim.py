@@ -1,7 +1,8 @@
 """A private ``anx`` for the CLIs our chat starts: ``<run tmpdir>/.bin/anx``, first on the run's PATH.
 
-Installed clients never put ``anx`` on PATH (Windows and macOS run the runtime venv's python directly, the deb ships
-only ``agent-nexus``), and the venv's own bin folder must not be put there either: its ``python`` and dependency
+The owner's own terminals get ``anx`` from the installers (Windows ``<install dir>\\bin``, the deb's ``/usr/bin/anx``,
+macOS ``<root>/bin/anx`` linked by the console, agent_nexus/owner_cli.py), but a run cannot rely on those, and the
+venv's own bin folder must not be put on PATH either: its ``python`` and dependency
 scripts would shadow the user's tools. So each run gets a folder holding only ``anx``, pointing at this very client
 (its python, its root):
 
@@ -33,6 +34,29 @@ NO_PATHCONV = "export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'\n"
 
 def _sh_quote(value: str) -> str:
     return "'" + value.replace("'", "'\"'\"'") + "'"
+
+
+#: The extensionless ``anx`` beside a copied ``anx.exe`` (Git Bash runs it; PowerShell and cmd.exe ignore it). The
+#: desktop shell writes the same text into ``<install dir>\\bin`` (desktop/src-tauri/src/cli_path.rs, GIT_BASH_SHIM).
+GIT_BASH_SHIM = "#!/bin/sh\n" + NO_PATHCONV + 'exec "${0%/*}/anx.exe" "$@"\n'
+
+
+def owner_script(root: str | os.PathLike) -> str:
+    """``<root>/bin/anx`` for the owner's own terminals (macOS, see agent_nexus/owner_cli.py): reads
+    ``runtime/current`` on every run, so it never names a runtime an update pruned."""
+    quoted = _sh_quote(str(root))
+    return ("#!/bin/sh\n"
+            "# Agent Nexus: anx in your terminal (written by the app; the console's 移除 takes the link away;\n"
+            "# deleting the app does not: then remove the link to this file by hand)\n"
+            f"root={quoted}\n"
+            'tag=$(cat "$root/runtime/current" 2>/dev/null)\n'
+            'case "$tag" in ""|*/*|*..*) tag="" ;; esac\n'
+            'py="$root/runtime/$tag/.venv/bin/python"\n'
+            'if [ -z "$tag" ] || [ ! -x "$py" ]; then\n'
+            '  echo "anx: 找不到 Agent Nexus 运行环境，请先打开 Agent Nexus（已删除 Agent Nexus 的话，rm \\"$0\\" 移除这个命令）" >&2\n'
+            '  exit 127\n'
+            'fi\n'
+            'exec "$py" -P -m agent_nexus.cli --root "$root" "$@"\n')
 
 
 def launcher_exe(python: str | None = None) -> Path | None:
@@ -73,7 +97,7 @@ def write(tmpdir: str | os.PathLike, root: str | os.PathLike, *, python: str | N
             exe = launcher_exe(python)
             if exe is not None:
                 shutil.copyfile(exe, folder / "anx.exe")
-                script.write_text("#!/bin/sh\n" + NO_PATHCONV + 'exec "${0%/*}/anx.exe" "$@"\n', encoding="utf-8")
+                script.write_text(GIT_BASH_SHIM, encoding="utf-8")
                 return str(folder)
             (folder / "anx.cmd").write_text(
                 f'@"{python}" -P -m agent_nexus.cli --root "{root}" %*\r\n', encoding="utf-8")

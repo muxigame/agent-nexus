@@ -107,6 +107,7 @@ class VerificationTests(unittest.TestCase):
             entries[prefix + name] = self.source[src], 0o644 if name == "startup.html" else 0o755
         entries.update({
             "usr/bin/agent-nexus": (b'#!/bin/sh\nexec /usr/lib/agent-nexus/agent-nexus "$@"\n', 0o755),
+            "usr/bin/anx": (b'#!/bin/sh\nexec /usr/lib/agent-nexus/agent-nexus anx "$@"\n', 0o755),
             "usr/share/applications/agent-nexus.desktop": (self.source["packaging/ubuntu/agent-nexus.desktop"], 0o644),
             "usr/share/icons/hicolor/128x128/apps/agent-nexus.png": (b"icon", 0o644),
         })

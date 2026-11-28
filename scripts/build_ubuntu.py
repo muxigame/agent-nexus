@@ -106,6 +106,9 @@ def build(uv, out, enrollment=None, offline=False):
     for filename in ("ubuntu_launcher.py", LAUNCHER):
         entries[LIB + filename] = ((ROOT / "packaging/ubuntu" / filename).read_bytes(), 0o755)
     entries["usr/bin/" + LAUNCHER] = (f'#!/bin/sh\nexec /{LIB}{LAUNCHER} "$@"\n'.encode(), 0o755)
+    # `anx` in the owner's own terminals: exactly `agent-nexus anx ...` (device commands as the caller, the rest
+    # through sudo); dpkg owns it, so remove/purge takes it away.
+    entries["usr/bin/anx"] = (f'#!/bin/sh\nexec /{LIB}{LAUNCHER} anx "$@"\n'.encode(), 0o755)
     entries[LIB + "startup.html"] = ((ROOT / "desktop/dist/index.html").read_bytes(), 0o644)
     # System mode (ubuntu_launcher.py): the core as a root service, the session helper per login.
     entries["usr/lib/systemd/system/agent-nexus.service"] = ((ROOT / "packaging/ubuntu/agent-nexus.service").read_bytes(), 0o644)

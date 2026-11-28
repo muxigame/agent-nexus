@@ -289,7 +289,7 @@ pub(crate) fn start_core(root: &Path) -> Result<Child, String> {
     let started = Instant::now();
     if let Ok(url) = configured_url(root) {
         while started.elapsed() < Duration::from_secs(120) {
-            if ping(&url).is_some() { prune_runtimes(root); break; }
+            if ping(&url).is_some() { prune_runtimes(root); crate::cli_path::refresh(); break; }
             thread::sleep(Duration::from_secs(1));
         }
     }
@@ -694,7 +694,11 @@ fn bootstrap(app: AppHandle, override_url: Option<Url>) {
             }
             let target = override_url.unwrap_or(configured_url(&root)?);
             *app.state::<StartupState>().target.lock().unwrap() = target.to_string();
-            if let Some(info) = ping(&target) { ready(&app, &target, info); return Ok(()); }
+            if let Some(info) = ping(&target) {
+                if versioned { thread::spawn(crate::cli_path::refresh); }  // anx on PATH (cli_path.rs)
+                ready(&app, &target, info);
+                return Ok(());
+            }
             let uv = ensure_uv(&project)?;
             progress(&app, 2, "正在准备 Python 环境（通常已由安装程序完成）…", Some(&root), "", false, started.elapsed().as_secs());
             let log = root.join(STARTUP_LOG);
@@ -715,7 +719,7 @@ fn bootstrap(app: AppHandle, override_url: Option<Url>) {
                 if let Some(info) = ping(&target) {
                     ready(&app, &target, info);
                     *app.state::<StartupState>().bootstrap_pid.lock().unwrap() = None;
-                    if versioned { prune_runtimes(&root); }
+                    if versioned { prune_runtimes(&root); thread::spawn(crate::cli_path::refresh); }
                     return Ok(());
                 }
                 let logs = tail(&log);
@@ -1021,6 +1025,15 @@ pub fn run() {
     if let Some(root) = &parsed.root {
         let root = if root.is_absolute() { root.clone() } else { env::current_dir().map(|cwd| cwd.join(root)).unwrap_or_else(|_| root.clone()) };
         let _ = ROOT_ARG.set(root);
+    }
+    if args.iter().any(|value| value == "--install-cli") {
+        // The installer, after the runtime is prepared (both install modes, and after every update): `anx` for
+        // the owner's own terminals in <install dir>\bin, appended to PATH (cli_path.rs). Never fails the install.
+        std::process::exit(if crate::cli_path::install() == 0 { 0 } else { 2 });
+    }
+    if args.iter().any(|value| value == "--remove-cli") {
+        crate::cli_path::remove();
+        std::process::exit(0);
     }
     if args.iter().any(|value| value == "--unlink-mcp") {
         // The uninstaller, before the service / manager stops: the running core removes the agent-nexus entries

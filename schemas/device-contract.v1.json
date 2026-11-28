@@ -55,7 +55,7 @@
     }
   },
   "x-anx-core-capabilities": ["info", "notify", "files", "time"],
-  "x-anx-optional-tools": {"exec": ["exec_wait"]},
+  "x-anx-optional-tools": {"exec": ["exec_wait", "exec_tail"]},
   "x-anx-standard-tools": {
     "info": ["device_info"],
     "notify": ["notify"],

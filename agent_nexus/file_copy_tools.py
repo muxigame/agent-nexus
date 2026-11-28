@@ -23,6 +23,27 @@ COPY_CANCEL = ToolAnnotations(read_only_hint=False, destructive_hint=False, open
 FILE_COPY_TOOL_NAMES = ("file_copy", "file_copy_status", "file_copy_cancel", "file_copy_list")
 
 
+def with_wait_url(gateway: "Gateway", result: dict) -> dict:
+    """A running job's result also carries a wait URL (wait_urls.py): ``curl -sN <url>``.
+    A finished one starts the expiry of the URLs handed out for it ('unknown' is usually a
+    device that is reconnecting: those URLs live on, at most IDLE_MAX_S after their last use)."""
+    from .file_copy import TERMINAL
+    from .wait_urls import wait_hint
+    job_id = result.get("job_id") if isinstance(result, dict) else None
+    if not isinstance(job_id, str):
+        return result
+    agent_id = job_id.split(":", 1)[0]
+    if result.get("state") in TERMINAL:
+        gateway.wait_urls.ended("copy", agent_id, job_id=job_id)
+        return result
+    if result.get("state") == "unknown":
+        return result
+    url = gateway.wait_url("copy", agent_id=agent_id, job_id=job_id)
+    if url:
+        result = {**result, "wait_url": url, "wait_hint": wait_hint(url, windows=gateway.caller_windows())}
+    return result
+
+
 def register(server: "FastMCP", gateway: "Gateway") -> None:
     service = gateway.file_copy
 
@@ -35,17 +56,19 @@ def register(server: "FastMCP", gateway: "Gateway") -> None:
         (~ = its home); a dst_path ending in a separator copies into that folder. Calling it again with the
         same arguments resumes or syncs (nothing is deleted). Details: docs/design.md §18."""
         await gateway._touch(workspace_id)
-        return await service.start(src_device, src_path, dst_device, dst_path, overwrite=overwrite, route=route,
-                                   concurrency=concurrency)
+        return with_wait_url(gateway, await service.start(src_device, src_path, dst_device, dst_path, overwrite=overwrite,
+                                                 route=route, concurrency=concurrency))
 
     @server.tool(title="Check a file copy", annotations=COPY_READ_ONLY)
     async def file_copy_status(job_id: str, wait_ms: int = 0, workspace_id: str | None = None) -> dict:
-        """Progress of a file_copy job (state, files, bytes, errors); wait_ms (max 50000) waits for it to end.
+        """Progress of a file_copy job (state, files, bytes, errors); wait_ms (max 50000 unless this client
+        allows longer waits) waits for it to end; a running job also returns wait_hint (run it in your shell to wait).
         After interrupted, failed or unknown: run the same file_copy again to resume."""
         await gateway._touch(workspace_id)
         from .gateway import progress_heartbeat
         async with progress_heartbeat("file_copy_status"):
-            return await service.status(job_id, wait_ms)
+            cap_ms = int(gateway.client_wait_max_s() * 1000) if gateway.client_wait_max_s() > 50 else None
+            return with_wait_url(gateway, await service.status(job_id, wait_ms, cap_ms=cap_ms))
 
     @server.tool(title="Cancel a file copy", annotations=COPY_CANCEL)
     async def file_copy_cancel(job_id: str, workspace_id: str | None = None) -> dict:

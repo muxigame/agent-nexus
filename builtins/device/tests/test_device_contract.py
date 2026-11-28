@@ -69,7 +69,7 @@ async def test_legacy_tool_names_annotations_and_schemas_are_kept(server):
             assert properties[prop].get("type", properties[prop].get("anyOf")) == kind, f"{name}.{prop} retyped"
     added = set(tools) - set(LEGACY)
     assert added == {"device_info", "notify", "file_list", "file_stat", "file_read", "file_write", "agent_sessions",
-                     "edit_file", "exec_wait", "patch_file", "file_glob", "file_grep"}
+                     "edit_file", "exec_wait", "exec_tail", "patch_file", "file_glob", "file_grep"}
 
 
 @pytest.mark.parametrize("platform_name", ["windows", "linux", "darwin"])

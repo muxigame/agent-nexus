@@ -422,6 +422,8 @@ def exec_fields(result: dict) -> dict:
         if fields.get("status") == "error" or result.get("isError"):
             raise ToolFailure(re.sub(r"^\[[^\]]*\]\s*", "", text) or str(fields.get("error") or "命令失败"))
         head, _, output = text.partition("\n")
+        if fields.get("wait_url") and output.startswith("wait: "):  # the wait URL line of a running job
+            output = output.partition("\n")[2]
         if output == "(no output)" and not fields.get("original_token_count"):
             output = ""
         fields["output"] = output

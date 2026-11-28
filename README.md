@@ -415,6 +415,17 @@ anx-gateway plugin-repo add|list|remove --config <gateway.json> [x.zip | <name> 
 
 管理器在跑时命令走它的本地接口；没在跑时直接操作进程，之后 `anx serve` 会接管这些进程。迁移和凭据恢复的细节见 `docs/migration.md`。
 
+### 长命令的等待地址（wait URL）
+
+`exec_command` / `exec_wait` 返回“仍在运行”时（`file_copy` / `file_copy_status` 的任务还没结束时也一样），结果里多一行 `wait: curl -sN <地址>`（经 Windows 设备的本机 MCP 时是 `curl.exe -sN <地址>`）：用自己的 shell 访问这个地址，就会以纯文本持续输出这个任务的输出，直到它结束，最后一行是 `[anx] exit <退出码>`（复制任务是 `[anx] copy done: …` 或 `[anx] copy failed: …`）。没有安装 Agent Nexus 客户端、只有 shell 的 MCP 客户端（如云端 Agent）也能这样等上几个小时，不用轮询；支持后台任务的客户端可以把它放到后台。Windows PowerShell 里 `curl` 是 Invoke-WebRequest 的别名，要写 `curl.exe -sN <地址>`。
+
+- 经本机 MCP 拿到的地址是回环地址 `http://127.0.0.1:<端口>/wait/…`（本机客户端带上设备凭据转给网关）；直接连网关拿到的是网关的公开地址。
+- 地址本身就是凭据：随机令牌（192 位），只能读这一个任务的输出；任务结束 10 分钟后失效（没人看到它结束时，最后一次使用 24 小时后失效；最长 7 天）。经设备本机 MCP 取得的地址只有那台设备（带它的凭据）能用，设备锁定或被吊销后立即失效，解锁后再拿到的是新地址，旧地址不会恢复。网关重启后旧地址失效，再调一次 `exec_wait` 会得到新地址。
+- 读取不会“取走”输出：MCP 客户端之后的 `exec_wait` 照样拿到全部新输出；有人在等的任务不会因为闲置 1 小时被清理。
+- 长时间没有输出时，每 50 秒写一行 `[anx] still running (12m)`，免得代理切断连接；加 `?quiet=1` 不写。
+- **怎样算结束**：只有最后一行是 `[anx] exit <退出码>`、`[anx] killed (signal N)`、`[anx] ended …`、`[anx] copy done: …`、`[anx] copy failed/cancelled/interrupted/unknown: …`、`[anx] job ended or unknown …`、`[anx] device offline …`、`[anx] revoked` 或 `[anx] error: …` 时，这个地址才算结束。最后一行是 `[anx] still running …`、复制进度 `[anx] copying 3/10 files, …`，或者什么都没有（代理或网络切断了连接，`curl` 照样以 0 退出），就用同一个地址再运行一次 `curl`：它从上次输出到的地方接着输出（新设备；旧设备从拿到地址时开始）。设备短暂断线（几分钟内重连）不会结束输出，期间照常写 `still running`。`[anx] not found or expired` 表示地址已失效（过期、网关重启、设备锁定后重新解锁），改用 `exec_wait` / `file_copy_status`，或拿新的地址。
+- 网关的访问日志里令牌显示为 `/wait/***`；网关前面的 nginx 也应如此（见 deploy/gateway/README.md）。
+
 ### 在命令行操作其他设备（anx devices / exec / wait / kill / cp）
 
 这几个命令只和**本机正在运行的客户端**通信（回环地址上的本机 MCP），由客户端经现有线路（直连、中转设备、网关中转）去操作其他设备；不需要任何凭据，锁定、吊销和网关主人的“设备接入”开关照常生效（对本机 `.` 也一样）。设备写显示名（不区分大小写）或设备 ID，`.` 或省略表示本机；本机不经过网关（本机 MCP 的 `/mcp/self`），没加入网关时也能用，以设备插件的执行账户运行（与本机 MCP 已经允许的相同）。
@@ -436,7 +447,7 @@ EOF
 - **引号和 `$`**：不加 `--stdin` 时，`--` 后面的参数先经本地 shell 展开，再用空格连成一条命令交给远程 shell（同 ssh），所以 `$HOME`、`*`、引号会被解析两遍。命令里有引号、`$`、反斜杠或通配符时用 `--stdin` 从标准输入传命令原文（bash/zsh 用 `<<'EOF'` here-doc；PowerShell 用多行 here-string：`@'` 结束第一行、`'@` 开始最后一行，再 `| anx exec nas --stdin`）。Windows PowerShell 5.1 通过管道传非 ASCII 字符时会悄悄变成 `?`，先执行 `$OutputEncoding = [Text.UTF8Encoding]::new()`（PowerShell 7 不需要）。cmd.exe 没有 here-doc：把命令写进文件，`anx exec nas --stdin < cmd.txt`。
 - **Git Bash（Windows）**：Git Bash 会把传给原生程序的 `/srv/app` 这类参数改写成 `C:/Program Files/Git/srv/app`。对话里启动的 CLI 用的 `anx` 已经关掉了这个转换；在自己的 Git Bash 里用 `MSYS_NO_PATHCONV=1 anx exec …`，或者用 `--stdin`（`--cwd` 等参数仍要加 `MSYS_NO_PATHCONV=1`）。远程命令的标准输入总是空的（读标准输入的命令不会卡住）。
 - **输出**：stdout 和 stderr 合并成一个流，原样写到 anx 的标准输出（不是终端时按 UTF-8 写，不带颜色）；anx 自己的提示和错误写到标准错误。每次取回的输出超过约 60000 个字符时中间会被截掉（会提示一次）；需要完整的大量输出时让命令写进远程文件，再用 `anx cp` 取回。
-- **等待和中断**：不加 `--detach` 时一直等到命令结束（服务端每次最多等 50 秒，anx 自己循环，只有 `--timeout` 决定等多久）。Ctrl+C 停止远程命令（连同子进程）后退出 130（`anx wait` 里也一样）；停不掉（设备离线、策略拒绝）时会说明并给出 `anx kill <会话>`；再按一次立即退出（命令可能仍在运行，提示里有 `anx kill`）。标准输出的读者先退出（`anx exec nas -- journalctl -f | head -20`）时同样停止远程命令，退出码 141（Windows 上 1）。
+- **等待和中断**：不加 `--detach` 时一直等到命令结束（服务端每次最多等 50 秒，anx 自己循环，只有 `--timeout` 决定等多久）。对话里的 Agent 跑长任务时，把 `anx exec` 作为自己 shell 的后台任务运行（如 Claude Code 的 run_in_background），不必反复轮询。Ctrl+C 停止远程命令（连同子进程）后退出 130（`anx wait` 里也一样）；停不掉（设备离线、策略拒绝）时会说明并给出 `anx kill <会话>`；再按一次立即退出（命令可能仍在运行，提示里有 `anx kill`）。标准输出的读者先退出（`anx exec nas -- journalctl -f | head -20`）时同样停止远程命令，退出码 141（Windows 上 1）。
 - **连接中断**：本机客户端重启或更新、网关或设备短暂断开时，`anx exec` / `anx wait` / `anx cp` 最多重试 60 秒；恢复后提示一次“中间可能缺了一段输出”（那段输出在途中丢了）；60 秒内没恢复就退出 251，并打印 `anx wait <会话>`（命令仍在设备上运行）或复制任务号。只有第一次就连不上时才报“客户端没有运行”（250）。`anx cp` 运行任务的设备暂时离线时同样等它回来；放弃时退出 6，任务可能仍在设备上运行——等它结束后再重新运行同一条命令续传，不要同时再开一个。会话在命令结束 10 分钟后（输出没取走时）或闲置 1 小时后清理。
 - **退出码**：
 
@@ -456,7 +467,7 @@ EOF
   | 255 | 协议或内部错误 |
 
   远程命令自己用 250–255 退出时与这些码重合；需要区分时看标准错误里 anx 的提示。
-- **哪里有 `anx`**：Agent Nexus 对话里启动的 CLI（Claude Code、Codex……）自动有：每次对话的临时目录里有一个只放 `anx` 的 `.bin`，放在 PATH 最前面，并设置 `ANX_CONSOLE_URL` 指向本机客户端（docs/agent-chat.md §5）。Codex 只有“完全访问”模式能用（其他模式的沙箱不允许连回环地址），只读模式和 API 模型不提示。自己的终端里：Ubuntu 用 `agent-nexus anx exec …`（不需要 sudo）；开发检出用 `uv run anx exec …`；Windows、macOS、Android 的安装包目前不往 PATH 里放 `anx`。客户端地址默认取 `ANX_CONSOLE_URL`，否则是根目录配置的 `manager.port`（默认 8399），也可以用 `--console http://127.0.0.1:<端口>` 指定。
+- **哪里有 `anx`**：Agent Nexus 对话里启动的 CLI（Claude Code、Codex……）自动有：每次对话的临时目录里有一个只放 `anx` 的 `.bin`，放在 PATH 最前面，并设置 `ANX_CONSOLE_URL` 指向本机客户端（docs/agent-chat.md §5）。Codex 只有“完全访问”模式能用（其他模式的沙箱不允许连回环地址），只读模式和 API 模型不提示。自己的终端里直接用 `anx`：Windows 安装时把 `<安装目录>\bin`（里面只有 anx 的启动器：`anx.exe`，以及给 Git Bash 用的同名 sh 脚本 `anx`；运行环境缺少 `anx.exe` 时改用 `anx.cmd`；不会遮住 python 等其他命令）加到 PATH 末尾，新开的终端生效（为所有用户安装时，`anx devices/exec/wait/kill/cp` 以外的命令要在管理员终端里运行；安装时运行环境没准备好的话，之后打开 Agent Nexus 时补上）；macOS 在本机控制台“设置 → 终端里的 anx”点“添加”（链接到你自己的 `~/.local/bin/anx`，或已在 PATH 上的 `~/bin`；`~/.local/bin` 不在 PATH 上时在 `~/.zprofile` 或 `~/.bash_profile` 里加一段带标记的 PATH 设置；不写 `/usr/local/bin` 这类所有账户共用的位置）；Ubuntu 装好即有 `/usr/bin/anx`（等同 `agent-nexus anx`，设备命令不需要 sudo）。Windows 和 Ubuntu 卸载时一并移除；macOS 没有卸载程序，删除应用前先在控制台点“移除”（会连 PATH 设置一起去掉），否则手动删除 `~/.local/bin/anx`（之后运行它也会提示怎么删）。开发检出用 `uv run anx exec …`；Android 不提供。客户端地址默认取 `ANX_CONSOLE_URL`，否则是根目录配置的 `manager.port`（默认 8399），也可以用 `--console http://127.0.0.1:<端口>` 指定。
 
 ## 行为约定
 

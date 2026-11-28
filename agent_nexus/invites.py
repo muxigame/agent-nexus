@@ -305,6 +305,10 @@ class Enrollment:
         self.store.revoke_device(agent_id)
         with contextlib.suppress(Exception):
             self.store.end_device_addresses(agent_id)
+        hook = getattr(self, "on_revoke", None)
+        if callable(hook):  # the gateway's wait URLs minted by this device die with its credential
+            with contextlib.suppress(Exception):
+                hook(agent_id)
         return {"agent_id": agent_id, "closed": False}
 
     async def revoke_device(self, agent_id: Any) -> dict:

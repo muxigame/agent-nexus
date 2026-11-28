@@ -10,6 +10,7 @@ import codecs
 import locale
 import math
 import os
+import secrets
 import shutil
 import signal
 import socket
@@ -30,6 +31,12 @@ from .policy import Policy
 MAX_WAIT_MS = 50_000
 DEFAULT_EXEC_WAIT_MS = 10_000
 DEFAULT_EXEC_WAIT_TIMEOUT_MS = 30_000
+#: Output kept with a finished session after its exit was collected, so a
+#: non-consuming reader (exec_tail, behind the gateway's wait URL) still gets the
+#: last part that exec_wait took.
+COMPLETED_TAIL_CHARS = 64_000
+#: Default and ceiling of one exec_tail answer, in characters.
+TAIL_MAX_CHARS = 60_000
 #: Environment variable that carries the command to a bash on Windows (see _shell_launch).
 CMD_ENV = "ANX_EXEC_CMD"
 # The variable is unset inside the evaluated text, so the command sees no extra
@@ -134,6 +141,19 @@ class _ExecHandle:
     finished: float | None = None
     shell: str | None = None
     stdin_task: asyncio.Task[None] | None = None
+    #: Random id of this process. Session ids restart at 1000 after a plugin
+    #: restart, so whoever must not mix two processes up (a wait URL) binds to this.
+    uid: str = field(default_factory=lambda: secrets.token_hex(8))
+    #: Set (and replaced) whenever output arrives or the process ends; waiters
+    #: take the current event before checking, so no wake-up is lost.
+    changed: asyncio.Event = field(default_factory=asyncio.Event)
+    #: Highest seq dropped from ``chunks`` by the buffer bound (0: nothing lost).
+    base_seq: int = 0
+    buffered: int = 0
+
+    def notify(self) -> None:
+        event, self.changed = self.changed, asyncio.Event()
+        event.set()
 
 
 class UnifiedExecManager:
@@ -262,7 +282,7 @@ class UnifiedExecManager:
         result = self._snapshot(handle, max_output_tokens, final=True)
         result["exit_code"] = proc.returncode
         result["shell"] = info.name
-        self._handles.pop(sid, None)
+        self._release(handle)
         self._close_pipes(proc)
         return result
 
@@ -348,6 +368,91 @@ class UnifiedExecManager:
         wait = DEFAULT_EXEC_WAIT_TIMEOUT_MS if timeout_ms is None else timeout_ms
         return self.write_stdin(session_id, "", yield_time_ms=wait, max_output_tokens=max_output_tokens)
 
+    async def exec_tail(self, session_id: int, job: str, since: int = 0,
+                        timeout_ms: float | None = None,
+                        max_chars: int | None = None) -> dict[str, Any]:
+        """Read output after ``since`` without consuming it (exec_wait still gets it).
+
+        Long-polls until there is output with a higher seq, the process exits,
+        or ``timeout_ms`` (at most the call cap). ``job`` must be the uid the
+        exec result carried, so a reused session id never shows another
+        process. Each call counts as use: a tailed job is not reaped as idle.
+        """
+        sid = int(session_id)
+        since = max(0, int(since or 0))
+        limit = TAIL_MAX_CHARS if not max_chars else max(1024, min(int(max_chars), TAIL_MAX_CHARS))
+        wait_ms = DEFAULT_EXEC_WAIT_TIMEOUT_MS if timeout_ms is None else float(timeout_ms)
+        deadline = time.monotonic() + min(max(wait_ms, 0), self.max_wait_ms) / 1000.0
+        handle = self._handles.get(sid)
+        if handle is None:
+            return self._tail_completed(sid, job, since, limit)
+        if handle.uid != str(job):
+            raise ValueError(f"exec session {sid} is a different job now")
+        while True:
+            handle.last_used = time.time()
+            event = handle.changed
+            exited = handle.proc.returncode is not None
+            if exited:
+                # Its pipes may still hold the last output: let the readers drain.
+                pending = [task for task in handle.reader_tasks if not task.done()]
+                if pending:
+                    await asyncio.wait(pending, timeout=max(0.0, min(5.0, deadline - time.monotonic())))
+            result = self._tail_slice(handle.chunks, handle.base_seq, handle.seq, since, limit)
+            if result["output"] or exited:
+                break
+            left = deadline - time.monotonic()
+            if left <= 0:
+                break
+            try:
+                await asyncio.wait_for(event.wait(), timeout=left)
+            except asyncio.TimeoutError:
+                pass
+            if self._handles.get(sid) is not handle:
+                return self._tail_completed(sid, job, since, limit)
+        handle.last_used = time.time()
+        code = handle.proc.returncode
+        done = code is not None and result["seq"] >= handle.seq
+        result["running"] = not done
+        result["session_id"] = sid
+        result["job"] = handle.uid
+        if done:
+            result["exit_code"] = code
+        return result
+
+    def _tail_completed(self, sid: int, job: str, since: int, limit: int) -> dict[str, Any]:
+        record = self._completed.get(sid)
+        if record is None or record.get("_job") != str(job):
+            raise KeyError(f"unknown exec job {job} (session {sid})")
+        chunks = record.get("_tail") or []
+        result = self._tail_slice(chunks, int(record.get("_base_seq") or 0),
+                                  int(record.get("_seq") or 0), since, limit)
+        done = result["seq"] >= int(record.get("_seq") or 0)
+        result.update({"session_id": sid, "job": record["_job"], "running": not done})
+        if done:
+            result["exit_code"] = record.get("exit_code")
+        return result
+
+    @staticmethod
+    def _tail_slice(chunks: list[tuple[int, str]], base_seq: int, top: int, since: int,
+                    limit: int) -> dict[str, Any]:
+        parts: list[str] = []
+        size = 0
+        last = since
+        for seq, text in chunks:
+            if seq <= since:
+                continue
+            if parts and size + len(text) > limit:
+                break
+            parts.append(text)
+            size += len(text)
+            last = seq
+        if not parts:
+            last = max(since, top)
+        result: dict[str, Any] = {"seq": last, "output": "".join(parts)}
+        if since < base_seq:
+            result["skipped"] = True
+        return result
+
     async def write_stdin(
         self,
         session_id: int,
@@ -360,12 +465,15 @@ class UnifiedExecManager:
         if handle is None:
             completed = self._completed.get(int(session_id))
             if completed is not None:
-                return {
+                result = {
                     "session_id": int(session_id),
                     "exit_code": completed["exit_code"],
                     "output": "",
                     "note": "session finished earlier and its uncollected output was released",
                 }
+                if completed.get("_job"):
+                    result["job"] = completed["_job"]
+                return result
             raise KeyError(f"unknown exec session_id {session_id}")
         handle.last_used = time.time()
 
@@ -408,7 +516,7 @@ class UnifiedExecManager:
         result["exit_code"] = proc.returncode
         if handle.shell:
             result["shell"] = handle.shell
-        self._handles.pop(int(session_id), None)
+        self._release(handle)
         self._close_pipes(proc)
         return result
 
@@ -427,7 +535,7 @@ class UnifiedExecManager:
         result = self._snapshot(handle, None, final=True)
         result["exit_code"] = handle.proc.returncode
         result["note"] = "process tree terminated"
-        self._handles.pop(int(session_id), None)
+        self._release(handle)
         self._close_pipes(handle.proc)
         return result
 
@@ -446,7 +554,9 @@ class UnifiedExecManager:
                 "started": handle.started,
             }
         completed = self._completed.get(sid)
-        return dict(completed) if completed is not None else None
+        if completed is None:
+            return None
+        return {key: value for key, value in completed.items() if not key.startswith("_")}
 
     def list_sessions(self) -> list[dict[str, Any]]:
         now = time.time()
@@ -488,10 +598,42 @@ class UnifiedExecManager:
                 if text:
                     handle.seq += 1
                     handle.chunks.append((handle.seq, text))
+                    handle.buffered += len(text)
+                    self._trim(handle)
+                    handle.notify()
                 if not data:
                     return
         except (asyncio.CancelledError, ValueError):
             return
+
+    def _trim(self, handle: _ExecHandle) -> None:
+        """Keep at most ``limits.max_buffer_chars`` of output (the oldest goes first)."""
+        limit = int(getattr(self.config.limits, "max_buffer_chars", 0) or 0)
+        if limit <= 0:
+            return
+        while handle.buffered > limit and len(handle.chunks) > 1:
+            seq, text = handle.chunks.pop(0)
+            handle.buffered -= len(text)
+            handle.base_seq = seq
+
+    def _release(self, handle: _ExecHandle) -> None:
+        """Drop a finished handle, keeping its last output for exec_tail."""
+        self._handles.pop(handle.session_id, None)
+        record = self._completed.get(handle.session_id)
+        if record is None or record.get("_job") != handle.uid:
+            if handle.proc.returncode is None:
+                return
+            record = self._store_completed(handle, handle.proc.returncode)
+        tail: list[tuple[int, str]] = []
+        size = 0
+        for seq, text in reversed(handle.chunks):
+            if size + len(text) > COMPLETED_TAIL_CHARS and tail:
+                break
+            tail.insert(0, (seq, text))
+            size += len(text)
+        record["_tail"] = tail
+        record["_seq"] = handle.seq
+        record["_base_seq"] = tail[0][0] - 1 if tail else handle.seq
 
     async def _track_completion(self, handle: _ExecHandle) -> None:
         try:
@@ -499,7 +641,11 @@ class UnifiedExecManager:
         except asyncio.CancelledError:
             return
         handle.finished = time.time()
-        self._completed[handle.session_id] = {
+        self._store_completed(handle, code)
+        handle.notify()
+
+    def _store_completed(self, handle: _ExecHandle, code: int | None) -> dict[str, Any]:
+        record = self._completed[handle.session_id] = {
             "session_id": handle.session_id,
             "pid": handle.proc.pid,
             "cmd": handle.cmd,
@@ -509,9 +655,11 @@ class UnifiedExecManager:
             "exit_code": code,
             "started": handle.started,
             "finished": time.time(),
+            "_job": handle.uid,
         }
         while len(self._completed) > 100:
             self._completed.pop(next(iter(self._completed)))
+        return record
 
     async def _finish_readers(self, handle: _ExecHandle) -> None:
         if not handle.reader_tasks:
@@ -535,6 +683,7 @@ class UnifiedExecManager:
         for seq, text in handle.chunks:
             if seq > handle.delivered:
                 parts.append(text)
+        lost = handle.delivered < handle.base_seq
         handle.delivered = handle.seq
         raw = "".join(parts)
 
@@ -556,7 +705,11 @@ class UnifiedExecManager:
             "wall_time_seconds": round(time.time() - handle.started, 3),
             "output": output,
             "original_token_count": approx_tokens,
+            "job": handle.uid,
+            "seq": handle.seq,
         }
+        if lost:
+            result["note"] = "older output exceeded the buffer and was dropped"
         if final and handle.proc.returncode is not None:
             result["exit_code"] = handle.proc.returncode
         return result
@@ -625,7 +778,7 @@ class UnifiedExecManager:
                     self._handles.pop(sid, None)
             else:
                 await self._finish_readers(handle)
-                self._handles.pop(sid, None)
+                self._release(handle)
                 self._close_pipes(handle.proc)
 
     @staticmethod

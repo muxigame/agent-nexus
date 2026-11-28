@@ -138,6 +138,8 @@ def _system_service() -> bool:
 
 def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, lifecycle: Any = None) -> LocalOnly:
     cloud_status: dict[str, Any] = {"state": "disabled"}
+    from .wait_urls import install_log_redaction
+    install_log_redaction()  # wait URL tokens (/wait/<token>) never reach an access log
     # The tray shows the gateway link as its green / grey dot (decision D7).
     sup.cloud_status = cloud_status
     from .agent import HubLink
@@ -338,7 +340,7 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
             if body is None:
                 return JSONResponse({"error": "body must be a JSON object"}, status_code=400)
             changes = {}
-            for key in ("enabled", "auto_config"):
+            for key in ("enabled", "auto_config", "extended_wait"):
                 if key in body:
                     if not isinstance(body[key], bool):
                         return JSONResponse({"error": f"{key} must be true or false"}, status_code=400)
@@ -387,6 +389,147 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
         result = await mcp_link.action(body["kind"], account, body["action"], force=body.get("force") is True)
         status = int(result.pop("status", 200)) if "error" in result else 200
         return JSONResponse(result, status_code=status)
+
+    # -- the CLI config editor (设置 → CLI 配置文件; agents/cli_config.py) ------------------------------------
+    from .agents import cli_config
+    CONFIG_STATUS = {"invalid": 400, "bad_op": 400, "stale": 409, "unknown_file": 404, "bad_backup": 404,
+                     "unknown_account": 404, "too_large": 413, "not_utf8": 415, "forbidden_account": 403}
+
+    async def config_gate(request: Request) -> JSONResponse | None:
+        """These files hold the account's tokens, and config.toml runs commands: only the accounts the 本机 MCP
+        trusts (core user, run-as accounts, the logged-in user), whatever mcp_local.peers says, and only when the
+        console listens on loopback."""
+        from .local_mcp import is_loopback
+        if not is_loopback(getattr(sup.cfg, "host", "127.0.0.1")):
+            return JSONResponse({"error": "只在控制台监听本机地址时可用", "code": "exposed"}, status_code=403)
+        if not await run_in_threadpool(local_mcp.peer_allowed, request.scope):
+            return JSONResponse({"error": "这个账户不能查看或修改 CLI 配置文件", "code": "forbidden_account"},
+                                status_code=403)
+        return None
+
+    def config_account(name: Any) -> tuple[bool, Any]:
+        for account in mcp_link._accounts():
+            if name in (None, "", mcp_link.account_name(account)):
+                return True, account
+        return False, None
+
+    def config_answer(result: dict) -> JSONResponse:
+        if result.get("ok") is False:
+            return JSONResponse(result, status_code=CONFIG_STATUS.get(str(result.get("code")), 500))
+        return JSONResponse(result)
+
+    async def config_call(account: Any, op: str, file_id: str, **kwargs: Any) -> dict:
+        return await run_in_threadpool(lambda: cli_config.run_as(account, op, file_id, **kwargs))
+
+    async def cli_config_list(request: Request) -> JSONResponse:
+        """``GET /api/cli-config``: every editable file of every run-as account (no content)."""
+        refused = await config_gate(request)
+        if refused is not None:
+            return refused
+        rows = []
+        for account in mcp_link._accounts():
+            name = mcp_link.account_name(account)
+            for file_id, (label_text, fmt) in cli_config.FILES.items():
+                info = await config_call(account, "read", file_id)
+                rows.append({"id": file_id, "label": label_text, "format": fmt, "account": name,
+                             "readonly_default": file_id in cli_config.READONLY_DEFAULT,
+                             **{key: info.get(key) for key in ("ok", "path", "exists", "size", "mtime", "too_large",
+                                                               "error")}})
+        return JSONResponse({"files": rows})
+
+    async def cli_config_file(request: Request) -> JSONResponse:
+        """``GET /api/cli-config/file?id&account``: the text; ``PUT {id, account, text, base_sha256}``: save it."""
+        refused = await config_gate(request)
+        if refused is not None:
+            return refused
+        if request.method == "GET":
+            body = dict(request.query_params)
+        else:
+            body = await json_body(request)
+            if body is None or not isinstance(body.get("text"), str):
+                return JSONResponse({"error": "text is required", "code": "bad_request"}, status_code=400)
+        file_id = body.get("id")
+        if file_id not in cli_config.FILES:
+            return JSONResponse({"error": "不认识的配置文件", "code": "unknown_file"}, status_code=404)
+        found, account = config_account(body.get("account"))
+        if not found:
+            return JSONResponse({"error": "不认识的账户", "code": "unknown_account"}, status_code=404)
+        if request.method == "GET":
+            return config_answer(await config_call(account, "read", file_id))
+        result = await config_call(account, "save", file_id, text=body["text"],
+                                   base_sha256=body.get("base_sha256") or None)
+        log.info("cli config: saved %s for %s (%s bytes)", file_id, mcp_link.account_name(account), len(body["text"]))
+        return config_answer(result)
+
+    async def cli_config_preview(request: Request) -> JSONResponse:
+        """``POST /api/cli-config/preview {id, account, text | backup, base_sha256}``: valid? the diff; stale?"""
+        refused = await config_gate(request)
+        if refused is not None:
+            return refused
+        body = await json_body(request)
+        if body is None or body.get("id") not in cli_config.FILES:
+            return JSONResponse({"error": "不认识的配置文件", "code": "unknown_file"}, status_code=404)
+        found, account = config_account(body.get("account"))
+        if not found:
+            return JSONResponse({"error": "不认识的账户", "code": "unknown_account"}, status_code=404)
+        current = await config_call(account, "read", body["id"])
+        if current.get("ok") is False:
+            return config_answer(current)
+        if isinstance(body.get("backup"), str):
+            loaded = await config_call(account, "backup_text", body["id"], backup=body["backup"])
+            if loaded.get("ok") is False:
+                return config_answer(loaded)
+            text = loaded["text"]
+        elif isinstance(body.get("text"), str):
+            text = body["text"]
+        else:
+            return JSONResponse({"error": "text or backup is required", "code": "bad_request"}, status_code=400)
+        checked = cli_config.validate(body["id"], text)
+        old = current.get("text") or ""
+        return JSONResponse({"valid": checked["ok"], "error": checked["error"], "line": checked["line"],
+                             "col": checked["col"], "warning": checked["warning"],
+                             "diff": cli_config.diff(old, text, current.get("path") or ""),
+                             "changed": old != text.replace("\r\n", "\n"),
+                             "stale": (body.get("base_sha256") or None) != current.get("sha256"),
+                             "sha256": current.get("sha256")})
+
+    async def cli_config_backups(request: Request) -> JSONResponse:
+        """``GET /api/cli-config/backups?id&account``; ``POST /api/cli-config/restore {id, account, backup,
+        base_sha256}``."""
+        refused = await config_gate(request)
+        if refused is not None:
+            return refused
+        body = dict(request.query_params) if request.method == "GET" else (await json_body(request) or {})
+        if body.get("id") not in cli_config.FILES:
+            return JSONResponse({"error": "不认识的配置文件", "code": "unknown_file"}, status_code=404)
+        found, account = config_account(body.get("account"))
+        if not found:
+            return JSONResponse({"error": "不认识的账户", "code": "unknown_account"}, status_code=404)
+        if request.method == "GET":
+            return config_answer(await config_call(account, "backups", body["id"]))
+        if not isinstance(body.get("backup"), str):
+            return JSONResponse({"error": "backup is required", "code": "bad_request"}, status_code=400)
+        result = await config_call(account, "restore", body["id"], backup=body["backup"],
+                                   base_sha256=body.get("base_sha256") or None)
+        log.info("cli config: restored %s for %s", body["id"], mcp_link.account_name(account))
+        return config_answer(result)
+
+    async def cli_path_api(request: Request) -> JSONResponse:
+        """``GET|POST /api/cli-path {action: link|unlink}``: ``anx`` in the owner's own terminals (macOS; Windows and
+        the deb put it on PATH at install)."""
+        from . import owner_cli
+        if not owner_cli.supported():
+            return JSONResponse({"supported": False, "platform": sys.platform})
+        if request.method == "POST":
+            body = await json_body(request) or {}
+            if body.get("action") not in ("link", "unlink"):
+                return JSONResponse({"error": "action must be link or unlink"}, status_code=400)
+            action = owner_cli.link if body["action"] == "link" else owner_cli.unlink
+            result = await run_in_threadpool(action, sup.cfg.root)
+            if not result.get("ok"):
+                return JSONResponse(result, status_code=409)
+        view = await run_in_threadpool(owner_cli.status, sup.cfg.root)
+        return JSONResponse(view)
 
     def lock_error(exc: LockError) -> JSONResponse:
         return JSONResponse(exc.body(), status_code=exc.status)
@@ -1979,9 +2122,17 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
         Route("/mcp/", local_mcp),
         # this computer's own device plugin for `anx exec .` (same guard; works without the gateway)
         Route("/mcp/self", local_mcp.self_app),
+        # wait URLs handed out through the 本机 MCP: relayed to the gateway with this device's credential
+        Route("/wait/{token}", local_mcp.wait_app),
         Route("/api/mcp/local", mcp_local_api, methods=["GET", "PUT"]),
         Route("/api/mcp/local/clis", mcp_local_clis, methods=["POST"]),
         Route("/api/mcp/local/unlink", mcp_local_unlink, methods=["POST"]),
+        Route("/api/cli-path", cli_path_api, methods=["GET", "POST"]),
+        Route("/api/cli-config", cli_config_list),
+        Route("/api/cli-config/file", cli_config_file, methods=["GET", "PUT"]),
+        Route("/api/cli-config/preview", cli_config_preview, methods=["POST"]),
+        Route("/api/cli-config/backups", cli_config_backups),
+        Route("/api/cli-config/restore", cli_config_backups, methods=["POST"]),
         Route("/api/lock", lock_api, methods=["GET", "POST"]),
         Route("/api/accounts", accounts_api, methods=["GET", "PUT"]),
         Route("/api/lock/password", lock_api, methods=["PUT"]),

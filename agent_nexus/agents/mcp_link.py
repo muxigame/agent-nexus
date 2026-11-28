@@ -44,6 +44,43 @@ log = logging.getLogger(__name__)
 NAME = mcp_probe.NAME
 KINDS = mcp_probe.KINDS
 TOOL_TIMEOUT_S = 900
+#: 延长 MCP 等待 (the 本机 MCP setting ``mcp_local.extended_wait``, default on): our Codex / Gemini CLI entries get a
+#: 24 h tool timeout and ``?wait_max=`` on the URL, a little below it, so the gateway lets one call wait that long
+#: (split into device calls). Claude Code is never touched: it waits with background shell tasks.
+LONG_TIMEOUT_S = 86400
+WAIT_MAX_S = 86100
+WAIT_PARAM = "wait_max"
+#: kind -> (the entry's timeout key, its unit in seconds^-1)
+WAIT_KEY = {"codex": ("tool_timeout_sec", 1), "gemini": ("timeout", 1000)}
+
+
+class _Standard:
+    """``timeout`` not given: the standard value (900 s)."""
+
+    def __repr__(self) -> str:
+        return "STANDARD"
+
+
+STANDARD: Any = _Standard()
+#: a key that is not in the file (``current`` value of a missing timeout)
+ABSENT = None
+
+
+def entry_url_for(base: str, wait_on: bool) -> str:
+    return f"{base}?{WAIT_PARAM}={WAIT_MAX_S}" if wait_on else base
+
+
+def strip_wait(url: Any) -> Any:
+    """``url`` without our ``?wait_max=`` (for comparisons)."""
+    if isinstance(url, str) and "?" in url:
+        base, _, query = url.partition("?")
+        if re.fullmatch(rf"{WAIT_PARAM}=\d+", query):
+            return base
+    return url
+
+
+def wait_written(kind: str) -> int:
+    return LONG_TIMEOUT_S * WAIT_KEY[kind][1]
 RECONCILE_EVERY_S = 6 * 3600.0
 WRITE_TIMEOUT_S = 60.0
 #: an account probe that gave no answer is not tried again sooner than this
@@ -82,16 +119,55 @@ def config_path(kind: str, home: Path | None = None, env: dict | None = None) ->
     return None
 
 
-def wanted(kind: str, url: str) -> dict:
+def wanted(kind: str, url: str, timeout: Any = STANDARD) -> dict:
+    """The entry we write. ``timeout``: the value of the timeout key in the CLI's own unit (STANDARD: 900 s;
+    None: no such key, an "absent" original put back)."""
     if kind == "claude":
         return {"type": "http", "url": url}
     # No approval prompts for Agent Nexus' own tools (the owner's choice): codex exec refuses every call that
     # needs one, and the device's lock and the gateway still decide what a caller may do.
-    if kind == "codex":
-        return {"url": url, "tool_timeout_sec": TOOL_TIMEOUT_S, "default_tools_approval_mode": "approve"}
-    if kind == "gemini":
-        return {"httpUrl": url, "timeout": TOOL_TIMEOUT_S * 1000, "trust": True}
+    if kind in WAIT_KEY:
+        key, unit = WAIT_KEY[kind]
+        value = TOOL_TIMEOUT_S * unit if timeout is STANDARD else timeout
+        if kind == "codex":
+            entry: dict = {"url": url}
+            if value is not None:
+                entry[key] = value
+            entry["default_tools_approval_mode"] = "approve"
+            return entry
+        entry = {"httpUrl": url}
+        if value is not None:
+            entry[key] = value
+        entry["trust"] = True
+        return entry
     raise LinkError(f"unsupported CLI {kind!r}")
+
+
+#: kind -> every key :func:`wanted` may write; any other key in our entry is the user's and is kept
+OUR_KEYS = {"claude": ("type", "url"), "codex": ("url", "tool_timeout_sec", "default_tools_approval_mode"),
+            "gemini": ("httpUrl", "timeout", "trust")}
+
+
+def target_entry(kind: str, present: Any, url: str, timeout: Any = STANDARD) -> dict:
+    """The entry to write over ``present``: our keys as :func:`wanted` has them (a key it leaves out, such as an
+    absent original timeout, is removed), every other key the user put there (``enabled = false``,
+    ``includeTools``, an ``env`` table, ...) kept as it is, in place."""
+    want = wanted(kind, url, timeout)
+    if not isinstance(present, dict):
+        return want
+    entry = {key: value for key, value in present.items() if key in want or key not in OUR_KEYS[kind]}
+    for key, value in want.items():
+        entry[key] = value
+    return entry
+
+
+def ours_match(kind: str, entry: Any, want: dict) -> bool:
+    """``entry`` holds our keys exactly as ``want`` (other keys are not looked at)."""
+    if not isinstance(entry, dict):
+        return False
+    missing = object()
+    return all(integrate._same(entry.get(key, missing), want.get(key, missing)) if key in want or key in entry
+               else True for key in OUR_KEYS[kind])
 
 
 def current(kind: str, path: Path) -> dict | None:
@@ -110,7 +186,8 @@ def current(kind: str, path: Path) -> dict | None:
 
 # -- planning (pure: text in, text out) -------------------------------------------------------------------------
 
-def plan_json(path: Path, kind: str, url: str, *, remove: bool, drop_empty: bool = False) -> integrate.Plan:
+def plan_json(path: Path, kind: str, url: str, *, remove: bool, drop_empty: bool = False,
+              timeout: Any = STANDARD) -> integrate.Plan:
     plan = integrate.Plan(path, bom=integrate._has_bom(path))
     original = integrate._read(path)
     try:
@@ -130,7 +207,7 @@ def plan_json(path: Path, kind: str, url: str, *, remove: bool, drop_empty: bool
         block.pop(NAME)
         plan.changes.append(f"remove mcpServers.{NAME}")
     else:
-        entry = wanted(kind, url)
+        entry = target_entry(kind, block.get(NAME), url, timeout)
         if integrate._same(block.get(NAME), entry):
             return plan
         plan.changes.append(f"{'update' if NAME in block else 'add'} mcpServers.{NAME} = {url}")
@@ -164,7 +241,59 @@ def _codex_span(lines: list[str]) -> tuple[int, int] | None:
     return start, end
 
 
-def plan_codex(path: Path, url: str, *, remove: bool) -> integrate.Plan:
+_MAIN_TABLE = re.compile(r'^\s*\[\s*mcp_servers\s*\.\s*(?:agent-nexus|"agent-nexus"|\'agent-nexus\')\s*\]')
+
+
+def _codex_in_place(lines: list[str], span: tuple[int, int], present: dict, entry: dict,
+                    newline: str) -> list[str] | None:
+    """Set only our keys inside the existing ``[mcp_servers.agent-nexus]`` table (its other keys, comments and
+    sub-tables untouched); None when the table is not laid out so that this is possible."""
+    start, end = span
+    header = next((n for n in range(start, end) if _MAIN_TABLE.match(lines[n])), None)
+    if header is None:
+        return None
+    body_end = header + 1
+    while body_end < end and not _HEADER.match(lines[body_end]):
+        body_end += 1
+    out = list(lines)
+    missing = object()
+    inserts: list[str] = []
+    removed: list[int] = []
+    for key in OUR_KEYS["codex"]:
+        want = entry.get(key, missing)
+        if key in present and present.get(key) == want:
+            continue
+        pattern = re.compile(rf'^\s*(?:{re.escape(key)}|"{re.escape(key)}")\s*=')
+        found = [n for n in range(header + 1, body_end) if pattern.match(lines[n])]
+        if len(found) > 1:
+            return None
+        if found:
+            if want is missing:
+                removed.append(found[0])
+            else:
+                out[found[0]] = f"{key} = {_toml_value(want)}{newline}"
+        elif want is not missing:
+            inserts.append(f"{key} = {_toml_value(want)}{newline}")
+    at = body_end
+    while at > header + 1 and not out[at - 1].strip():
+        at -= 1
+    if at > 0 and not out[at - 1].endswith(("\n", "\r")):
+        out[at - 1] += newline
+    out[at:at] = inserts
+    for n in sorted(removed, reverse=True):
+        del out[n]
+    return out
+
+
+def _toml_value(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float, str)):
+        return json.dumps(value)
+    raise LinkError(f"cannot write {type(value).__name__} into config.toml")
+
+
+def plan_codex(path: Path, url: str, *, remove: bool, timeout: Any = STANDARD) -> integrate.Plan:
     plan = integrate.Plan(path, bom=integrate._has_bom(path))
     original = integrate._read(path)
     text = original or ""
@@ -174,25 +303,34 @@ def plan_codex(path: Path, url: str, *, remove: bool) -> integrate.Plan:
         raise LinkError(f"{path} 不是有效的 TOML（{exc}），未做任何修改") from None
     servers = parsed.get("mcp_servers") if isinstance(parsed.get("mcp_servers"), dict) else {}
     present = servers.get(NAME)
-    entry = wanted("codex", url)
+    entry = target_entry("codex", present, url, timeout)
     if not remove and isinstance(present, dict) and present == entry:
         return plan
     if remove and present is None:
         return plan
     newline = "\r\n" if "\r\n" in text else "\n"
     lines = text.splitlines(keepends=True)
+    edited = None
     if present is not None:
         span = _codex_span(lines)
         if span is None:
             raise LinkError(f"{path}：agent-nexus 不是一个独立的 [mcp_servers.agent-nexus] 表，请手动修改")
-        lines = lines[:span[0]] + lines[span[1]:]
-    if not remove:
+        if not remove and isinstance(present, dict):
+            edited = _codex_in_place(lines, span, present, entry, newline)
+            if edited is not None and (tomllib.loads("".join(edited)).get("mcp_servers") or {}).get(NAME) != entry:
+                edited = None
+            if edited is None and set(present) - set(OUR_KEYS["codex"]):
+                raise LinkError(f"{path}：没法只改 [mcp_servers.agent-nexus] 里的 url 和超时，未做任何修改（请手动修改）")
+        if edited is not None:
+            lines = edited
+        else:
+            lines = lines[:span[0]] + lines[span[1]:]
+    if not remove and edited is None:
         if lines and not lines[-1].endswith(("\n", "\r")):
             lines[-1] += newline
         block = ([newline] if lines else []) + [
             f"{ENTRY_COMMENT}{newline}", f"[mcp_servers.{NAME}]{newline}",
-            f"url = {json.dumps(url)}{newline}", f"tool_timeout_sec = {TOOL_TIMEOUT_S}{newline}",
-            f'default_tools_approval_mode = "approve"{newline}']
+            *(f"{key} = {_toml_value(value)}{newline}" for key, value in entry.items())]
         lines += block
     new_text = "".join(lines)
     reparsed = tomllib.loads(new_text)  # never write a file Codex could not read
@@ -217,11 +355,12 @@ def plan_codex(path: Path, url: str, *, remove: bool) -> integrate.Plan:
     return plan
 
 
-def plan(kind: str, path: Path, url: str, *, remove: bool, drop_empty: bool = False) -> integrate.Plan:
+def plan(kind: str, path: Path, url: str, *, remove: bool, drop_empty: bool = False,
+         timeout: Any = STANDARD) -> integrate.Plan:
     if kind == "codex":
-        return plan_codex(path, url, remove=remove)
+        return plan_codex(path, url, remove=remove, timeout=timeout)
     if kind in ("claude", "gemini"):
-        return plan_json(path, kind, url, remove=remove, drop_empty=drop_empty)
+        return plan_json(path, kind, url, remove=remove, drop_empty=drop_empty, timeout=timeout)
     raise LinkError(f"unsupported CLI {kind!r}")
 
 
@@ -254,7 +393,8 @@ def _claude_cli(url: str, remove: bool, env: dict) -> bool:
 
 
 def write(kind: str, url: str, *, remove: bool = False, home: Path | None = None, env: dict | None = None,
-          drop_empty: bool = False, use_cli: bool = True, now: float | None = None, path: Path | None = None) -> dict:
+          drop_empty: bool = False, use_cli: bool = True, now: float | None = None, path: Path | None = None,
+          timeout: Any = STANDARD) -> dict:
     """Add (or ``remove``) the entry for the user this process runs as (``path``: that file instead of the one
     ``kind`` uses for this user). ``{ok, changed, path, backup, method, entry, error}``; never raises."""
     env = env if env is not None else dict(os.environ)
@@ -290,7 +430,7 @@ def write(kind: str, url: str, *, remove: bool = False, home: Path | None = None
                 mtime = path.stat().st_mtime
             except FileNotFoundError:
                 mtime = None
-            planned = plan(kind, path, url, remove=remove, drop_empty=drop_empty)
+            planned = plan(kind, path, url, remove=remove, drop_empty=drop_empty, timeout=timeout)
             if planned.text is None:
                 result.update(ok=True, entry=current(kind, path))
                 return result
@@ -300,7 +440,7 @@ def write(kind: str, url: str, *, remove: bool = False, home: Path | None = None
                 time.sleep(0.2)
                 continue
             after = current(kind, path)
-            if (after is not None) if remove else not integrate._same(after, wanted(kind, url)):
+            if (after is not None) if remove else not ours_match(kind, after, wanted(kind, url, timeout)):
                 raise LinkError(f"{path}：写入后校验失败")
             result.update(ok=True, changed=True, backup=str(planned.backup) if planned.backup else None, entry=after)
             return result
@@ -320,20 +460,16 @@ def _python() -> str:
     return python
 
 
-def write_as(account: Any, kind: str, url: str, *, remove: bool = False, drop_empty: bool = False,
-             runner: Callable[..., tuple[int | None, str, str]] | None = None) -> dict:
-    """:func:`write` for ``account`` (None: this process's own user, in process). Another account: a child
-    ``python -I -m agent_nexus.cli mcp link`` started as that user, so the file keeps its owner and ACL."""
-    if account is None:
-        return write(kind, url, remove=remove, drop_empty=drop_empty)
-    argv = [_python(), "-I", "-m", "agent_nexus.cli", "mcp", "link", "--kind", kind, "--url", url, "--json"]
-    if remove:
-        argv.append("--remove")
-    if drop_empty:
-        argv.append("--drop-empty")
+def run_child(account: Any, args: list[str], *, stdin: bytes | None = None,
+              runner: Callable[..., tuple[int | None, str, str]] | None = None) -> dict:
+    """``python -I -m agent_nexus.cli <args>`` as ``account``, answering one JSON line (the last of stdout).
+
+    Shared by the link writes and the CLI config editor (cli_config): text only ever goes over stdin."""
+    argv = [_python(), "-I", "-m", "agent_nexus.cli", *args]
     env = account.env()
     runner = runner or mcp_probe.run_user
-    code, out, err = runner(argv, env, run_as=account.popen_args(), timeout=WRITE_TIMEOUT_S)
+    kwargs = {"stdin": stdin} if stdin is not None else {}
+    code, out, err = runner(argv, env, run_as=account.popen_args(), timeout=WRITE_TIMEOUT_S, **kwargs)
     try:
         result = json.loads(out.strip().splitlines()[-1]) if out.strip() else None
     except (ValueError, IndexError):
@@ -344,9 +480,38 @@ def write_as(account: Any, kind: str, url: str, *, remove: bool = False, drop_em
     return result
 
 
+def write_as(account: Any, kind: str, url: str, *, remove: bool = False, drop_empty: bool = False,
+             timeout: Any = STANDARD, runner: Callable[..., tuple[int | None, str, str]] | None = None) -> dict:
+    """:func:`write` for ``account`` (None: this process's own user, in process). Another account: a child
+    ``python -I -m agent_nexus.cli mcp link`` started as that user, so the file keeps its owner and ACL."""
+    if account is None:
+        return write(kind, url, remove=remove, drop_empty=drop_empty, timeout=timeout)
+    args = ["mcp", "link", "--kind", kind, "--url", url, "--json"]
+    if remove:
+        args.append("--remove")
+    if drop_empty:
+        args.append("--drop-empty")
+    if timeout is None:
+        args.append("--no-timeout")
+    elif timeout is not STANDARD:
+        args += ["--timeout", json.dumps(timeout)]
+    return run_child(account, args, runner=runner)
+
+
 def cli_main(args: Any, out=print) -> int:
     """``anx mcp link --kind K --url URL [--remove] [--json]`` (the child the service starts as the user)."""
-    result = write(args.kind, args.url, remove=bool(args.remove), drop_empty=bool(getattr(args, "drop_empty", False)))
+    timeout: Any = STANDARD
+    if getattr(args, "no_timeout", False):
+        timeout = None
+    elif getattr(args, "timeout", None) is not None:
+        try:
+            timeout = json.loads(args.timeout)
+        except ValueError:
+            timeout = STANDARD
+        if not isinstance(timeout, (int, float, str)) or isinstance(timeout, bool):
+            timeout = STANDARD
+    result = write(args.kind, args.url, remove=bool(args.remove), drop_empty=bool(getattr(args, "drop_empty", False)),
+                   timeout=timeout)
     if getattr(args, "json", False):
         out(json.dumps({k: v for k, v in result.items() if k != "entry"} | {"entry": result.get("entry")},
                        ensure_ascii=False, default=str))
@@ -403,7 +568,10 @@ def unlink_offline(root: Path, kinds: list[str] | tuple[str, ...] = KINDS, me: s
 # -- ownership -------------------------------------------------------------------------------------------------
 
 class Ownership:
-    """``<root>/.anx/mcp-link.json``: ``{account: {kind: {state, url, path, method, at, backup, created}}}``."""
+    """``<root>/.anx/mcp-link.json``: ``{account: {kind: {state, url, path, method, at, backup, created, wait}}}``.
+
+    ``wait`` (Codex, Gemini CLI; 延长 MCP 等待): ``{state: on|modified|unrestored, key, original, absent, wrote, at}``
+    -- what the timeout key held before we wrote ours, so turning the setting off can put it back."""
 
     def __init__(self, root: Path):
         self.path = Path(root) / ".anx" / "mcp-link.json"
@@ -631,6 +799,14 @@ class MCPLink:
             resolved["entry"] = "user_removed" if owned.get("state") == "ours" else owned.get("state")
         if owned and owned.get("backup"):
             resolved["backup"] = owned["backup"]
+        record = (owned or {}).get("wait")
+        if isinstance(record, dict) and kind in WAIT_KEY:
+            value = None
+            with contextlib.suppress(Exception):
+                entry = current(kind, config_path(kind, self.home_of(account, env), env))
+                value = (entry or {}).get(WAIT_KEY[kind][0])
+            resolved["wait"] = {"state": record.get("state"), "value": value,
+                                "seconds": value / WAIT_KEY[kind][1] if isinstance(value, (int, float)) else None}
         local_state = self.local.state()
         resolved["label"] = label(resolved, local_ok=local_state not in ("off", "exposed", *NOT_SERVING))
         return resolved
@@ -709,25 +885,129 @@ class MCPLink:
             return None
 
     # -- writing ---------------------------------------------------------------------------------------------
+    def wait_wanted(self, kind: str) -> bool:
+        """延长 MCP 等待 applies to this CLI (the setting is on; Codex and Gemini CLI only)."""
+        return kind in WAIT_KEY and self.local.settings.get("extended_wait", True) is not False
+
+    def _file_entry(self, account: Any, kind: str) -> dict | None:
+        env = self.env_of(account)
+        path = config_path(kind, self.home_of(account, env), env)
+        try:
+            return current(kind, path) if path else None
+        except LinkError:
+            return None
+
+    def _call_writer(self, account: Any, kind: str, url: str, *, remove: bool, drop_empty: bool,
+                     timeout: Any = STANDARD) -> dict:
+        if timeout is STANDARD:  # writers written before the timeout existed keep working
+            return self.writer(account, kind, url, remove=remove, drop_empty=drop_empty)
+        return self.writer(account, kind, url, remove=remove, drop_empty=drop_empty, timeout=timeout)
+
     def _write(self, account: Any, kind: str, *, remove: bool, pinned: bool = False) -> dict:
+        """Add, update or remove our entry. An update never resets the timeout key (it keeps what the file holds:
+        the user's value or ours, which the wait step owns); a new entry while 延长 MCP 等待 is on gets the long
+        timeout at once (one write, one backup), recorded with the standard value as its original."""
         name = self.account_name(account)
         owned = self.owned.get(name, kind) or {}
-        url = self.local.url if not remove else (owned.get("url") or self.local.url)
+        record = owned.get("wait") if isinstance(owned.get("wait"), dict) else None
+        timeout: Any = STANDARD
+        new_record = record
+        if remove:
+            url = owned.get("url") or self.local.url
+        else:
+            existing = self._file_entry(account, kind) if kind in WAIT_KEY else None
+            if existing is not None:  # an update (another port, an outdated key): keep its timeout
+                key = WAIT_KEY[kind][0]
+                timeout = existing.get(key, ABSENT)
+                url = entry_url_for(self.local.url, bool(record and record.get("state") in ("on", "modified")))
+            elif self.wait_wanted(kind):
+                timeout = wait_written(kind)
+                url = entry_url_for(self.local.url, True)
+                new_record = {"state": "on", "key": WAIT_KEY[kind][0], "original": TOOL_TIMEOUT_S * WAIT_KEY[kind][1],
+                              "absent": False, "wrote": timeout, "at": time.time()}
+            else:
+                url = self.local.url
+                new_record = None
         path = config_path(kind, self.home_of(account, self.env_of(account)), self.env_of(account))
         created = owned.get("created")
         if not remove and created is None:
             created = not path or not path.exists() or (kind != "codex" and self._no_servers(path))
-        result = self.writer(account, kind, url, remove=remove, drop_empty=bool(remove and created))
+        result = self._call_writer(account, kind, url, remove=remove, drop_empty=bool(remove and created),
+                                   timeout=timeout)
         if result.get("ok"):
             if remove:
                 self.owned.set(name, kind, None)
             else:
-                self.owned.set(name, kind, {"state": "pinned" if pinned else "ours", "url": url,
-                                            "path": result.get("path"), "method": result.get("method"),
-                                            "at": time.time(), "created": bool(created),
-                                            "backup": result.get("backup") or owned.get("backup")})
+                entry = {"state": "pinned" if pinned else "ours", "url": url,
+                         "path": result.get("path"), "method": result.get("method"),
+                         "at": time.time(), "created": bool(created),
+                         "backup": result.get("backup") or owned.get("backup")}
+                if new_record:
+                    entry["wait"] = new_record
+                self.owned.set(name, kind, entry)
         self.last[f"{name}|{kind}"] = result
         return result
+
+    def _reconcile_wait(self, account: Any, kind: str) -> dict | None:
+        """延长 MCP 等待 for one of our entries: apply it, keep it, or put the original value back.
+
+        On: record what the timeout key holds now (or that it is absent) and write ours plus ``?wait_max=``. Off:
+        restore the original only if the file still holds the value we wrote; a value the user changed since is left
+        as it is (``unrestored``: 已被手动修改，未还原). The URL query always follows the setting. Returns what was
+        written (None: nothing)."""
+        if kind not in WAIT_KEY:
+            return None
+        name = self.account_name(account)
+        owned = self.owned.get(name, kind)
+        if not owned or owned.get("state") not in ("ours", "pinned"):
+            return None
+        entry = self._file_entry(account, kind)
+        if entry is None or not mcp_probe.is_local_url(mcp_probe.entry_url(entry) or "", self.local.url) \
+                or strip_wait(mcp_probe.entry_url(entry)) != strip_wait(owned.get("url")):
+            return None
+        key = WAIT_KEY[kind][0]
+        wrote = wait_written(kind)
+        cur = entry.get(key, ABSENT)
+        record = owned.get("wait") if isinstance(owned.get("wait"), dict) else None
+        state = (record or {}).get("state")
+        want_on = self.wait_wanted(kind)
+        now = time.time()
+        timeout: Any = cur
+        new_record = record
+        if want_on:
+            if state in ("on", "modified"):
+                new_record = {**record, "state": "on" if cur == record.get("wrote", wrote) else "modified"}
+            else:  # turning on: whatever is there now is the original, silently
+                new_record = {"state": "on", "key": key, "original": cur, "absent": key not in entry, "wrote": wrote,
+                              "at": now}
+                timeout = wrote
+            url = entry_url_for(self.local.url, True)
+        else:
+            if state in ("on", "modified"):
+                if cur == record.get("wrote", wrote):
+                    timeout = None if record.get("absent") else record.get("original")
+                    new_record = None
+                else:
+                    new_record = {**record, "state": "unrestored", "at": now}
+            url = entry_url_for(self.local.url, False)
+        changed_file = timeout != cur or (key in entry) != (timeout is not None) or mcp_probe.entry_url(entry) != url
+        if changed_file:
+            result = self._call_writer(account, kind, url, remove=False, drop_empty=False, timeout=timeout)
+            self.last[f"{name}|{kind}"] = result
+            if not result.get("ok"):
+                return {"ok": False, **{k: result.get(k) for k in ("error", "path")}}
+            owned = {**owned, "url": url, "at": now, "backup": result.get("backup") or owned.get("backup")}
+        if new_record != record or changed_file:
+            owned = dict(owned)
+            if new_record:
+                owned["wait"] = new_record
+            else:
+                owned.pop("wait", None)
+            self.owned.set(name, kind, owned)
+        if changed_file:
+            return {"ok": True, "changed": True, "path": result.get("path"), "backup": result.get("backup"),
+                    "error": None, "wait": (new_record or {}).get("state", "off")}
+        return None
 
     @staticmethod
     def _no_servers(path: Path) -> bool:
@@ -738,7 +1018,8 @@ class MCPLink:
         return isinstance(data, dict) and "mcpServers" not in data
 
     def _entry_is_ours(self, account: Any, kind: str, view: dict) -> bool:
-        """The file's ``agent-nexus`` entry is the one we wrote (recorded, and its URL unchanged)."""
+        """The file's ``agent-nexus`` entry is the one we wrote (recorded, and its URL unchanged; our own
+        ``?wait_max=`` does not count)."""
         owned = self.owned.get(self.account_name(account), kind)
         if not owned or owned.get("state") not in ("ours", "pinned"):
             return False
@@ -747,7 +1028,7 @@ class MCPLink:
             entry = current(kind, path) if path else None
         except LinkError:
             return False
-        return entry is not None and mcp_probe.entry_url(entry) == owned.get("url")
+        return entry is not None and strip_wait(mcp_probe.entry_url(entry)) == strip_wait(owned.get("url"))
 
     def _entry_outdated(self, account: Any, kind: str) -> bool:
         """Our entry lacks something the current version writes (e.g. the approval setting added in 0.8.34)."""
@@ -760,7 +1041,8 @@ class MCPLink:
         if entry is None or kind == "claude":
             return False
         want = wanted(kind, mcp_probe.entry_url(entry) or self.local.url)
-        return any(entry.get(key) != value for key, value in want.items())
+        skip = WAIT_KEY[kind][0]  # the timeout belongs to the user or to the wait step, never "outdated"
+        return any(entry.get(key) != value for key, value in want.items() if key != skip)
 
     def decide(self, kind: str, account: Any, view: dict, local_state: str, auto: bool) -> str | None:
         """"add" / "remove" / "update" / None for one CLI (the decision table of docs/design.md)."""
@@ -785,7 +1067,7 @@ class MCPLink:
             # never two sets of Agent Nexus tools: ours goes unless the owner pinned it
             return "remove" if ours and owned.get("state") != "pinned" else None
         if state == "local":
-            if ours and (owned.get("url") != self.local.url or self._entry_outdated(account, kind)):
+            if ours and (strip_wait(owned.get("url")) != self.local.url or self._entry_outdated(account, kind)):
                 return "update"
             return None
         if local_state in NOT_SERVING:
@@ -818,7 +1100,9 @@ class MCPLink:
                     view = await asyncio.to_thread(self.view, kind, account, env)
                     owned = self.owned.get(name, kind) or {}
                     if view["entry"] == "user_removed" and owned.get("state") == "ours":
-                        self.owned.set(name, kind, {**owned, "state": "user_removed", "at": time.time()})
+                        record = {**owned, "state": "user_removed", "at": time.time()}
+                        record.pop("wait", None)
+                        self.owned.set(name, kind, record)
                         continue
                     stamp = self._probed.get(f"{name}|{kind}")
                     if view["state"] == "unknown" and kind in ("claude", "codex") and \
@@ -828,13 +1112,19 @@ class MCPLink:
                         await self.probe_account(kind, account, binary, env)
                         view = await asyncio.to_thread(self.view, kind, account, env)
                     action = self.decide(kind, account, view, local_state, auto)
-                    if action is None:
-                        continue
-                    result = await asyncio.to_thread(self._write, account, kind, remove=action == "remove")
-                    done.append({"account": name, "kind": kind, "action": action, **{
-                        k: result.get(k) for k in ("ok", "changed", "path", "backup", "error")}})
-                    if not result.get("ok"):
-                        log.warning("mcp link: %s %s for %s failed: %s", action, kind, name, result.get("error"))
+                    if action is not None:
+                        result = await asyncio.to_thread(self._write, account, kind, remove=action == "remove")
+                        done.append({"account": name, "kind": kind, "action": action, **{
+                            k: result.get(k) for k in ("ok", "changed", "path", "backup", "error")}})
+                        if not result.get("ok"):
+                            log.warning("mcp link: %s %s for %s failed: %s", action, kind, name, result.get("error"))
+                    if action != "remove" and local_state not in ("off", "exposed"):
+                        waited = await asyncio.to_thread(self._reconcile_wait, account, kind)
+                        if waited is not None:
+                            done.append({"account": name, "kind": kind, "action": "wait", **waited})
+                            if not waited.get("ok"):
+                                log.warning("mcp link: wait setting for %s %s failed: %s", kind, name,
+                                            waited.get("error"))
             if done:
                 log.info("mcp link (%s): %s", reason or "reconcile", done)
             return done
@@ -912,7 +1202,7 @@ class MCPLink:
                     if owned:
                         self.owned.set(name, kind, {**owned, "state": "user_removed", "at": time.time()})
                     return {"cli": await asyncio.to_thread(self.view, kind, account, env), "result": {"ok": True}}
-                if mcp_probe.entry_url(entry) != self.local.url:
+                if strip_wait(mcp_probe.entry_url(entry)) != self.local.url:
                     return {"error": "这个 agent-nexus 配置项不是本机 MCP 写入的，未修改", "code": "not_ours",
                             "status": 409}
             result = await asyncio.to_thread(self._write, account, kind, remove=True)

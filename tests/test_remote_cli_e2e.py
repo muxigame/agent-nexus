@@ -93,7 +93,8 @@ async def anx(env: dict, *argv: str, stdin: str = "") -> tuple[int, str, str]:
 
 @pytest.fixture
 async def network(tmp_path, monkeypatch):
-    gateway = await serve(build_cloud_app(network_config(tmp_path, monkeypatch), tmp_path))
+    gateway_app = build_cloud_app(network_config(tmp_path, monkeypatch), tmp_path)
+    gateway = await serve(gateway_app)
     agents, links = [], {}
     try:
         for name, token in (("pc-a", "TOKEN_A"), ("pc-b", "TOKEN_B")):
@@ -142,10 +143,12 @@ async def network(tmp_path, monkeypatch):
             return JSONResponse({"agent_id": "pc-a", "joined": True, "hostname": "pc-a"})
 
         console = await serve(LocalOnly(Starlette(routes=[Route("/mcp", local_mcp), Route("/mcp/self", local_mcp.self_app),
+                                                          Route("/wait/{token}", local_mcp.wait_app),
                                                           Route("/api/cloud", cloud)]), "127.0.0.1", port), listener)
         assert local_mcp.state() == "ready", local_mcp.status()
         yield types.SimpleNamespace(env={"ANX_CONSOLE_URL": f"http://127.0.0.1:{port}"}, links=links, lock=lock,
-                                    local_mcp=local_mcp, cfg=cfg)
+                                    local_mcp=local_mcp, cfg=cfg, gateway=gateway_app.state.gateway,
+                                    gateway_port=gateway.port)
         await stop(console)
         await stop(plugin_http)
     finally:

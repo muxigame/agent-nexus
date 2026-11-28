@@ -175,6 +175,10 @@ def build_cloud_app(config: dict, root: Path):
     enrollment = Enrollment(store, hub, public_url=config.get("public_url"), agents=agents.keys(),
                             groups=groups.keys(), settings=invite_settings(config))
     facade.enrollment = enrollment
+    # Wait URLs (wait_urls.py): <public_url>/wait/<token>; a lock or revocation of the device that
+    # minted one ends it.
+    facade.public_url = str(config.get("public_url") or "").rstrip("/") or None
+    enrollment.on_revoke = facade.wait_urls.revoke_device
     # Third-party MCP connectors hosted on the gateway (decision D10, design §7):
     # hub/<name> for every client, with no device online.
     connectors = ConnectorHost(store, state_dir=state_db_path(config, root).parent, public_url=config.get("public_url"))
@@ -432,6 +436,10 @@ def build_cloud_app(config: dict, root: Path):
         log.warning("device MCP unavailable: no %s route in the MCP app", config.get("path", "/mcp"))
     app.router.routes.insert(0, WebSocketRoute("/ingress/{agent_id}", ingress))
     app.router.routes.insert(0, Route("/media/{token}", media))
+    from .wait_urls import WaitEndpoint, install_log_redaction
+    app.router.routes.insert(0, Route("/wait/{token}", WaitEndpoint(facade, device_credential=device_credential),
+                                      methods=["GET", "HEAD"]))
+    install_log_redaction()
     app.router.routes.insert(0, Route("/healthz", health))
     # The shared design system for the console, login and inbox pages (docs/ui-spec.md).
     app.router.routes.insert(0, ui_route())

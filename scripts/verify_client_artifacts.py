@@ -267,6 +267,7 @@ def verify_deb(data, root, enrollment, token, *, private, version):
     verify_launcher(entries, modes, root, prefix)
     required = {
         "usr/bin/" + UBUNTU_LAUNCHER: (f'#!/bin/sh\nexec /{UBUNTU_LIB}{UBUNTU_LAUNCHER} "$@"\n'.encode(), 0o755),
+        "usr/bin/anx": (f'#!/bin/sh\nexec /{UBUNTU_LIB}{UBUNTU_LAUNCHER} anx "$@"\n'.encode(), 0o755),
         f"usr/share/applications/{UBUNTU_PACKAGE}.desktop": ((root / f"packaging/ubuntu/{UBUNTU_PACKAGE}.desktop").read_bytes(), 0o644),
         f"usr/share/icons/hicolor/128x128/apps/{UBUNTU_PACKAGE}.png": ((root / "agent_nexus/static/icon.png").read_bytes(), 0o644),
     }

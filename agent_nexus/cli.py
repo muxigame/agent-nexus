@@ -93,6 +93,8 @@ def cmd_serve(args: argparse.Namespace, cfg: ManagerConfig) -> int:
 
     life = Lifecycle(cfg.root)
     life.install()
+    from . import owner_cli
+    owner_cli.on_start(cfg.root)  # macOS: <root>/bin/anx for the owner's own terminals
     sup = Supervisor(cfg.root)
     if not args.no_autostart:
         for line in sup.autostart():
@@ -618,6 +620,9 @@ def cmd_mcp(args: argparse.Namespace, root: Path) -> int:
     from .agents import mcp_link
     if args.mcp_cmd == "link":
         return mcp_link.cli_main(args)
+    if args.mcp_cmd == "config":
+        from .agents import cli_config
+        return cli_config.cli_main(args)
     cfg = load_manager_config(root)
     api = Api(cfg)
     if args.mcp_cmd == "status":
@@ -659,7 +664,7 @@ def _is_mcp_link(argv: list[str]) -> bool:
     index = 0
     while index < len(argv) and argv[index].startswith("-"):
         index += 2 if argv[index] == "--root" else 1
-    return argv[index:index + 2] == ["mcp", "link"]
+    return argv[index:index + 2] in (["mcp", "link"], ["mcp", "config"])
 
 
 def _is_hook_call(argv: list[str]) -> bool:
@@ -890,6 +895,15 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--url", required=True)
     q.add_argument("--remove", action="store_true")
     q.add_argument("--drop-empty", action="store_true", help=argparse.SUPPRESS)
+    q.add_argument("--timeout", help=argparse.SUPPRESS)  # JSON value of the timeout key (延长 MCP 等待)
+    q.add_argument("--no-timeout", action="store_true", help=argparse.SUPPRESS)
+    q.add_argument("--json", action="store_true")
+    # the console's CLI config editor, run as the file's user (text on stdin, one JSON line out)
+    q = mcp_sub.add_parser("config", help=argparse.SUPPRESS)
+    q.add_argument("config_op", choices=["read", "validate", "save", "backups", "backup_text", "restore"])
+    q.add_argument("--file", required=True, choices=["codex", "claude_settings", "claude_json", "gemini"])
+    q.add_argument("--backup")
+    q.add_argument("--base-sha256")
     q.add_argument("--json", action="store_true")
     q = mcp_sub.add_parser("unlink", help="remove the agent-nexus entries this client added")
     q.add_argument("--kind", choices=["claude", "codex", "gemini"])

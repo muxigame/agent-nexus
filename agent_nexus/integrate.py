@@ -93,12 +93,18 @@ def _is_ours(command: Any, kind: str) -> bool:
                                                           lowered))
 
 
-def _backup_path(path: Path, now: float) -> Path:
+#: Backup name tags: automatic writes (hooks, the MCP link) and edits in the console's CLI config editor, which are
+#: pruned separately (a link write must never delete the user's own edit backups).
+BACKUP_TAG = "anx-backup"
+EDIT_TAG = "anx-edit"
+
+
+def _backup_path(path: Path, now: float, tag: str = BACKUP_TAG) -> Path:
     stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(now))
-    candidate = path.with_name(f"{path.name}.anx-backup-{stamp}")
+    candidate = path.with_name(f"{path.name}.{tag}-{stamp}")
     n = 2
     while candidate.exists():
-        candidate = path.with_name(f"{path.name}.anx-backup-{stamp}-{n}")
+        candidate = path.with_name(f"{path.name}.{tag}-{stamp}-{n}")
         n += 1
     return candidate
 
@@ -532,9 +538,9 @@ def safe_backup(path: Path, backup: Path) -> None:
         os.utime(backup, ns=(like.st_atime_ns, like.st_mtime_ns))
 
 
-def prune_backups(path: Path, keep: int) -> None:
-    """Keep only the ``keep`` newest ``<name>.anx-backup-*`` copies next to ``path``."""
-    found = sorted(path.parent.glob(glob_escape(path.name) + ".anx-backup-*"), key=lambda p: p.stat().st_mtime_ns
+def prune_backups(path: Path, keep: int, tag: str = BACKUP_TAG) -> None:
+    """Keep only the ``keep`` newest ``<name>.<tag>-*`` copies next to ``path``."""
+    found = sorted(path.parent.glob(glob_escape(path.name) + f".{tag}-*"), key=lambda p: p.stat().st_mtime_ns
                    if p.exists() else 0)
     for old in found[:-keep] if keep > 0 else found:
         with contextlib.suppress(OSError):
@@ -547,7 +553,7 @@ def glob_escape(text: str) -> str:
 
 
 def apply(plan: Plan, *, now: float | None = None, expect_mtime: float | None | bool = False,
-          keep_backups: int | None = None) -> None:
+          keep_backups: int | None = None, tag: str = BACKUP_TAG) -> None:
     """Write ``plan``: a backup first, then a temp file (random name, the original's mode and owner from the start)
     renamed over the file. ``expect_mtime`` (not False): the file's mtime when it was read (None: it did not exist);
     checked again right before the rename, :class:`InterruptedError` when another program wrote it meanwhile.
@@ -566,7 +572,7 @@ def apply(plan: Plan, *, now: float | None = None, expect_mtime: float | None | 
     except FileNotFoundError:
         like = None
     if like is not None:
-        plan.backup = _backup_path(plan.path, now)
+        plan.backup = _backup_path(plan.path, now, tag)
         safe_backup(plan.path, plan.backup)
     import secrets
     temp = plan.path.with_name(f"{plan.path.name}.anx-tmp-{secrets.token_hex(6)}")
@@ -591,7 +597,7 @@ def apply(plan: Plan, *, now: float | None = None, expect_mtime: float | None | 
             plan.backup = None
         raise
     if keep_backups is not None:
-        prune_backups(plan.path, keep_backups)
+        prune_backups(plan.path, keep_backups, tag)
 
 
 def run(kind: str, *, dry_run: bool = False, remove: bool = False, hooks: bool = False,

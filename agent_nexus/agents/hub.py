@@ -210,14 +210,19 @@ def devices_cli_hint(*, kind: str, adapter: str, permission: str, runnable: bool
         return ""
     if windows and kind != "claude":
         example = ("PowerShell：`$OutputEncoding=[Text.UTF8Encoding]::new(); @'<换行>命令<换行>'@ | anx exec nas "
-                   "--stdin`，@' 和 '@ 各占一行末尾/开头；不设 $OutputEncoding 中文会变成 ?")
+                   "--stdin`，@' 和 '@ 各占一行；不设 $OutputEncoding 中文变成 ?")
     else:
         example = "`anx exec nas --stdin <<'EOF'`"
-    return ("操作其他设备也可以在你自己的 shell 里用 anx 命令（经本机客户端，不需要凭据）：`anx devices` 列出设备"
-            "（在线、系统、shell、工作目录）；`anx exec <设备> [--shell S] [--cwd 目录] [--timeout 秒] -- <命令>` "
-            "在那台设备上运行，输出和退出码原样返回（长任务加 --detach，之后 `anx wait <会话>` / `anx kill <会话>`）；"
-            "`anx cp <设备>:<路径> <设备>:<路径>` 复制文件或文件夹。设备写名称或 ID。命令含引号、$、反斜杠或通配符时"
-            f"用 --stdin 从标准输入传原文（如 {example}），否则本地 shell 会先展开一遍。")
+    # run_in_background is Claude Code's Bash parameter; the other CLIs' shell calls time out on their own.
+    if kind == "claude":
+        long_jobs = "长任务用 run_in_background 作为后台任务运行；或加 --detach，之后 `anx wait <会话>` / `anx kill <会话>`"
+    else:
+        long_jobs = "长任务加 --detach，之后 `anx wait <会话>` 接着等，`anx kill <会话>` 结束"
+    return ("操作其他设备也可以在你自己的 shell 里用 anx 命令（经本机客户端）：`anx devices` 列出设备；"
+            "`anx exec <设备> [--shell S] [--cwd 目录] [--timeout 秒] -- <命令>` "
+            f"在那台设备上运行，输出和退出码原样返回（{long_jobs}）；"
+            "`anx cp <设备>:<路径> <设备>:<路径>` 复制文件或文件夹。设备写名称或ID。命令含引号、$、反斜杠或通配符时"
+            f"用 --stdin 传原文（如 {example}），免得本地 shell 先展开。")
 
 
 def shadow_hint(nx: dict | None) -> str:

@@ -461,6 +461,8 @@ Agent Nexus MCP……不要调用 <名字>.*”（没有 handle 时也有这一�
 **0.8.34 起（主人的决定）**：既然账户连接器在 `codex exec` 里批准不了、工具列表又是快照，Codex 只有账户连接器（`gateway_account`，或
 `both` 且另一个不是配置项）时，客户端照样把专用配置项永久写进 `~/.codex/config.toml`，并且无需审批：
 `[mcp_servers.agent-nexus]` 带 `url`、`tool_timeout_sec`、`default_tools_approval_mode = "approve"`（Gemini 的条目同理带 `"trust": true`）。
+“延长 MCP 等待”开着时（默认），这个条目的超时是 24 小时、URL 带 `?wait_max=86100`（docs/design.md §19.4），所以使用配置项的 Codex 对话也能
+在一次调用里等长命令结束；按运行临时接入的仍是 900 秒。对话提示（`devices_cli`）另外建议长任务把 `anx exec` 作为 CLI 自己 shell 的后台任务运行。
 之后状态是 `both`，对话里用 `agent-nexus`；主人手动删除的条目不再加回。早先写入的、缺少审批设置的条目会自动补上。上面“按运行临时接入”
 只在本机 MCP 当时提供不了网关工具、条目还没写入时才用得上。读取各 CLI 的配置文件时忽略 BOM（Windows 编辑器常带）。
 
