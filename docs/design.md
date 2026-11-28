@@ -1747,6 +1747,8 @@ CLI ──HTTP（无凭据）──▶ 本机控制台 127.0.0.1:8399/mcp（Loca
 
 ### 19.6 Agent Nexus 发起的对话
 
+Codex 的 ChatGPT 账户连接器在 `codex exec` 里调用不了（审批策略 never，app 的工具无法按运行批准），所以 Codex 的 `gateway_account` 每个对话都按运行临时接入本机 MCP（不写配置，docs/agent-chat.md §16 前的说明）。
+
 `AgentHub.agent_run_open` 对每个运行调用 `MCPLink.for_run`，得到上面的结果加上接入方式：CLI 自己的配置（`local` / `gateway_*` / `both` / `unknown`）、按运行临时接入（`none`、不支持写入、用户删掉或关闭了自动接入，且本机 MCP 能提供网关工具；自定义文本 CLI 只有命令里有 `{mcp_url}` 时才算能接入，ACP 代理在 initialize 之后才知道，提示词写“尝试接入”，不支持 http 时经网关模式给出警告——claude 的 `--mcp-config <临时目录>/anx-mcp.json`、codex 的 `-c mcp_servers.agent-nexus.url=…`、ACP 声明了 `mcpCapabilities.http` 时 `session/new` / `session/load` 的 `mcpServers`、自定义 CLI 的 `{mcp_url}`；不碰用户的文件），或者 API 模型在进程内接入（列出本机 MCP 的工具、去掉 `workspace_id` 参数并在调用时填入本次的 handle；经网关模式只提供这些工具，`readOnlyHint` 的工具不需要审批）。
 
 - 提示词：新变量 `$mcp`、`$mcp_prefix`、`$mcp_state`、`$target_device`、`$target_workdir`、`$mcp_hint`；新内置片段“Agent Nexus MCP 与工作区”（`nexus_mcp`，两种模式都启用，有 handle 时才出现），写明连接器名和工具前缀、已选好的 `workspace_id`、目标设备和目录（路径用这个目录下的绝对路径）、邮箱地址，不需要先 device_list / use_device。

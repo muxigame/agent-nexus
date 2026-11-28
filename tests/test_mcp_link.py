@@ -354,3 +354,38 @@ def test_an_account_connector_with_an_old_tool_list_is_used_but_marked_stale():
     view = {"kind": "codex", "state": "gateway_account", "use": "workspace", "stale": True}
     assert "过时" in mcp_link.label(view) and "ChatGPT" in mcp_link.label(view)
     assert "过时" not in mcp_link.label({**view, "stale": False})
+
+
+def test_codex_with_an_account_connector_attaches_the_local_mcp_for_the_run_only(tmp_path):
+    """codex exec runs with approval "never": an account app's tools (codex_apps) are refused ("MCP tool call
+    requires approval"), so a run of Codex uses the 本机 MCP by per-run flags; nothing is written."""
+    lk, home, writes = link(tmp_path, kinds=("codex",))
+    lk.probe.put("user", "codex", {"state": "present", "source": "probe",
+                                   "connectors": [{"name": "workspace", "prefix": "", "stale": True}]})
+    assert run(lk.reconcile("t")) == [] and writes == []
+    view = lk.view("codex", None)
+    assert view["state"] == "gateway_account" and view["use"] == "workspace" and view["stale"]
+    assert mcp_link.CODEX_ACCOUNT_NOTE in view["label"]
+    nx = lk.for_run("codex", None)
+    assert nx["state"] == "gateway_account" and nx["attach"] == "flags" and nx["run_only"]
+    assert nx["use"] == "agent-nexus" and nx["tool_prefix"] == "agent-nexus." and nx["shadowed"] == "workspace"
+    assert nx["also"] == ["workspace"]
+    assert not (home / ".codex" / "config.toml").exists() and writes == []
+    assert lk.decide("codex", None, lk.view("codex", None), "ready", True) is None  # still no config.toml entry
+    # the 本机 MCP cannot serve: the account connector stays (and the hub warns)
+    lk.local._state = "off"
+    nx = lk.for_run("codex", None)
+    assert nx["attach"] is None and nx["use"] == "workspace" and "shadowed" not in nx
+    label = lk.view("codex", None)["label"]  # the Agent page no longer promises the per-run attach
+    assert mcp_link.CODEX_ACCOUNT_NOTE not in label and mcp_link.CODEX_ACCOUNT_DOWN in label
+    assert "不重复添加" not in label and label.startswith("ChatGPT 账户连接器 workspace（codex exec 无法审批")
+
+
+def test_a_run_observing_codex_apps_keeps_the_app_name_and_stale_flag(tmp_path):
+    probe = mcp_probe.Probe(tmp_path)
+    probe.put("user", "codex", {"state": "present", "source": "probe",
+                                "connectors": [{"name": "workspace", "prefix": "", "stale": True}]})
+    probe.observe("user", "codex", [{"name": "codex_apps", "prefix": ""}])
+    assert probe.get("user", "codex")["connectors"] == [{"name": "workspace", "prefix": "", "stale": True}]
+    probe.observe("user", "codex", [{"name": "fresh", "prefix": ""}])  # a real name: the observation wins
+    assert probe.get("user", "codex")["connectors"] == [{"name": "fresh", "prefix": ""}]

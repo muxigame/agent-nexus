@@ -45,7 +45,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import adapters, registry, sessions
+from . import adapters, registry, sessions, workdirs
 from .adapters import AdapterOptions
 from .registry import AgentDef
 
@@ -386,7 +386,20 @@ class Run:
                 "adapter": self.adapter.name, "started_at": self.created, "address": self.address,
                 "title": self.title, "busy": self.adapter.turn_active, "process": self.proc is not None,
                 "pending_approvals": len(self.approvals) + len(self.adapter.pending_approvals()),
-                "tmpdir": self.tmpdir}
+                "tmpdir": self.tmpdir, "model": self.opts.model or None}
+
+
+def _model(params: dict) -> str | None:
+    """The console's ``model`` (None: not given; "" = the CLI's default). RunError when it is malformed."""
+    if "model" not in params or params.get("model") is None:
+        return None
+    value = params.get("model")
+    if not isinstance(value, str):
+        raise RunError(registry.MODEL_ERROR, "bad_model")
+    value = value.strip()
+    if value and not registry.model_ok(value):
+        raise RunError(registry.MODEL_ERROR, "bad_model")
+    return value
 
 
 SHELL_TOOLS = ("Bash", "shell", "execute", "BashOutput", "run_command")  # run_command: API models (§16.4)
@@ -423,12 +436,8 @@ def _codex_lookup(account: Any, env: dict) -> Callable[[str], dict | None]:
 
 
 def _within(path: str, roots: list[str]) -> bool:
-    real = os.path.realpath(path)
-    for root in roots:
-        base = os.path.realpath(root)
-        if real == base or real.startswith(base.rstrip(os.sep) + os.sep):
-            return True
-    return False
+    """``path`` is inside one of ``roots`` (one implementation with the picker: :func:`workdirs.allowed`)."""
+    return workdirs.allowed(path, roots)
 
 
 class Runs:
@@ -615,6 +624,9 @@ class Runs:
         self._push(run, {"type": "error", "level": "warn",
                          "text": f"{run.d.label} 没能以对话模式（ACP）启动（{reason}），改用普通文本方式：能对话，"
                                  "但看不到工具调用详情，也不能逐项审批"})
+        if run.opts.model and not run.d.model_args:
+            self._push(run, {"type": "error", "level": "notice",
+                             "text": f"{run.d.label} 的这种运行方式不能选择模型，沿用默认模型（{run.opts.model} 没有生效）"})
         if old.turn_active and run.last_prompt:
             self._start_turn(run, run.last_prompt)
 
@@ -791,14 +803,14 @@ class Runs:
         env.update({key: str(value) for key, value in (extra or {}).items() if value is not None})
         return env
 
-    def _workdir(self, value: Any, account: Any) -> str:
+    def _workdir(self, value: Any, account: Any, *, checked: bool = False) -> str:
         if not isinstance(value, str) or not value.strip():
             home = getattr(account, "home", None) or os.path.expanduser("~")
             value = home
         path = os.path.abspath(os.path.expanduser(value.strip()))
         if not os.path.isdir(path):
             raise RunError(f"工作目录不存在：{path}", "bad_workdir")
-        roots = self.roots() if self.roots else None
+        roots = self.roots() if self.roots and not checked else None
         if roots is not None and not _within(path, roots):
             raise RunError(f"工作目录不在允许的范围内：{path}", "workdir_not_allowed")
         return path
@@ -806,12 +818,13 @@ class Runs:
     async def open(self, params: dict, *, binary: str | None = None, env: dict | None = None,
                    run_as: dict | None | bool = False, system_prompt: str | None = None, tmpdir: str | None = None,
                    address: str = "", rid: str | None = None, events: list[dict] | None = None,
-                   extra: dict | None = None) -> dict:
+                   extra: dict | None = None, workdir_ok: bool = False) -> dict:
         """Start a run. ``params`` (from the console): ``kind, workdir, prompt, resume_id?, permission?,
         title?``. The keyword arguments come from the hub, never from the console: an explicit ``binary``,
         extra ``env``, ``run_as`` (``Account.popen_args()``; False = the account's), the rendered
         ``system_prompt``, the run's ``tmpdir`` and mailbox ``address``, and ``events`` to show right after
-        the starting status (the hub's notes, e.g. that there is no gateway)."""
+        the starting status (the hub's notes, e.g. that there is no gateway). ``workdir_ok``: the hub already allowed
+        the work folder (it also accepts folders this device ran a CLI in), so the roots are not checked again."""
         self._reap()
         self._ensure_reaper()
         if len(self.runs) >= self.max_runs:
@@ -831,7 +844,13 @@ class Runs:
             raise RunError("会话 ID 格式不对", "bad_resume_id")
         if resume_id and not d.resume:
             raise RunError(f"{d.label} 不支持续接已有会话", "resume_unsupported")
+        model = _model(params) or ""
         notices: list[str] = []
+        if model and d.adapter == "api":
+            model = ""  # an API model: the kind is the model
+        elif model and not d.model_args and d.adapter not in ("acp",):
+            notices.append(f"{d.label} 不能选择模型，沿用它自己的设置（{model} 没有生效）")
+            model = ""
         permission = str(params.get("permission") or "ask")
         if permission not in d.permission_flags:
             if permission in ("edits", "readonly") and "ask" in d.permission_flags:
@@ -841,7 +860,7 @@ class Runs:
             else:
                 raise RunError(f"{d.label} 不支持“{_MODE_NAMES.get(permission, permission)}”权限模式", "bad_permission")
         account = self.account()
-        workdir = self._workdir(params.get("workdir"), account)
+        workdir = self._workdir(params.get("workdir"), account, checked=workdir_ok)
         run_env = self._env(account, env)
         popen = (account.popen_args() if account is not None else None) if run_as is False else (run_as or None)
         if d.adapter == "api":  # an API model: no binary, the loop runs in process (§16.4)
@@ -854,7 +873,7 @@ class Runs:
         if system_prompt is None:
             system_prompt = params.get("system_prompt") if isinstance(params.get("system_prompt"), str) else ""
         opts = AdapterOptions(binary=binary, workdir=workdir, permission=permission, system_prompt=system_prompt or "",
-                              resume_id=resume_id, batch=batch, extra=dict(extra or {}))
+                              resume_id=resume_id, batch=batch, extra=dict(extra or {}), model=model)
         if d.adapter == "codex-exec":  # the context window lives in the thread's rollout (§16.3)
             opts.context_lookup = _codex_lookup(account, run_env)
         rid = rid or uuid.uuid4().hex[:12]
@@ -911,7 +930,8 @@ class Runs:
             self._close(run)
             raise
         return {"rid": rid, "session_id": run.session_id, "state": run.state, "address": address,
-                "adapter": run.adapter.name, "tmpdir": run.tmpdir, "permission": permission}
+                "adapter": run.adapter.name, "tmpdir": run.tmpdir, "permission": permission,
+                "model": model or None}
 
     async def send(self, params: dict) -> dict:
         run = self._run(params)
@@ -920,12 +940,24 @@ class Runs:
             raise RunError("消息是空的", "empty")
         if len(prompt) > MAX_PROMPT:
             raise RunError("消息太长了", "too_long")
+        model = _model(params)
         if run.adapter.turn_active:
             raise RunError("上一轮还没有结束：等它结束，或者先停止", "busy")
+        if model is not None and model != (run.opts.model or "") and run.d.adapter != "api":
+            self.set_model(run, model)
         self._push(run, {"type": "user", "text": prompt})
         run.last_prompt = prompt
         self._start_turn(run, prompt)
-        return {"ok": True, "session_id": run.session_id, "state": run.state}
+        return {"ok": True, "session_id": run.session_id, "state": run.state, "model": run.opts.model or None}
+
+    def set_model(self, run: Run, model: str) -> None:
+        """Switch ``run`` to ``model`` ("" = the CLI's default) from its next turn on (§16.7)."""
+        # the adapter announces the model ({type: model}) only once the switch is final: at once for a per-turn
+        # or flag-chosen CLI, from the CLI's answer for a live Claude / ACP process
+        events = run.adapter.set_model(model, live=run.proc is not None)
+        self._push_all(run, events)
+        if run.proc is not None and run.adapter.outbox:
+            self._flush(run)
 
     async def read(self, params: dict) -> dict:
         run = self._run(params)

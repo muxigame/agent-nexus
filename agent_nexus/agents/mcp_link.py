@@ -454,7 +454,9 @@ LABELS = {
 }
 
 
-def label(view: dict) -> str:
+def label(view: dict, local_ok: bool | None = None) -> str:
+    """The Agent page's text for a connector view. ``local_ok``: whether the 本机 MCP can serve a run now (only
+    Codex' account connector depends on it: its runs attach the 本机 MCP per run, see :meth:`MCPLink.for_run`)."""
     state = "user_removed" if view.get("entry") == "user_removed" and view["state"] == "none" else view["state"]
     if view.get("too_old"):
         state = "too_old"
@@ -465,9 +467,21 @@ def label(view: dict) -> str:
                      else f"ChatGPT 账户连接器 {use}" if view.get("kind") == "codex" else use)
     if view.get("source") == "user":
         account_label = "你确认已连接"
+    if view.get("kind") == "codex" and view["state"] == "gateway_account" and not view.get("too_old"):
+        # codex exec (approval "never") cannot approve an account app's tools: chat runs do not use it
+        text = f"{account_label}（codex exec 无法审批它的工具）"
+        text += CODEX_ACCOUNT_NOTE if local_ok is not False else CODEX_ACCOUNT_DOWN
+        if view.get("stale"):
+            text += "；它的工具列表也过时了，在交互式 Codex 里用之前，请到 ChatGPT 的连接器设置里刷新"
+        return text
     return LABELS.get(state, state).format(use=use, also="、".join(view.get("also") or []),
                                            account_label=account_label, version=view.get("cli_version") or "",
                                            vendor="Claude" if view.get("kind") == "claude" else " ChatGPT ")
+
+
+#: Codex with an account connector: what chat runs do instead (see for_run), when the 本机 MCP can / cannot serve.
+CODEX_ACCOUNT_NOTE = "；对话中临时接入本机 MCP（不写入配置）"
+CODEX_ACCOUNT_DOWN = "；本机 MCP 不可用，对话里调用不了 Agent Nexus 工具，请先开启本机 MCP（本机控制台 → 设置 → 本机 MCP）"
 
 
 def version_ok(kind: str, version: str | None) -> bool:
@@ -614,7 +628,8 @@ class MCPLink:
             resolved["entry"] = "user_removed" if owned.get("state") == "ours" else owned.get("state")
         if owned and owned.get("backup"):
             resolved["backup"] = owned["backup"]
-        resolved["label"] = label(resolved)
+        local_state = self.local.state()
+        resolved["label"] = label(resolved, local_ok=local_state not in ("off", "exposed", *NOT_SERVING))
         return resolved
 
     def for_run(self, kind: str, account: Any, env: dict | None = None, *, api: bool = False,
@@ -647,6 +662,16 @@ class MCPLink:
             view = {**view, "use": NAME, "tool_prefix": mcp_probe.tool_prefix(kind, NAME)}
         elif view["state"] == "unsupported" and not attach:
             view = {**view, "use": None}
+        elif kind == "codex" and view["state"] == "gateway_account" and serving and flags is not False \
+                and not view.get("too_old"):
+            # A ChatGPT account connector (an app under codex_apps): `codex exec` runs with approval "never" and an
+            # app's tools cannot be approved per run without its connector id, so every call would be refused
+            # ("MCP tool call requires approval"). The run attaches the 本机 MCP with per-run flags instead (no
+            # file is written; decide() still keeps config.toml free of an entry while the account connector exists).
+            old = view.get("use")
+            view = {**view, "use": NAME, "tool_prefix": mcp_probe.tool_prefix(kind, NAME), "shadowed": old,
+                    "also": [n for n in [old, *(view.get("also") or [])] if n and n != NAME], "run_only": True}
+            attach = "flags"
         if view["state"] == "both" and local_state != "ready" and view.get("also"):
             # the local entry cannot serve now: the run uses the other Agent Nexus connector, which may well work
             other, rest = view["also"][0], view["also"][1:]

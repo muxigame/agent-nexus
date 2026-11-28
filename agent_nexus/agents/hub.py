@@ -28,8 +28,10 @@ from . import registry, sessions, workdirs
 from .api import config as api_config
 from .api import service as api_service
 from .installs import InstallError, Installs
+from .mcp_probe import NAME as MCP_NAME
+from .mcp_probe import codex_models, codex_models_cache
 from .prompts import Prompts
-from .runner import RunError, Runs, _within
+from .runner import RunError, Runs
 from .tmpdirs import TmpDirs
 from .workdirs import Recent
 
@@ -43,13 +45,14 @@ OPS: tuple[str, ...] = (
     "agent_run_open", "agent_run_send", "agent_run_read", "agent_run_answer", "agent_run_stop", "agent_run_close",
     "agent_run_list",
     "agent_dirs", "agent_prompts", "agent_prompt_save", "agent_prompt_preview",
-    "agent_tmp_list", "agent_tmp_clean",
+    "agent_tmp_list", "agent_tmp_clean", "agent_models",
     *api_service.OPS,
 )
 READ_WAIT_S = 20.0
 #: How long a forwarded call may take before the caller gives up waiting (it is never cancelled).
 CALL_TIMEOUT_S = {"agent_info": 45.0, "agent_install": 45.0, "agent_sessions": 45.0, "agent_session_read": 45.0,
-                  "agent_run_open": 60.0, "agent_api_test": 45.0, "agent_api_models": 45.0}
+                  "agent_run_open": 60.0, "agent_api_test": 45.0, "agent_api_models": 45.0,
+                  "agent_models": 45.0}
 DEFAULT_TIMEOUT_S = 30.0
 SWEEP_EVERY_S = 6 * 3600.0
 NO_GATEWAY_NOTE = "无网关：ask_user / 邮件暂不可用，对话本身不受影响"
@@ -167,14 +170,51 @@ def mcp_hint(nx: dict | None, v: dict) -> str:
     if nx.get("acp_pending"):
         return (f"本次对话尝试接入 Agent Nexus MCP（连接器 {name}）；如果你的工具里没有它，说明这个 Agent 接不了，"
                 "就不要调用这些工具。" + tail)
-    head = f"本次对话已接入 Agent Nexus MCP（连接器 {name}" + (f"，工具名前缀 {prefix}" if prefix else "") + "）。"
-    if nx.get("also"):
+    lead = "本次对话临时接入了本机 Agent Nexus MCP" if nx.get("shadowed") else "本次对话已接入 Agent Nexus MCP"
+    head = f"{lead}（连接器 {name}" + (f"，工具名前缀 {prefix}" if prefix else "") + "）。"
+    if nx.get("shadowed"):
+        shadowed = nx["shadowed"]
+        head += (f"ChatGPT 账户连接器 {shadowed}（codex_apps 下的 {shadowed}.* 工具）指向同一个网关，但它的调用需要审批，"
+                 f"在这里会被拒绝（它的工具列表也可能过时）：只用 {name} 的工具，不要调用 {shadowed}.*。")
+    elif nx.get("also"):
         head += f"另有 {'、'.join(nx['also'])} 指向同一个网关，只用 {name}，不要重复调用。"
     ours = bool(nx.get("attach")) or nx.get("state") == "local" or \
         (nx.get("state") == "both" and not nx.get("swapped"))
     if ours and nx.get("local_state") not in (None, "ready"):
         head += f"注意：本机 MCP 现在不可用（{nx.get('local_reason')}），恢复前这些工具只会返回状态。"
     return head + tail
+
+
+def shadow_hint(nx: dict | None) -> str:
+    """Without a handle (no gateway): only the warning that a Codex account connector's tools are refused here."""
+    if not nx or not nx.get("shadowed"):
+        return ""
+    shadowed = nx["shadowed"]
+    return (f"ChatGPT 账户连接器 {shadowed}（codex_apps 下的 {shadowed}.* 工具）的调用需要审批，在这里会被拒绝，"
+            f"不要调用 {shadowed}.*；需要 Agent Nexus 工具时用连接器 {connector_name(nx) or MCP_NAME}。")
+
+
+MODELS_TTL_S = 600.0
+#: a failed or empty ``model/list`` is not asked again for this long; ``fresh`` re-asks at most this often
+MODELS_RETRY_S = 60.0
+
+
+def _cli_default_model(kind: str, home: Path, env: dict) -> str | None:
+    """The model a CLI uses by its own settings (codex ``config.toml`` ``model``, Claude ``settings.json``
+    ``model``): non-credential files, read for the menu's "默认模型（X）"."""
+    try:
+        if kind == "codex":
+            import tomllib
+            base = Path(env.get("CODEX_HOME") or Path(home) / ".codex")
+            value = tomllib.loads((base / "config.toml").read_text(encoding="utf-8")).get("model")
+        elif kind == "claude":
+            import json
+            value = json.loads((Path(home) / ".claude" / "settings.json").read_text(encoding="utf-8")).get("model")
+        else:
+            return None
+    except (OSError, ValueError, AttributeError):
+        return None
+    return value if registry.model_ok(value) else None
 
 
 def _error(message: str, code: str, **extra: Any) -> dict:
@@ -218,6 +258,9 @@ class AgentHub:
         self._sweeper: asyncio.Task | None = None
         self._last_sweep = 0.0
         self._releases: set[asyncio.Task] = set()
+        #: (account, kind) -> (asked at, payload, ok): ok=False is a short negative entry (MODELS_RETRY_S)
+        self._models_cache: dict[tuple[str, str], tuple[float, dict, bool]] = {}
+        self._models_locks: dict[tuple[str, str], asyncio.Lock] = {}
 
     # -- context -------------------------------------------------------------------------------------------
     def definitions(self) -> dict[str, registry.AgentDef]:
@@ -261,10 +304,60 @@ class AgentHub:
         except Exception:  # noqa: BLE001
             return []
 
-    def _roots(self) -> list[str]:
+    def _root_entries(self, *, drives: bool | None = None) -> list[dict]:
+        """Where a work folder may be picked and run: the run-as account's HOME, the registered workspaces and, on
+        Windows, every drive root (what the device's file share exposes anyway)."""
         account = self._account()
-        roots = workdirs.default_roots(str(self._home(account)), self._workspaces())
-        return [root["path"] for root in roots]
+        return workdirs.default_roots(str(self._home(account)), self._workspaces(), drives=drives)
+
+    def _roots(self) -> list[str]:
+        return [root["path"] for root in self._root_entries()]
+
+    def _state_dirs(self) -> list[str]:
+        """Agent Nexus' own state (keys, device credentials): never a work folder."""
+        return [str(self.root / ".anx"), str(self.root / ".mcp-manager")]
+
+    async def _workdir_ok(self, workdir: str, kind: str, resume_id: str = "") -> dict | None:
+        """None when ``workdir`` may be used, else the error. Allowed: inside the roots, or exactly a folder this
+        device already ran a CLI in (a recent folder, the recorded folder of the session being resumed or of another
+        discovered session of this CLI) -- the CLI ran there already, so it adds no reach. Never Agent Nexus' own
+        state folders, nor what :func:`workdirs.cwd_refused` refuses (a drive or file system root, a system folder,
+        a folder that contains Agent Nexus' root other than HOME): those also defeat the exceptions, whose folders
+        come from transcripts anything writing HOME can forge. The roots (drive enumeration, realpath) are worked
+        out in a thread: a stale network drive must not stall the event loop."""
+        for denied in self._state_dirs():
+            if workdirs.allowed(workdir, [denied]):
+                return _error(f"不能把 Agent Nexus 自己的数据目录当作工作目录：{workdir}", "workdir_not_allowed")
+        account = self._account()
+        env = self._env(account)
+        home = self._home(account, env)
+        why = await asyncio.to_thread(workdirs.cwd_refused, workdir, [self.root, home], [home])
+        if why:
+            return _error(f"不能把{why}当作工作目录：{workdir}（请选它下面的具体项目目录）", "workdir_not_allowed")
+        roots = await asyncio.to_thread(self._roots)
+        if await asyncio.to_thread(workdirs.allowed, workdir, roots):
+            return None
+        try:
+            recent = [item["path"] for item in await asyncio.to_thread(self.recent.list, limit=50, existing=True)]
+        except (OSError, ValueError):
+            recent = []
+        if workdirs.allowed(workdir, (), recent):
+            return None
+        defs = {k: d for k, d in self.cli_definitions().items() if k == kind}
+        if defs:
+            try:
+                if resume_id:
+                    found = await asyncio.to_thread(sessions.find, defs, home, kind, resume_id, env=env)
+                    if found and found.get("cwd") and workdirs.allowed(workdir, (), [found["cwd"]]):
+                        return None
+                listed = await asyncio.to_thread(sessions.discover, defs, home, kind=kind, limit=200, env=env)
+                if workdirs.allowed(workdir, (), [s.get("cwd") for s in listed if s.get("cwd")]):
+                    return None
+            except Exception:  # noqa: BLE001 - an unreadable transcript only means no exception
+                log.debug("agents: listing sessions for the workdir check failed", exc_info=True)
+        where = "执行账户的主目录、已登记的工作区" + ("、各磁盘里的目录" if workdirs.WINDOWS else "")
+        return _error(f"工作目录不在允许的范围内：{workdir}（可选：{where}，以及本机 CLI 用过的目录；"
+                      "其他位置请先登记为工作区）", "workdir_not_allowed")
 
     def _device(self) -> dict:
         try:
@@ -300,7 +393,7 @@ class AgentHub:
         try:
             fresh = not getattr(run.opts, "resume_id", None)  # a resumed session keeps the CLI's own title
             self.meta.set(run.kind, session_id, managed=True, rid=run.rid, address=run.address or None,
-                          context=self._meta_context(run.context),
+                          context=self._meta_context(run.context), model=getattr(run.opts, "model", "") or None,
                           **({"first_prompt": run.last_prompt} if fresh and run.last_prompt else {}))
         except (OSError, ValueError):
             log.warning("agents: could not record session %s", session_id)
@@ -327,8 +420,8 @@ class AgentHub:
         if handle:
             self._release_soon(handle)
         if run.session_id:
-            try:
-                self.meta.set(run.kind, run.session_id, rid=None)
+            try:  # the model the run ended on: switches made during the run (agent_run_send) included
+                self.meta.set(run.kind, run.session_id, rid=None, model=getattr(run.opts, "model", "") or None)
             except (OSError, ValueError):
                 pass
 
@@ -536,6 +629,8 @@ class AgentHub:
         result: dict[str, Any] = {"kind": kind, "session_id": session_id, "events": events}
         if entry.get("address"):
             result["address"] = entry["address"]
+        if entry.get("model"):
+            result["model"] = entry["model"]  # the model the console last asked for (§16.7)
         run = next((r for r in self.runs.runs.values() if r.kind == kind and r.session_id == session_id), None)
         if run is not None:
             result["rid"] = run.rid
@@ -610,8 +705,12 @@ class AgentHub:
             return _error("会话 ID 格式不对", "bad_resume_id")
         if resume_id and not d.resume:
             return _error(f"{d.label} 不支持续接已有会话，发消息会开一个新对话", "resume_unsupported")
-        if not _within(workdir, self._roots()):
-            return _error(f"工作目录不在允许的范围内：{workdir}", "workdir_not_allowed")
+        model = params.get("model")
+        if model is not None and not (isinstance(model, str) and (not model.strip() or registry.model_ok(model.strip()))):
+            return _error(registry.MODEL_ERROR, "bad_model")
+        refused = await self._workdir_ok(workdir, kind, resume_id)
+        if refused is not None:
+            return refused
         run_env = self.runs._env(account, None)
         api_spec: dict | None = None
         if d.adapter == "api":  # an API model (§16.4): no binary; its provider, model and key instead
@@ -671,7 +770,7 @@ class AgentHub:
         connector = connector_name(nx)
         variables.update(mcp=connector or "", mcp_prefix=(nx or {}).get("tool_prefix") or "" if connector else "",
                          mcp_state=(nx or {}).get("state") or "")
-        variables["mcp_hint"] = mcp_hint(nx, variables) if handle else ""
+        variables["mcp_hint"] = mcp_hint(nx, variables) if handle else shadow_hint(nx)
         draft = params.get("draft") if isinstance(params.get("draft"), dict) else None
         if draft is None and isinstance(params.get("fragments"), list):
             draft = {"fragments": params["fragments"], "presets": self.prompts.load()["presets"]}
@@ -686,8 +785,8 @@ class AgentHub:
         if params.get("system_prompt") is False:
             system_prompt = ""
 
-        console = {key: params[key] for key in ("kind", "workdir", "prompt", "resume_id", "permission", "title")
-                   if key in params}
+        console = {key: params[key] for key in ("kind", "workdir", "prompt", "resume_id", "permission", "title",
+                                                "model") if key in params}
         console["workdir"] = workdir
         if api_spec is not None and handle:
             # ask_user / mail_send of an API model (§16.4): through the gateway, as this run's mailbox address
@@ -702,8 +801,9 @@ class AgentHub:
                 extra["mcp_url"] = nx["url"]  # {mcp_url} of custom CLIs
             if nx.get("attach") == "flags" and use:
                 extra["mcp_attach"] = {"name": use, "url": nx["url"], "gateway": mode == "gateway"}
-            if use and kind == "codex" and connector_name(nx) and nx.get("source") != "account:chatgpt" \
-                    and nx["state"] != "gateway_account":
+            run_only = nx.get("attach") == "flags" and use == MCP_NAME
+            if use and kind == "codex" and (run_only or (connector_name(nx) and nx.get("source") != "account:chatgpt"
+                                                         and nx["state"] != "gateway_account")):
                 # codex exec never asks: the tools this permission mode allows are approved, every other tool of
                 # the connector is left out of the run (enabled_tools), never approved
                 extra["mcp_approve"] = [use]
@@ -714,6 +814,12 @@ class AgentHub:
                 allowed = claude_allowed(nx.get("tool_prefix") or "", permission, mode)
                 if allowed:
                     extra["mcp_allow"] = allowed
+            if kind == "codex" and nx.get("state") == "gateway_account" and nx.get("attach") != "flags":
+                # an account app's tools need an approval codex exec never gives, and the 本机 MCP cannot stand in
+                events.append({"type": "error", "level": "warn",
+                               "text": f"Codex 的 ChatGPT 账户连接器 {use or ''} 的工具需要审批，codex exec 无法审批；"
+                                       f"本机 MCP 当前不可用（{nx.get('local_reason') or nx.get('local_state') or '未知'}），"
+                                       "本次对话调用不了 Agent Nexus 工具"})
             observe = self._observer(kind, account)
             if observe is not None:
                 extra["on_mcp"] = observe
@@ -735,7 +841,7 @@ class AgentHub:
                 extra["mcp_approve"] = names
         try:
             result = await self.runs.open(console, binary=binary, system_prompt=system_prompt, tmpdir=str(tmpdir),
-                                          address=address, rid=rid, events=events, extra=extra)
+                                          address=address, rid=rid, events=events, extra=extra, workdir_ok=True)
         except RunError as exc:
             await asyncio.to_thread(self.tmp.clean, rid)
             if handle:
@@ -764,6 +870,11 @@ class AgentHub:
                 self.meta.set(kind, resume_id, managed=True, rid=rid, address=address)
             except (OSError, ValueError):
                 pass
+        if resume_id and run is not None:  # the model this open asked for; None: the CLI's default (§16.7)
+            try:
+                self.meta.set(kind, resume_id, model=result.get("model") or None)
+            except (OSError, ValueError, TypeError):
+                pass
         # the context the session now runs in (a gateway target, or cleared for direct): a resumed one at once, a new
         # one whose id arrived before run.context was set here too (else _on_session records it)
         session_id = resume_id or (getattr(run, "session_id", None) if run is not None else None)
@@ -788,7 +899,10 @@ class AgentHub:
                 "note": "这个会话已经在另一个窗口运行，已切换到那个对话"}
         if prompt.strip():
             try:
-                await self.runs.send({"rid": run.rid, "prompt": prompt})
+                sent = {"rid": run.rid, "prompt": prompt}
+                if params.get("model") is not None:
+                    sent["model"] = params["model"]
+                await self.runs.send(sent)
             except RunError as exc:
                 if exc.code == "busy":
                     return _error("这个会话已经在另一个窗口运行，上一轮还没结束；已切换到那个对话，等它结束再发",
@@ -824,14 +938,81 @@ class AgentHub:
 
         return {**base, "agent_run_read": read, "agent_run_list": listing}
 
+    # -- models (§16.7) --------------------------------------------------------------------------------------
+    async def agent_models(self, params: dict) -> dict:
+        """``{kind, models: [{id, label, desc?, default?}], default, source: cli|cache|session|hints}``: what the
+        model menu offers. Codex asks its app-server (``model/list``; cached), else reads its models cache; ACP
+        agents tell at session start (a running run's list); the rest are the definition's hints."""
+        kind = str(params.get("kind") or "")
+        d = self.definitions().get(kind)
+        if d is None:
+            return _error(f"不认识的 Agent：{kind or '（未选择）'}", "unknown_kind")
+        account = self._account()
+        env = self._env(account)
+        home = self._home(account, env)
+        out: dict[str, Any] = {"kind": kind, "models": [dict(h) for h in d.model_hints], "source": "hints",
+                               "default": await asyncio.to_thread(_cli_default_model, kind, home, env),
+                               "flag": bool(d.model_args), "protocol": d.adapter == "acp"}
+        if d.adapter == "api":
+            return {**out, "models": [], "source": "api", "flag": False}
+        if kind == "codex":
+            key = (getattr(account, "name", None) or "", kind)
+            # one app-server at a time per account (it also starts the user's stdio MCP servers): callers wait
+            # for the one asking, and a failure is not retried for MODELS_RETRY_S
+            lock = self._models_locks.setdefault(key, asyncio.Lock())
+            async with lock:
+                found = await self._codex_models(key, d, env, account, fresh=bool(params.get("fresh")))
+            if found.get("models"):
+                return {**out, "models": found["models"], "source": found.get("source") or "cli"}
+            listed = await asyncio.to_thread(codex_models_cache, home, env)
+            if listed:
+                return {**out, "models": listed, "source": "cache"}
+            if found.get("error"):
+                out["note"] = found["error"]
+            return out
+        if d.adapter == "acp":
+            for run in self.runs.runs.values():
+                choices = getattr(run.adapter, "model_choices", None)
+                if run.kind == kind and choices is not None:
+                    listed = [{k: c[k] for k in ("id", "label", "desc") if c.get(k)} for c in choices()]
+                    if listed:
+                        return {**out, "models": listed, "source": "session"}
+        return out
+
+    async def _codex_models(self, key: tuple[str, str], d: registry.AgentDef, env: dict, account: Any, *,
+                            fresh: bool) -> dict:
+        """``model/list`` through the cache: a good answer for MODELS_TTL_S, a failed / empty one for MODELS_RETRY_S;
+        ``fresh`` skips the cache only when the entry is older than MODELS_RETRY_S."""
+        now = time.monotonic()
+        cached = self._models_cache.get(key)
+        if cached:
+            age, payload, ok = now - cached[0], cached[1], cached[2]
+            if age < MODELS_RETRY_S or (ok and age < MODELS_TTL_S and not fresh):
+                return {**payload, "source": "cache" if not ok else payload.get("source", "cli")}
+        binary = await asyncio.to_thread(registry.locate, d, env)
+        found: dict = {}
+        if binary:
+            found = await asyncio.to_thread(codex_models, binary, env, self._popen(account))
+        if found.get("models"):
+            payload = {"models": found["models"], "source": "cli"}
+            self._models_cache[key] = (time.monotonic(), payload, True)
+            return payload
+        payload = {"models": [], **({"error": found["error"]} if found.get("error") else {})}
+        self._models_cache[key] = (time.monotonic(), payload, False)
+        return payload
+
     # -- folders ---------------------------------------------------------------------------------------------
     async def agent_dirs(self, params: dict) -> dict:
-        account = self._account()
-        home = str(self._home(account))
-        workspaces = self._workspaces()
-        roots = workdirs.default_roots(home, workspaces, drives=bool(params.get("drives")))
+        home = str(self._home(self._account()))
+        # drives: on by default on Windows (an older console never asks for them); ``drives: false`` leaves them out
+        drives = False if params.get("drives") is False else None
         path = params.get("path") if isinstance(params.get("path"), str) and params.get("path").strip() else None
-        listed = await asyncio.to_thread(workdirs.list_dirs, path, roots, hidden=bool(params.get("hidden")))
+
+        def listing() -> tuple[list[dict], dict]:  # drive enumeration and realpath: off the event loop
+            entries = self._root_entries(drives=drives)
+            return entries, workdirs.list_dirs(path, entries, hidden=bool(params.get("hidden")))
+
+        roots, listed = await asyncio.to_thread(listing)
         if "error" in listed:
             return listed
         kind = params.get("kind") if isinstance(params.get("kind"), str) else None
@@ -876,6 +1057,7 @@ class AgentHub:
             "agent_prompt_save": threaded(prompt_ops["agent_prompt_save"]),
             "agent_prompt_preview": threaded(prompt_ops["agent_prompt_preview"]),
             "agent_tmp_list": threaded(self.tmp.op_list), "agent_tmp_clean": threaded(self.tmp.op_clean),
+            "agent_models": self.agent_models,
             **self.api.handlers(),
         }
         assert set(table) == set(OPS), set(table) ^ set(OPS)

@@ -341,18 +341,15 @@ def _codex_scan(value: Any, gateway_host: str, stale: set | None = None) -> list
     return out
 
 
-def probe_codex(binary: str, env: dict, run_as: dict | None, gateway_host: str,
-                timeout: float = CODEX_PROBE_TIMEOUT_S) -> dict:
-    """Ask ``codex app-server`` (stdio JSON-RPC) for the account's apps and the MCP server status.
-
-    The method names are not assumed: each candidate is sent, and one the server does not know (a JSON-RPC error)
-    simply does not count. Seen in codex-cli 0.164.0's binary: ``app/list`` and ``mcpServerStatus/list``. No
-    answer to either → ``unknown``."""
+def codex_rpc(binary: str, env: dict, run_as: dict | None, calls: list[tuple[str, dict]], *,
+              timeout: float = CODEX_PROBE_TIMEOUT_S, done: Any = None) -> dict:
+    """``calls`` to ``codex app-server`` (stdio JSON-RPC) after its ``initialize``: ``{"answers": {index: message},
+    "initialized": bool}`` or ``{"error": ...}``. ``done(answers)`` may end the wait early. Never raises."""
     from .. import __version__
     requests = [{"id": 1, "method": "initialize",
                  "params": {"clientInfo": {"name": "agent-nexus", "title": "Agent Nexus", "version": __version__}}},
                 {"method": "initialized"}]
-    requests += [{"id": 10 + n, "method": method, "params": {}} for n, method in enumerate(CODEX_METHODS)]
+    requests += [{"id": 10 + n, "method": method, "params": params} for n, (method, params) in enumerate(calls)]
     argv = registry.runnable(binary, ["app-server"])
     cwd = registry._home(env) or None
     try:
@@ -368,7 +365,7 @@ def probe_codex(binary: str, env: dict, run_as: dict | None, gateway_host: str,
             proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                     cwd=cwd, env=env, **extra)
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
-        return {"state": "unknown", "connectors": [], "error": str(exc)}
+        return {"error": str(exc)}
     lines: queue.Queue = queue.Queue()
 
     def pump():
@@ -378,7 +375,7 @@ def probe_codex(binary: str, env: dict, run_as: dict | None, gateway_host: str,
         lines.put(None)
 
     threading.Thread(target=pump, daemon=True).start()
-    answers: dict[int, dict] = {}
+    raw_answers: dict[int, dict] = {}
     deadline = time.monotonic() + timeout
     try:
         def write(message: dict) -> None:
@@ -400,32 +397,96 @@ def probe_codex(binary: str, env: dict, run_as: dict | None, gateway_host: str,
                 continue
             if not isinstance(message, dict) or not isinstance(message.get("id"), int) or "method" in message:
                 continue
-            answers[message["id"]] = message
+            raw_answers[message["id"]] = message
             if message["id"] == 1 and not sent:
                 for request in requests[1:]:
                     write(request)
                 sent = True
-            if all(10 + n in answers for n in range(len(CODEX_METHODS))):
+            answers = {i - 10: m for i, m in raw_answers.items() if i >= 10}
+            if len(answers) == len(calls) or (done is not None and done(answers)):
                 break
-            status = answers.get(10 + CODEX_METHODS.index("mcpServerStatus/list"))
-            if status and "result" in status and _codex_scan(status["result"], gateway_host):
-                break  # found: app/list (a full catalogue, ~1 min on a busy account) is not needed
     except (OSError, ValueError) as exc:
-        return {"state": "unknown", "connectors": [], "error": str(exc)}
+        return {"error": str(exc)}
     finally:
         with contextlib.suppress(Exception):
             proc.stdin.close()
         with contextlib.suppress(Exception):
             proc.kill()
-    results = [answers[10 + n].get("result") for n in range(len(CODEX_METHODS))
-               if 10 + n in answers and "result" in answers[10 + n]]
+    return {"answers": {i - 10: m for i, m in raw_answers.items() if i >= 10}, "initialized": 1 in raw_answers}
+
+
+def probe_codex(binary: str, env: dict, run_as: dict | None, gateway_host: str,
+                timeout: float = CODEX_PROBE_TIMEOUT_S) -> dict:
+    """Ask ``codex app-server`` (stdio JSON-RPC) for the account's apps and the MCP server status.
+
+    The method names are not assumed: each candidate is sent, and one the server does not know (a JSON-RPC error)
+    simply does not count. Seen in codex-cli 0.164.0's binary: ``app/list`` and ``mcpServerStatus/list``. No
+    answer to either → ``unknown``."""
+    status_at = CODEX_METHODS.index("mcpServerStatus/list")
+
+    def found(answers: dict) -> bool:
+        status = answers.get(status_at)
+        # found: app/list (a full catalogue, ~1 min on a busy account) is not needed
+        return bool(status and "result" in status and _codex_scan(status["result"], gateway_host))
+
+    out = codex_rpc(binary, env, run_as, [(method, {}) for method in CODEX_METHODS], timeout=timeout, done=found)
+    if "error" in out:
+        return {"state": "unknown", "connectors": [], "error": out["error"]}
+    answers = out["answers"]
+    results = [answers[n].get("result") for n in range(len(CODEX_METHODS)) if n in answers and "result" in answers[n]]
     if not results:
         return {"state": "unknown", "connectors": [],
-                "error": "codex app-server 没有回答" if 1 not in answers else "codex app-server 不支持查询连接器"}
+                "error": "codex app-server 没有回答" if not out["initialized"] else "codex app-server 不支持查询连接器"}
     stale: set = set()
     connectors = _codex_scan(results, gateway_host, stale)
     return {"state": "present" if connectors else "absent",
             "connectors": [{"name": name, "prefix": "", "stale": name in stale} for name in connectors]}
+
+
+def codex_models(binary: str, env: dict, run_as: dict | None, timeout: float = CODEX_PROBE_TIMEOUT_S) -> dict:
+    """The models this Codex account may use (``codex app-server`` ``model/list``, §16.7):
+    ``{"models": [{id, label, desc, default?}], "source": "cli"}`` or ``{"error": ...}``."""
+    out = codex_rpc(binary, env, run_as, [("model/list", {"includeHidden": False, "limit": 100})], timeout=timeout)
+    if "error" in out:
+        return {"error": out["error"]}
+    answer = out["answers"].get(0) or {}
+    result = answer.get("result") if isinstance(answer.get("result"), dict) else None
+    if result is None:
+        return {"error": "codex app-server 没有回答" if not out["initialized"] else "codex app-server 不支持列出模型"}
+    models = []
+    for item in result.get("data") or []:
+        if not isinstance(item, dict) or item.get("hidden"):
+            continue
+        model_id = str(item.get("model") or item.get("id") or "")
+        if not registry.model_ok(model_id):
+            continue
+        entry = {"id": model_id, "label": str(item.get("displayName") or model_id),
+                 "desc": str(item.get("description") or "")}
+        if item.get("isDefault"):
+            entry["default"] = True
+        models.append(entry)
+    return {"models": models, "source": "cli"}
+
+
+def codex_models_cache(home: Path, env: dict) -> list[dict]:
+    """Codex's own ``models_cache.json`` (CODEX_HOME, not a credential), read leniently: ``[{id, label, desc}]``."""
+    base = Path(env.get("CODEX_HOME") or Path(home) / ".codex")
+    try:
+        data = json.loads((base / "models_cache.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    items = data.get("models") if isinstance(data, dict) else data
+    if isinstance(items, dict):
+        items = items.get("data") or items.get("models")
+    out = []
+    for item in items if isinstance(items, list) else []:
+        if not isinstance(item, dict) or item.get("hidden") or item.get("visibility") in ("hide", "hidden"):
+            continue
+        model_id = str(item.get("slug") or item.get("model") or item.get("id") or "")
+        if registry.model_ok(model_id) and all(m["id"] != model_id for m in out):
+            out.append({"id": model_id, "label": str(item.get("display_name") or item.get("displayName") or model_id),
+                        "desc": str(item.get("description") or "")})
+    return out
 
 
 # -- the cache ---------------------------------------------------------------------------------------------------
@@ -494,6 +555,11 @@ class Probe:
         current = self.get(account, kind) or {}
         if current.get("source") == "user":
             return  # the owner's own answer stays
+        known = [c for c in current.get("connectors") or [] if isinstance(c, dict) and c.get("name")]
+        if known and connectors and all(str(c.get("name") or "") == "codex_apps" for c in connectors):
+            # a run only sees the server that carries the app ("codex_apps"): keep the app's own name and the
+            # stale flag the app-server scan found, or the stale note and the run's choice would be lost
+            connectors = known
         self.put(account, kind, {"state": "present" if connectors else "absent", "connectors": connectors,
                                  "source": source, "cli_version": version or current.get("cli_version")})
 

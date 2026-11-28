@@ -608,6 +608,12 @@ async def test_handler_errors_are_returned_not_raised(runs, work, tmp_path):
     restricted = Runs(registry.builtin_definitions(), roots=lambda: [str(tmp_path / "elsewhere")])
     assert (await restricted.handlers()["agent_run_open"]({"kind": "codex", "workdir": work}))["code"] == \
         "workdir_not_allowed"
+    # the hub allowed it (a folder this device's CLI already ran in): the runner does not refuse it again
+    allowed = await restricted.open({"kind": "codex", "workdir": work}, binary=CODEX, run_as=None, workdir_ok=True)
+    assert allowed["rid"] in restricted.runs and allowed["model"] is None
+    restricted.close_all()
+    assert (await restricted.handlers()["agent_run_open"]({"kind": "codex", "workdir": work, "workdir_ok": True}))[
+        "code"] == "workdir_not_allowed"  # never from the console's params
     missing = await runs.open({"kind": "dsh", "workdir": work, "prompt": "hi", "permission": "readonly"},
                               binary=ACP, run_as=None)
     reader = Reader(runs, missing["rid"])

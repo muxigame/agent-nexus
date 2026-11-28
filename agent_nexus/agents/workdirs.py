@@ -5,7 +5,13 @@
   nor a link pointing outside lets a listing escape the roots; a symlinked directory whose target is outside is not
   listed. Hidden entries (dot names; on Windows also the hidden/system attributes) are left out unless asked for.
   Without ``path`` the result is the roots themselves (the browser's starting point).
-* :func:`default_roots` builds the roots; on Windows it can add the drive roots (``C:\\``…) when the caller allows it.
+* :func:`default_roots` builds the roots; on Windows they include the drive roots (``C:\\``…) unless the caller
+  turns them off (``drives=False``). The same roots are where a chat may run (``AgentHub._workdir_ok``).
+* :func:`cwd_refused` refuses file system / drive roots, system folders and folders that contain Agent Nexus'
+  own data (except HOME itself). :func:`allowed` says whether a work folder may be used: inside a root, or exactly
+  one of ``extra_exact`` (the folders this device already ran a CLI in: recent folders, recorded session folders).
+  The work folder is the CLI's own sandbox and project boundary, so both checks apply (drive roots are browse roots,
+  never a work folder themselves).
 * :class:`Recent` keeps recently used directories in ``<root>/.anx/agents/recent.json``;
   :func:`frequent_cwds` ranks the working directories found in discovered sessions.
 
@@ -56,23 +62,108 @@ def _within(path: str, root: str) -> bool:
     return p.startswith(prefix)
 
 
+#: GetDriveTypeW values that are never offered: no root directory, or a network mapping (a stale SMB mapping makes
+#: ``isdir`` block for seconds)
+_DRIVE_SKIP = {1, 4}
+DRIVES_TTL_S = 10.0
+_drives_cache: tuple[float, list[str]] | None = None
+_drives_lock = threading.Lock()
+
+
+def _list_drives() -> list[str]:
+    import ctypes
+    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+    mask = kernel32.GetLogicalDrives()
+    drives: list[str] = []
+    for i, letter in enumerate(string.ascii_uppercase):
+        if not mask & (1 << i):
+            continue
+        drive = f"{letter}:\\"
+        try:
+            if int(kernel32.GetDriveTypeW(ctypes.c_wchar_p(drive))) in _DRIVE_SKIP:
+                continue
+        except Exception:  # noqa: BLE001 - unknown type: let isdir decide
+            pass
+        if os.path.isdir(drive):  # an empty card reader / DVD drive is not a root
+            drives.append(drive)
+    return drives
+
+
 def drive_roots() -> list[str]:
-    """Existing drive roots on Windows (``C:\\``, ``D:\\``…); ``[]`` elsewhere."""
+    """Local drive roots on Windows (``C:\\``, ``D:\\``…; network mappings and empty removable drives left out);
+    ``[]`` elsewhere. Cached for :data:`DRIVES_TTL_S` -- callers run it in a thread, never on the event loop."""
+    global _drives_cache
     if not WINDOWS:
         return []
-    drives: list[str] = []
-    try:
-        import ctypes
-        mask = ctypes.windll.kernel32.GetLogicalDrives()  # type: ignore[attr-defined]
-        drives = [f"{letter}:\\" for i, letter in enumerate(string.ascii_uppercase) if mask & (1 << i)]
-    except Exception:  # noqa: BLE001
-        drives = [f"{letter}:\\" for letter in string.ascii_uppercase if os.path.isdir(f"{letter}:\\")]
-    return [d for d in drives if os.path.isdir(d)]
+    with _drives_lock:
+        cached = _drives_cache
+        if cached and time.monotonic() - cached[0] < DRIVES_TTL_S:
+            return list(cached[1])
+        try:
+            drives = _list_drives()
+        except Exception:  # noqa: BLE001
+            drives = []
+        _drives_cache = (time.monotonic(), drives)
+        return list(drives)
 
 
-def default_roots(home: str | os.PathLike | None, workspaces: Iterable[Any] = (), *, drives: bool = False) -> list[dict]:
+#: system folders that are never a work folder, nor anything below them (POSIX)
+_POSIX_SYSTEM = ("/etc", "/usr", "/bin", "/sbin", "/boot", "/proc", "/sys", "/dev", "/lib", "/lib64", "/System",
+                 "/private/etc")
+#: folders that are never a work folder themselves (their sub-folders may be)
+_POSIX_EXACT = ("/var", "/opt", "/srv", "/home", "/Users", "/tmp", "/mnt", "/media", "/Volumes", "/private")
+
+
+def _windows_system() -> list[str]:
+    env = os.environ
+    names = [env.get("SystemRoot") or env.get("windir") or r"C:\Windows", env.get("ProgramFiles"),
+             env.get("ProgramFiles(x86)"), env.get("ProgramW6432"), env.get("ProgramData")]
+    return [n for n in names if n]
+
+
+def cwd_refused(path: str | os.PathLike, protect: Iterable[Any] = (), keep: Iterable[Any] = ()) -> str | None:
+    """Why ``path`` can never be a CLI's work folder (its sandbox and project root), or None. Refused: a file
+    system or drive root, a system folder (and on Windows anything below one), and ``protect`` (Agent Nexus' root)
+    or any folder containing it -- except the folders in ``keep`` (the run-as HOME, the default work folder)."""
+    real = _real(os.path.abspath(os.path.expanduser(str(path))))
+    key = _norm(real)
+    if _norm(os.path.dirname(real)) == key or (WINDOWS and key in {_norm(_real(d)) for d in drive_roots()}):
+        return "磁盘或文件系统的根目录"
+    if WINDOWS:
+        if any(_within(real, _real(system)) for system in _windows_system()):
+            return "系统目录"
+    else:
+        if any(_within(real, system) for system in _POSIX_SYSTEM) or key in {_norm(e) for e in _POSIX_EXACT}:
+            return "系统目录"
+    kept = {_norm(_real(os.path.abspath(os.path.expanduser(str(k))))) for k in keep or () if k}
+    for item in protect or ():
+        if item and _within(_real(os.path.abspath(str(item))), real) and key not in kept:
+            return "包含 Agent Nexus 自己数据的目录"
+    return None
+
+
+def allowed(path: str | os.PathLike, roots: Iterable[Any], extra_exact: Iterable[Any] = ()) -> bool:
+    """``path`` is inside one of ``roots`` (``str`` or ``{path}``), or is exactly one of ``extra_exact`` -- never a
+    folder below such an exception. Both sides are compared after resolving symlinks (see :func:`_norm`)."""
+    real = _real(os.path.abspath(os.path.expanduser(str(path))))
+    for root in roots or ():
+        base = root.get("path") if isinstance(root, Mapping) else root
+        if base and _within(real, _real(os.path.abspath(os.path.expanduser(str(base))))):
+            return True
+    key = _norm(real)
+    for item in extra_exact or ():
+        if item and _norm(_real(os.path.abspath(os.path.expanduser(str(item))))) == key:
+            return True
+    return False
+
+
+def default_roots(home: str | os.PathLike | None, workspaces: Iterable[Any] = (), *,
+                  drives: bool | None = None) -> list[dict]:
     """``[{name, path, kind: home|workspace|drive}]``: HOME first, then workspaces (``str`` or ``{name, path}``),
-    then (``drives``, Windows only) the drive roots. Missing directories and duplicates are dropped."""
+    then (``drives``, Windows only; None = on Windows) the drive roots. Missing directories and duplicates are
+    dropped."""
+    if drives is None:
+        drives = WINDOWS
     roots: list[dict] = []
     seen: set[str] = set()
 

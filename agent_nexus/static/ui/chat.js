@@ -1,5 +1,5 @@
 // Agent chat (docs/agent-chat.md §3, §4, §10, §11, §16): session sidebar grouped by CLI, a light head line
-// (会话列表 · title · ⋯), unified event stream, composer with a chip row (运行设备 / Agent / 目录 / 权限) and the
+// (会话列表 · title · ⋯), unified event stream, composer with a chip row (运行设备 / Agent / 模型 / 目录 / 权限) and the
 // context-usage ring.
 //
 //   import { mountChat } from "/ui/chat.js";
@@ -26,6 +26,7 @@ import {
   watchInstall, progressBar, jobActive, loginCommand, shortPath, toSeconds, mountTmpManager,
 } from "./agent-admin.js";
 import { mountPromptEditor } from "./prompts.js";
+import { kindSvg } from "./kind-icons.js";
 
 const PERMISSIONS = [
   ["ask", "需要审批", "改文件、运行命令前先问你"],
@@ -143,9 +144,38 @@ export const isApiKind = (kind) => String(kind || "").startsWith("api:");
 const apiName = (kind) => String(kind).slice(4).split("/").filter(Boolean).pop() || "API";
 function kindLabel(kind, info) { return isApiKind(kind) && !info?.label ? apiName(kind) : baseLabel(kind, info); }
 function kindShort(kind, info) { return isApiKind(kind) ? info?.label || apiName(kind) : baseShort(kind, info); }
-function kindMark(kind, opts = {}) {
-  if (!isApiKind(kind)) return baseMark(kind, opts);
-  return el("span", { class: `aa-mark ${opts.size || "sm"}`, dataset: { kind: "api" }, "aria-hidden": "true" }, "API");
+// the CLI's mark; API kinds get their provider's mark or a bolt (kind-icons.js)
+function kindMark(kind, opts = {}) { return baseMark(kind, opts); }
+
+// ---------------------------------------------------------------- the model (§16.7)
+
+/** What the console may send as `model` (registry.MODEL_RE on the device). */
+export const MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._:/@+=\[\]-]{0,99}$/;
+/** Whether the Agent's model can be chosen here: an older device tells nothing (no chip), API kinds are their model. */
+export function modelChoosable(info, kind) {
+  if (!kind || isApiKind(kind)) return false;
+  const m = info?.models;
+  return !!(m && (m.flag || m.protocol));
+}
+/** The chip's text: "默认模型" (with the CLI's own setting when known), else the model's label or its id. */
+export function modelLabel(id, list = {}) {
+  if (!id) return list.default ? `默认模型（${list.default}）` : "默认模型";
+  const hit = (list.models || []).find((m) => m.id === id);
+  return hit?.label && hit.label !== id ? `${hit.label}` : id;
+}
+/** The model menu's entries: default, the known models, the session's last one, then "其他模型…". */
+export function modelMenuItems(list = {}, current = "", { cli = "CLI", last = "" } = {}) {
+  const models = list.models || [];
+  const items = [{ id: "", label: "默认模型", desc: `使用 ${cli} 自己的设置${list.default ? `（${list.default}）` : ""}`, checked: !current }];
+  const lastNote = "这个会话上次用的";
+  for (const m of models) {
+    // the id only when it says more than the label (not "Sonnet" / "sonnet")
+    const id = m.label && m.label.toLowerCase() !== String(m.id).toLowerCase() ? m.id : "";
+    items.push({ id: m.id, label: m.label || m.id, desc: [id, m.desc || "", last && last === m.id ? lastNote : ""].filter(Boolean).join(" · "), checked: current === m.id });
+  }
+  if (current && !models.some((m) => m.id === current)) items.push({ id: current, label: current, desc: ["手动填写的模型", last === current ? lastNote : ""].filter(Boolean).join(" · "), checked: true });
+  if (last && last !== current && !models.some((m) => m.id === last)) items.push({ id: last, label: last, desc: lastNote, checked: false });
+  return items;
 }
 
 // ---------------------------------------------------------------- 本机 MCP note
@@ -162,6 +192,11 @@ export function nexusMcpNote(info) {
   const nx = info.nexus_mcp;
   if (!nx) { // an older device: only its config-file check
     return info.gateway_mcp === false ? { text: "未检测到网关连接器", down: "未检测到网关连接器", title: "在运行设备上添加网关 MCP（网关控制台 → 设置 → 在 AI 客户端中添加 Agent Nexus）" } : null;
+  }
+  if (nx.state === "gateway_account" && nx.run_only) return null; // Codex: the 本机 MCP is attached per run instead
+  if (nx.state === "gateway_account" && nx.kind === "codex" && NEXUS_MCP_DOWN[nx.local_state]) {
+    const down = NEXUS_MCP_DOWN[nx.local_state];
+    return { text: `Agent Nexus MCP：${down}`, down, title: `Codex 的 ChatGPT 账户连接器的工具需要审批，codex exec 无法审批；本机 MCP 不可用（${nx.local_reason || down}），对话里调用不了 Agent Nexus 工具（本机控制台 → 设置 → 本机 MCP）` };
   }
   if (nx.state === "gateway_account" && nx.stale) {
     return { text: "Agent Nexus 连接器过时", down: "连接器过时", title: nx.label || "账户里的 Agent Nexus 连接器工具列表过时：到它的连接器设置里刷新" };
@@ -407,7 +442,10 @@ export function mountChat(container, api, opts = {}) {
     sessions: [], sessionsState: "loading", sessionsError: "", filterKind: "all", query: "",
     session: null, rid: null, cursor: 0, runState: "idle", sessionId: null, address: null,
     deviceError: "", loading: true, gen: 0, alive: true, usage: null,
+    // the model per CLI kind (aliases are the same everywhere, so not per device); modelLists: per "device:kind"; runModel: what the open run uses
+    modelByKind: {}, modelLists: {}, runModel: null,
   };
+  { const stored = store.read().modelByKind; if (stored && typeof stored === "object") S.modelByKind = { ...stored }; }
   const installs = new Map();   // kind -> {watch, job}
   let convTimer = null;
   let fellBack = false;         // the "device offline, using another" toast is said once
@@ -853,10 +891,16 @@ export function mountChat(container, api, opts = {}) {
     for (const k of Object.keys(counts)) if (!kinds.includes(k) && k !== "api") kinds.push(k);
     if (counts.api) kinds.push("api");
     if (S.filterKind !== "all" && !kinds.includes(S.filterKind)) S.filterKind = "all";
+    const glyph = (key) => {
+      if (key === "all") return null;
+      const tpl = document.createElement("template");
+      tpl.innerHTML = kindSvg(key === "api" ? "api:" : key, { size: 12 });
+      return tpl.content.firstElementChild;
+    };
     const tab = (key, label, count) => el("button", {
-      class: "chat-kind", type: "button", role: "tab", "aria-selected": String(S.filterKind === key),
+      class: "chat-kind", type: "button", role: "tab", "aria-selected": String(S.filterKind === key), dataset: { kind: key },
       onclick: () => { S.filterKind = key; renderKinds(); renderSessions(); },
-    }, label);
+    }, glyph(key), label);
     mount(kindTabs, tab("all", "全部", 0), kinds.map((k) => tab(k, k === "api" ? "API" : kindShort(k, agentInfo(k)), counts[k] || 0)));
     requestAnimationFrame(kindsEdge);
   }
@@ -934,7 +978,7 @@ export function mountChat(container, api, opts = {}) {
     const busy = ["starting", "running"].includes(active ? S.runState : run.state);
     return el("div", { class: `chat-sess ${active ? "active" : ""}`, role: "listitem" },
       el("button", { class: "chat-sess-main", type: "button", "aria-current": active ? "true" : null, onclick: () => attachRun(run) },
-        showKind ? kindMark(run.kind) : null,
+        showKind ? kindMark(run.kind, { label: kindLabel(run.kind, agentInfo(run.kind)) }) : null,
         el("span", { class: "chat-sess-body" },
           el("span", { class: "chat-sess-title" }, busy ? el("span", { class: "chat-live", title: "进行中" }) : null, el("span", { class: "truncate" }, run.title || "新对话")),
           el("span", { class: "chat-sess-sub" }, el("span", { class: "truncate" }, whereText(run.context, run.workdir)), el("span", { class: "chat-sess-time" }, busy ? "进行中" : "空闲")))));
@@ -951,7 +995,7 @@ export function mountChat(container, api, opts = {}) {
       el("span", { class: "truncate" }, sessionTitle(s)));
     const node = el("div", { class: `chat-sess ${active ? "active" : ""} ${s.archived ? "archived" : ""}`, role: "listitem", dataset: { id: s.id, kind: s.kind } },
       el("button", { class: "chat-sess-main", type: "button", "aria-current": active ? "true" : null, title: whereTitle(s.context, s.cwd), onclick: () => openSession(s) },
-        showKind ? kindMark(s.kind) : null,
+        showKind ? kindMark(s.kind, { label: kindLabel(s.kind, agentInfo(s.kind)) }) : null,
         el("span", { class: "chat-sess-body" }, title,
           el("span", { class: "chat-sess-sub" }, el("span", { class: "truncate" }, whereText(s.context, s.cwd)),
             s.subagents > 0 ? el("span", { class: "chat-sess-subagents", title: `${s.subagents} 个子代理会话` }, `子代理 ${s.subagents}`) : null,
@@ -1042,7 +1086,7 @@ export function mountChat(container, api, opts = {}) {
   /** One chip of the composer's settings row: a small icon and a short value; the full text is its name. */
   function chip({ name, value, iconNode = null, onClick, cls = "" }) {
     return el("button", { class: `chat-chip ${cls}`, type: "button", "aria-haspopup": "true", "aria-expanded": "false", title: name, "aria-label": name, onclick: onClick },
-      iconNode, el("span", { class: "chat-chip-value" }, typeof value === "string" ? el("span", { class: "truncate" }, value) : value));
+      iconNode, value == null ? null : el("span", { class: "chat-chip-value" }, typeof value === "string" ? el("span", { class: "truncate" }, value) : value));
   }
 
   function renderBar() {
@@ -1053,7 +1097,7 @@ export function mountChat(container, api, opts = {}) {
       iconNode: icon(remote ? "monitor" : "laptop", { size: 14, cls: "chat-chip-icon" }), onClick: (event) => deviceMenu(event.currentTarget) });
     const agentName = S.kind ? kindShort(S.kind, info) : S.loading ? "检测中…" : "选择 Agent";
     const agent = chip({ name: `Agent：${S.kind ? `${kindLabel(S.kind, info)} · ${status.label}` : agentName}`, cls: `chat-chip-agent ${agentName.length <= 8 ? "fit" : ""}`,
-      iconNode: S.kind ? el("span", { class: `dot ${status.tone === "neutral" ? "" : status.tone}`, "aria-hidden": "true" }) : icon("bot", { size: 14, cls: "chat-chip-icon" }),
+      iconNode: S.kind ? agentChipMark(status) : icon("bot", { size: 14, cls: "chat-chip-icon" }),
       value: [el("span", { class: "truncate" }, agentName), S.kind && status.tone !== "ok" ? el("span", { class: "chat-chip-status" }, status.label) : null],
       onClick: (event) => agentMenu(event.currentTarget) });
     const folder = folderChip({ workdir: S.workdir, context: gatewayCtx() ? S.context : null, runnerName: deviceName(), targetName: targetName(S.context.device) });
@@ -1062,11 +1106,79 @@ export function mountChat(container, api, opts = {}) {
       iconNode: xicon(folder.gateway ? "network" : "folder", { size: 14, cls: "chat-chip-icon" }), onClick: (event) => dirMenu(event.currentTarget) });
     const perm = chip({ name: `权限：${permLabel()}`, value: permShort(), cls: `chat-chip-perm ${S.permission === "full" ? "danger" : ""}`,
       iconNode: icon(S.permission === "full" ? "triangle-alert" : "shield-check", { size: 14, cls: "chat-chip-icon" }), onClick: (event) => permissionMenu(event.currentTarget) });
-    mount(chips, device, agent, dir, perm);
+    // no model chosen: only the cpu icon (its title says 默认模型), so on a phone the folder and permission stay visible
+    const modelChip = modelChoosable(info, S.kind) ? chip({ name: `模型：${modelLabel(currentModel(), S.modelLists[modelKey(S.kind)])}`,
+      value: currentModel() ? modelLabel(currentModel(), S.modelLists[modelKey(S.kind)]) : null, cls: `chat-chip-model ${currentModel() ? "" : "dim icon-only"}`,
+      iconNode: xicon("cpu", { size: 14, cls: "chat-chip-icon" }), onClick: (event) => modelMenu(event.currentTarget) }) : null;
+    mount(chips, device, agent, modelChip, dir, perm);
     requestAnimationFrame(() => chipsEdge());
     renderTitle();
     renderCtxLine();
   }
+  // the Agent chip's icon: the CLI's mark, with a status dot when it is not ready
+  function agentChipMark(status) {
+    const mark = kindMark(S.kind, { size: "xs" });
+    mark.classList.add("chat-chip-icon");
+    if (status.tone && status.tone !== "ok") mark.dataset.tone = status.tone;
+    return mark;
+  }
+
+  // --- the model (§16.7)
+  function currentModel() { return (S.kind && S.modelByKind[S.kind]) || ""; }
+  // model lists are per device and kind: Codex' model/list is account-specific, the CLI default is the device's config
+  function modelKey(kind) { return `${S.device ?? ""}:${kind}`; }
+  function setModel(kind, id) {
+    S.modelByKind = { ...S.modelByKind, [kind]: id || "" };
+    store.write({ modelByKind: S.modelByKind });
+    renderBar();
+    if (S.rid && kind === S.kind && (id || "") !== (S.runModel || "")) toast(`下一轮起使用 ${id || "默认模型"}`, { type: "info", timeout: 2200 });
+  }
+  async function loadModels(kind, { fresh = false } = {}) {
+    const key = modelKey(kind);   // the device asked, even if the user switches devices meanwhile
+    if (S.modelLists[key] && !fresh) return S.modelLists[key];
+    const hints = agentInfo(kind)?.models?.hints || [];
+    let list;
+    try {
+      const value = await call("agent_models", { kind, fresh: fresh || undefined });
+      list = { models: Array.isArray(value?.models) && value.models.length ? value.models : hints, default: value?.default || "", source: value?.source || "hints" };
+    } catch {
+      list = { models: hints, default: "", source: "hints" };   // an older device: no agent_models
+    }
+    S.modelLists[key] = { ...(S.modelLists[key] || {}), ...list };
+    return S.modelLists[key];
+  }
+  async function modelMenu(anchor) {
+    const kind = S.kind;
+    if (!kind) return;
+    const list = await loadModels(kind);
+    if (kind !== S.kind || !anchor.isConnected) return;
+    const cli = kindShort(kind, agentInfo(kind));
+    const items = modelMenuItems(list, currentModel(), { cli, last: S.session?.kind === kind ? S.lastModel || "" : "" });
+    menu(anchor, [
+      ...items.map((item) => ({ label: item.label, desc: item.desc, checked: item.checked, onClick: () => setModel(kind, item.id) })),
+      "sep",
+      { label: "其他模型…", icon: "square-pen", onClick: () => otherModel(kind) },
+    ], { label: "模型" });
+  }
+  function otherModel(kind) {
+    const field = el("input", { class: "input", type: "text", value: currentModel(), placeholder: "例如 opus、gpt-5.6-sol、gemini-2.5-pro", spellcheck: "false", autocomplete: "off" });
+    const body = el("div", { class: "stack" },
+      el("p", { class: "muted" }, `填写 ${kindLabel(kind)} 认识的模型名或别名；留空用它自己的默认模型。`), field);
+    modal({
+      title: "其他模型", size: "sm", body,
+      actions: [
+        { label: "取消" },
+        { label: "使用", variant: "primary", onClick: () => {
+          const value = field.value.trim();
+          if (value && !MODEL_RE.test(value)) { toast("模型名只能包含字母、数字和 . _ - : / @ [ ] + =，最长 100 个字符", { type: "warn" }); return false; }
+          setModel(kind, value);
+          return true;
+        } },
+      ],
+    });
+    setTimeout(() => field.focus(), 0);
+  }
+
   // the chip's short form of the permission ("沙箱内自动"); the menu and the chip's name keep the full one
   function permShort() { return S.permission === "ask" && noApprovals() ? NO_APPROVAL_ASK[0].replace(/执行$/, "") : permLabel(); }
 
@@ -1448,10 +1560,11 @@ export function mountChat(container, api, opts = {}) {
       current = result.path || path || null;
       const dirs = (result.dirs || []).map((d) => (typeof d === "string" ? { name: d.split(/[\\/]/).pop(), path: d } : d));
       const roots = (result.roots || []).map((d) => (typeof d === "string" ? { name: d, path: d } : d));
+      if (!where && roots.some((r) => r.kind === "drive")) { const p = dialog.root.querySelector(".titles p"); if (p) p.textContent = describe(true); }
       mount(crumbs, current ? shortPath(current) : "选择一个起点");
       const items = [];
       if (current && result.parent) items.push(el("button", { class: "chat-browse-item up", type: "button", onclick: () => go(result.parent) }, xicon("corner-left-up", { size: 15 }), "上一级"));
-      if (!current) items.push(...roots.map((r) => el("button", { class: "chat-browse-item", type: "button", onclick: () => go(r.path) }, icon("hard-drive", { size: 15 }), el("span", { class: "truncate" }, r.name || r.path), el("span", { class: "faint xs mono truncate" }, shortPath(r.path)))));
+      if (!current) items.push(...roots.map((r) => el("button", { class: "chat-browse-item", type: "button", onclick: () => go(r.path) }, icon(r.kind === "drive" ? "hard-drive" : r.kind === "home" ? "user" : "folder-open", { size: 15 }), el("span", { class: "truncate" }, r.name || r.path), el("span", { class: "faint xs mono truncate" }, shortPath(r.path)))));
       // at the start the device sends the roots twice (as roots and as dirs): list them once
       if (current) items.push(...dirs.map((d) => el("button", { class: "chat-browse-item", type: "button", ondblclick: () => { usePick(d.path); dialog.close(); }, onclick: () => go(d.path) },
         xicon("folder", { size: 15 }), el("span", { class: "truncate" }, d.name), icon("chevron-right", { size: 14, cls: "faint" }))));
@@ -1460,7 +1573,9 @@ export function mountChat(container, api, opts = {}) {
       useBtn.disabled = !current;
     }
     const useBtn = el("button", { class: "btn btn-primary", type: "button", disabled: true, onclick: () => { if (current) { usePick(current); dialog.close(); } } }, "使用此目录");
-    const dialog = drawer({ title, description: where || `${deviceName(device)} 上的目录；只能在执行账户的主目录和已登记的工作区里选。`, body: el("div", { class: "chat-browse" }, crumbs, list),
+    // the sentence names the drives only when the device offers them (a Windows device sends roots of kind "drive")
+    const describe = (drives) => `${deviceName(device)} 上的目录；可选执行账户的主目录、已登记的工作区${drives ? "和各磁盘里的目录" : ""}。`;
+    const dialog = drawer({ title, description: where || describe(false), body: el("div", { class: "chat-browse" }, crumbs, list),
       footLeft: el("button", { class: "btn btn-ghost", type: "button", onclick: () => go(null) }, icon("hard-drive", { size: 15 }), "起点"),
       actions: [] });
     dialog.root.querySelector(".drawer-foot")?.append(el("button", { class: "btn", type: "button", onclick: () => dialog.close() }, "取消"), useBtn);
@@ -1607,6 +1722,7 @@ export function mountChat(container, api, opts = {}) {
   let lastBlock = null;         // {type, role, key, ev, node}
   const pendingUser = [];
   const notices = new Set();    // §16.6: one line per notice text per session
+  let lastModelLine = null;     // the model a "模型：X" line last named (said once per change)
   let turnUsage = null;         // the last live usage event's `turn`, for the "完成 · 输入 … 输出 …" line
   let apiBack = false;          // left for Agent 设置 → API (设置密钥)
 
@@ -1616,6 +1732,7 @@ export function mountChat(container, api, opts = {}) {
     pendingUser.length = 0;
     notices.clear();
     turnUsage = null;
+    lastModelLine = null;
     S.usage = null;
     renderUsage();
     mount(stream);
@@ -1718,6 +1835,17 @@ export function mountChat(container, api, opts = {}) {
         // a history turn's figures never label the next live turn's end line
         if (ev.turn && typeof ev.turn === "object" && !history) turnUsage = ev.turn;
         return;   // nothing in the stream itself: the ring and the turn line show it
+      }
+      case "model": {
+        // the run's model (a confirmed switch, or what an ACP agent offers at session start); S.lastModel stays the
+        // session metadata's (what the user chose), not the agent's own start-of-session report
+        if (Array.isArray(ev.options) && ev.options.length && S.kind) S.modelLists[modelKey(S.kind)] = { ...(S.modelLists[modelKey(S.kind)] || {}), models: ev.options, source: "session" };
+        if (!history && ev.model && ev.model !== lastModelLine) {
+          lastModelLine = ev.model;
+          put(null, el("div", { class: "chat-turn-end chat-note-line" }, xicon("cpu", { size: 13 }), el("span", {}, `模型：${ev.model}`)), ev);
+        }
+        if (!history) renderBar();
+        break;
       }
       case "status": {
         if (ev.session_id && ev.session_id !== S.sessionId) { S.sessionId = ev.session_id; if (!history) persist(); }
@@ -1971,7 +2099,7 @@ export function mountChat(container, api, opts = {}) {
   function newChat() {
     S.gen += 1;
     stopConversation();
-    Object.assign(S, { session: null, rid: null, cursor: 0, runState: "idle", sessionId: null, address: null });
+    Object.assign(S, { session: null, rid: null, cursor: 0, runState: "idle", sessionId: null, address: null, runModel: null });
     persist();
     clearStream();
     toggleSide(false);
@@ -1983,7 +2111,7 @@ export function mountChat(container, api, opts = {}) {
     S.gen += 1;
     const gen = S.gen;
     stopConversation();
-    Object.assign(S, { session: s, rid: null, cursor: 0, runState: "idle", sessionId: s.id, address: s.address || null, kind: s.kind || S.kind });
+    Object.assign(S, { session: s, rid: null, cursor: 0, runState: "idle", sessionId: s.id, address: s.address || null, kind: s.kind || S.kind, lastModel: "", runModel: null });
     // the session's context comes back with it: a gateway session works on its device's folder again (its cwd is
     // only the run device's base then), a direct one on its folder -- a dead folder never becomes the next chat's
     adoptContext(s.context);
@@ -2002,6 +2130,7 @@ export function mountChat(container, api, opts = {}) {
       result = await call("agent_session_read", { kind: s.kind, id: s.id });
       events = listOf(result, "events");
       if (result.address) S.address = result.address;
+      S.lastModel = result.model || "";   // the model the console last asked for in this session (§16.7)
     } catch (error) {
       if (gen !== S.gen) return;
       if (restoring && error.code === "not_found") {
@@ -2037,7 +2166,8 @@ export function mountChat(container, api, opts = {}) {
       clearStream();
       Object.assign(S, { session: S.sessions.find((x) => x.id === run.session_id) || null });
     }
-    Object.assign(S, { rid: run.rid, cursor: 0, runState: run.state || "running", kind: run.kind || S.kind, address: run.address || S.address });
+    Object.assign(S, { rid: run.rid, cursor: 0, runState: run.state || "running", kind: run.kind || S.kind, address: run.address || S.address,
+      runModel: run.model !== undefined ? run.model || "" : null });
     if (run.context) adoptContext({ ...run.context, name: run.context.name || run.context_device });
     else if (run.mode === "direct") adoptContext(null);
     else if (run.mode === "gateway") {
@@ -2104,8 +2234,12 @@ export function mountChat(container, api, opts = {}) {
     scrollToEnd(true);
     setRunState("starting");
     try {
+      const model = modelChoosable(agentInfo(), S.kind) ? currentModel() : "";
       if (S.rid) {
-        await call("agent_run_send", { rid: S.rid, prompt: text });
+        const sendParams = { rid: S.rid, prompt: text };
+        if (model !== (S.runModel || "") && modelChoosable(agentInfo(), S.kind)) sendParams.model = model;
+        await call("agent_run_send", sendParams);
+        if (sendParams.model !== undefined) S.runModel = model;
       } else {
         const params = {
           // gateway mode: the folder is the other device's; the CLI starts in the session's own folder when resuming
@@ -2114,6 +2248,7 @@ export function mountChat(container, api, opts = {}) {
           resume_id: (S.session ? canResume(S.session.kind) : canResume(S.kind)) ? (S.session?.id || S.sessionId || undefined) : undefined,
           title: S.session ? sessionTitle(S.session) : text.replace(/\s+/g, " ").slice(0, 80),
           context: gatewayCtx() ? { mode: "gateway", device: S.context.device, workdir: S.context.workdir } : { mode: "direct" },
+          model: model || undefined,
         };
         const result = await call("agent_run_open", params);
         if (result.attached) {  // the session already runs (another tab / console): follow that run instead
@@ -2124,6 +2259,7 @@ export function mountChat(container, api, opts = {}) {
         }
         S.rid = result.rid;
         S.cursor = 0;
+        S.runModel = result.model || model || "";
         if (result.session_id) S.sessionId = result.session_id;
         if (result.address) { S.address = result.address; startConversation(); }
         persist();

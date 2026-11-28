@@ -24,7 +24,9 @@ const DEVICES = [
 
 // each device's own folders (agent_dirs without a path)
 const DIRS = {
-  "dev-win": { home: "C:\\Users\\user", recent: ["D:\\repos\\billing", "D:\\repos\\infra-terraform"], workspaces: [{ name: "billing", path: "D:\\repos\\billing" }], roots: [{ name: "主目录", path: "C:\\Users\\user" }] },
+  // Windows: the drive roots are roots too (§7)
+  "dev-win": { home: "C:\\Users\\user", recent: ["D:\\repos\\billing", "D:\\repos\\infra-terraform"], workspaces: [{ name: "billing", path: "D:\\repos\\billing" }],
+    roots: [{ name: "主目录", path: "C:\\Users\\user", kind: "home" }, { name: "billing", path: "D:\\repos\\billing", kind: "workspace" }, { name: "C:", path: "C:\\", kind: "drive" }, { name: "D:", path: "D:\\", kind: "drive" }] },
   "dev-lab": { home: "/home/user", recent: ["/data/train/llm-finetune-2026q4-experiments", "/home/user/notebooks"], workspaces: [], roots: [{ name: "主目录", path: "/home/user" }] },
 };
 const FILES = {
@@ -33,10 +35,15 @@ const FILES = {
 
 function agentsFor(device) {
   return [
-    { kind: "claude", label: "Claude Code", installed: true, path: `${HOME}/.local/bin/claude`, version: "2.1.3 (Claude Code)", login: "ok", gateway_mcp: true, supports: { resume: true, approvals: true, stream: true } },
-    { kind: "codex", label: "Codex", installed: true, path: device === "dev-win" ? "C:\\Users\\you\\AppData\\Roaming\\npm\\codex.cmd" : "/opt/homebrew/bin/codex", version: "codex-cli 0.172.0", login: "ok", gateway_mcp: false, supports: { resume: true, approvals: false, stream: true } },
-    { kind: "dsh", label: "DeepSeek Harness", installed: false, path: null, version: null, login: "unknown", install: null, supports: { resume: true, approvals: true, stream: true } },
-    { kind: "gemini", label: "Gemini CLI", installed: true, path: "/opt/homebrew/bin/gemini", version: "0.9.1", login: "missing", supports: { resume: true, approvals: true, stream: true } },
+    // §16.7: models {flag, protocol, hints}: a model chip when the CLI takes one by flag or over ACP
+    { kind: "claude", label: "Claude Code", installed: true, path: `${HOME}/.local/bin/claude`, version: "2.1.3 (Claude Code)", login: "ok", gateway_mcp: true, supports: { resume: true, approvals: true, stream: true },
+      models: { flag: true, protocol: false, hints: [{ id: "sonnet", label: "Sonnet", desc: "日常编码" }, { id: "opus", label: "Opus", desc: "更强，更慢" }, { id: "haiku", label: "Haiku", desc: "最快" }, { id: "opusplan", label: "Opus Plan", desc: "规划用 Opus，执行用 Sonnet" }] } },
+    { kind: "codex", label: "Codex", installed: true, path: device === "dev-win" ? "C:\\Users\\you\\AppData\\Roaming\\npm\\codex.cmd" : "/opt/homebrew/bin/codex", version: "codex-cli 0.172.0", login: "ok", gateway_mcp: false, supports: { resume: true, approvals: false, stream: true },
+      models: { flag: true, protocol: false, hints: [] } },
+    { kind: "dsh", label: "DeepSeek Harness", installed: false, path: null, version: null, login: "unknown", install: null, supports: { resume: true, approvals: true, stream: true },
+      models: { flag: false, protocol: true, hints: [] } },
+    { kind: "gemini", label: "Gemini CLI", installed: true, path: "/opt/homebrew/bin/gemini", version: "0.9.1", login: "missing", supports: { resume: true, approvals: true, stream: true },
+      models: { flag: true, protocol: true, hints: [{ id: "auto", label: "自动" }, { id: "pro", label: "Pro" }, { id: "flash", label: "Flash" }] } },
     // §16.4: every enabled model of a provider is an Agent (adapter "api"); the picker lists them as 「API 模型」
     { kind: "api:deepseek/deepseek-chat", label: "DeepSeek V3", adapter: "api", provider_label: "DeepSeek", installed: true, login: "ok", supports: { resume: true, approvals: true, stream: true } },
     { kind: "api:openai/gpt-4.1", label: "GPT-4.1", adapter: "api", provider_label: "OpenAI", installed: true, login: "missing", supports: { resume: true, approvals: true, stream: true } },
@@ -226,13 +233,25 @@ export function createFakeApi({ activeRun = true } = {}) {
     agent_session_read: ({ id }) => { if (!HISTORY[id]) return { events: [{ type: "user", text: SESSIONS.find((s) => s.id === id)?.title || "" }, { type: "message", role: "assistant", text: "（演示数据：这个会话只有标题。）" }, { type: "status", state: "done" }] }; return { events: HISTORY[id], address: "claude-agent-nexus@林的 MacBook Pro" }; },
     agent_session_meta: (p) => { const { kind, id, delete_file, ...rest } = p; if (delete_file) { const i = SESSIONS.findIndex((s) => s.id === id); if (i >= 0) SESSIONS.splice(i, 1); } else meta.set(id, { ...(meta.get(id) || {}), ...rest }); return { ok: true }; },
     agent_run_list: () => ({ runs: [...runs.values()].filter((r) => r.state !== "closed").map(({ rid, kind, session_id, workdir, state, started_at, address }) => ({ rid, kind, session_id, workdir, state, started_at, address })) }),
-    agent_run_open: ({ kind, workdir, resume_id, prompt }) => {
+    agent_run_open: ({ kind, workdir, resume_id, prompt, model }) => {
       const run = newRun(kind, resume_id || `n-${Date.now()}`, workdir, [], "starting");
+      run.model = model || "";
       push(run, { type: "status", state: "starting" });
-      script(run, demoReply(prompt));
-      return { rid: run.rid, session_id: run.session_id, address: run.address };
+      if (model) push(run, { type: "model", model });
+      script(run, demoReply(prompt, run.model));
+      return { rid: run.rid, session_id: run.session_id, address: run.address, model: model || null };
     },
-    agent_run_send: ({ rid, prompt }) => { const run = runs.get(rid); if (!run) return { error: "对话已结束", code: "not_found" }; script(run, demoReply(prompt)); return { ok: true }; },
+    agent_run_send: ({ rid, prompt, model }) => {
+      const run = runs.get(rid);
+      if (!run) return { error: "对话已结束", code: "not_found" };
+      if (model !== undefined && model !== run.model) { run.model = model; push(run, { type: "model", model: model || null }); }
+      script(run, demoReply(prompt, run.model));
+      return { ok: true, model: run.model || null };
+    },
+    // §16.7: what the model menu offers (Codex asks its app-server: model/list)
+    agent_models: ({ kind }) => kind === "codex"
+      ? { kind, models: [{ id: "gpt-6.1-sol", label: "GPT-6.1 Sol", desc: "最新", default: true }, { id: "gpt-6-astra", label: "GPT-6 Astra" }, { id: "gpt-5.6-terra", label: "GPT-5.6 Terra" }], default: "gpt-6.1-sol", source: "cli" }
+      : { kind, models: agentsFor().find((a) => a.kind === kind)?.models?.hints || [], default: kind === "claude" ? "sonnet" : "", source: "hints" },
     agent_run_read: async ({ rid, cursor = 0, wait: w = 20 }) => {
       const run = runs.get(rid);
       if (!run) return { error: "对话已结束", code: "not_found" };
@@ -294,7 +313,7 @@ export function createFakeApi({ activeRun = true } = {}) {
   };
 
   let demoUsed = 21000;
-  function demoReply(prompt) {
+  function demoReply(prompt, model = "") {
     const short = String(prompt || "").slice(0, 40);
     demoUsed += 3420;
     return [
@@ -304,7 +323,7 @@ export function createFakeApi({ activeRun = true } = {}) {
       { type: "message", role: "assistant", text: "（演示）我看了一下工作区：", delta: false },
       { type: "message", role: "assistant", text: "有 1 个修改、1 个新文件，", delta: true },
       { type: "message", role: "assistant", text: "都和这次修复有关。", delta: true },
-      { type: "usage", context: { used: demoUsed, limit: 200000, model: "demo-model" }, turn: { input: 3200, output: 220, cost_usd: 0.012 } },
+      { type: "usage", context: { used: demoUsed, limit: 200000, model: model || "demo-model" }, turn: { input: 3200, output: 220, cost_usd: 0.012 } },
       { type: "status", state: "done" },
     ];
   }

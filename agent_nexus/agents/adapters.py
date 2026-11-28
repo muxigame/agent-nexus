@@ -30,6 +30,10 @@ DIFF_MAX = 20000
 APPROVAL_TOOL = "mcp__anx__approve"
 
 
+#: Gemini CLI model aliases that name a tier, not a model id (``gemini -m pro``)
+GEMINI_ALIASES = ("pro", "flash", "flash-lite")
+
+
 @dataclass
 class AdapterOptions:
     binary: str
@@ -49,6 +53,8 @@ class AdapterOptions:
     #: codex: ``(session_id) -> {used, limit, model, turn} | None`` from the thread's rollout (§16.3); set by the
     #: runner, which knows the run-as HOME and environment
     context_lookup: Callable[[str], dict | None] | None = None
+    #: The model the console asked for ("" = the CLI's own default; checked with registry.MODEL_RE), §16.7
+    model: str = ""
 
 
 def trunc(text: Any, limit: int) -> str:
@@ -186,7 +192,8 @@ class Adapter:
         values: dict[str, Any] = {"workdir": self.opts.workdir, "resume_id": self.session_id or "",
                                   "prompt": prompt or "", "approval_tool": APPROVAL_TOOL,
                                   # custom CLIs (agents.custom): the 本机 MCP's URL, e.g. --mcp {mcp_url}
-                                  "mcp_url": str(self.opts.extra.get("mcp_url") or attach.get("url") or "")}
+                                  "mcp_url": str(self.opts.extra.get("mcp_url") or attach.get("url") or ""),
+                                  "model": self.opts.model or ""}
         if self._system_prompt_in_argv():
             values["system_prompt"] = self.opts.system_prompt
         return values
@@ -206,6 +213,16 @@ class Adapter:
     def begin_turn(self, prompt: str) -> list[dict]:
         """A persistent adapter's next turn (queues stdin); per-turn adapters are begun by :meth:`argv`."""
         raise NotImplementedError  # pragma: no cover
+
+    def set_model(self, model: str, live: bool = False) -> list[dict]:
+        """Use ``model`` ("" = the CLI's default) from the next turn on (``live``: a process is running). The
+        default: a per-turn process takes it in its next argv; a CLI that cannot choose one says so. Returns the
+        run's events: a ``model`` event only once the switch is final (an adapter that has to ask the CLI emits it
+        from the CLI's answer)."""
+        if model and not self.d.model_args:
+            return [{"type": "error", "level": "notice", "text": f"{self.d.label} 的这种运行方式不能选择模型，沿用默认模型"}]
+        self.opts.model = model
+        return [{"type": "model", "model": model or None}]
 
     def feed(self, line: str) -> list[dict]:
         return []
@@ -359,6 +376,20 @@ class ClaudeStream(Adapter):
             events += self._settle(approval_id, False, False, "已停止")
         return events
 
+    def set_model(self, model: str, live: bool = False) -> list[dict]:
+        """A live process switches with the ``set_model`` control request (the next turn uses it); a process
+        started later gets ``--model`` in its argv. A live switch is announced from Claude's answer
+        (:meth:`_control_response`); a refused one goes back to the model the run had."""
+        if not live:
+            self.opts.model = model
+            return [{"type": "model", "model": model or None}]
+        self._model_prev = self.opts.model
+        self.opts.model = model
+        self._interrupt_n += 1
+        self.outbox.append(_dumps({"type": "control_request", "request_id": f"anx_model_{self._interrupt_n}",
+                                   "request": {"subtype": "set_model", "model": model or "default"}}))
+        return []
+
     def retry_without(self, stderr_tail: str) -> bool:
         if self.opts.partial and not self.saw_output and "include-partial-messages" in stderr_tail:
             self.opts.partial = False
@@ -401,7 +432,22 @@ class ClaudeStream(Adapter):
             return events + self._result(obj)
         if kind == "control_request":
             return events + self._control_request(obj)
+        if kind == "control_response":
+            return events + self._control_response(obj)
         return events
+
+    def _control_response(self, obj: dict) -> list[dict]:
+        """A ``set_model`` answer: the switch (now final), or the refusal (the run keeps its model). An
+        interrupt's answer is not shown."""
+        response = obj.get("response") if isinstance(obj.get("response"), dict) else {}
+        if not str(response.get("request_id") or "").startswith("anx_model_"):
+            return []
+        if response.get("subtype") == "error":
+            asked = self.opts.model or "默认模型"
+            self.opts.model = getattr(self, "_model_prev", "") or ""
+            return [{"type": "error", "level": "warn",
+                     "text": f"Claude Code 没有换成模型 {asked}：{trunc(response.get('error') or '', 300)}，沿用当前模型"}]
+        return [{"type": "model", "model": self.opts.model or None}]
 
     def _stream_event(self, event: Any) -> list[dict]:
         if not isinstance(event, dict):
@@ -798,7 +844,10 @@ class CodexExec(Adapter):
         return _context_event(used, limit, model, turn if _turn_has_tokens(turn) else found.get("turn"))
 
     def _model_arg(self) -> str | None:
-        """The model this run asked for: ``-m`` / ``--model`` or ``-c model=…`` in the command template."""
+        """The model this run asked for: the console's choice, else ``-m`` / ``--model`` or ``-c model=…`` in the
+        command template."""
+        if self.opts.model:
+            return self.opts.model
         argv = list(self.d.command or [])
         for index, item in enumerate(argv[:-1]):
             if item in ("-m", "--model") and "{" not in argv[index + 1]:
@@ -954,6 +1003,14 @@ class Acp(Adapter):
         self._approval_n = 0
         self._tools: dict[str, dict] = {}
         self.can_load = False
+        self.can_resume = False  # sessionCapabilities.resume: session/resume (dsh), not session/load
+        #: what the agent offers (§16.7): session/new's ``models`` (Gemini) or the ``model`` config option (dsh)
+        self._models: dict | None = None
+        self._model_option: dict | None = None
+        self._applying = False  # a set_model / set_config_option is in flight: the queued prompt waits for it
+        self._asked_model: str | None = None
+        self._model_prev = ""  # opts.model before a live switch: restored when the agent refuses it
+        self._default_model: str | None = None  # the session's model when it started on the CLI's default
 
     def argv(self, prompt: str | None = None) -> list[str]:
         return registry.command_argv(self.d, self.opts.binary, permission=self.opts.permission,
@@ -1058,6 +1115,9 @@ class Acp(Adapter):
                 return []
             caps = result.get("agentCapabilities") if isinstance(result, dict) else None
             self.can_load = bool(isinstance(caps, dict) and caps.get("loadSession"))
+            session_caps = caps.get("sessionCapabilities") if isinstance(caps, dict) else None
+            self.can_resume = bool(isinstance(session_caps, dict) and session_caps.get("resume") is not None
+                                   and session_caps.get("resume") is not False)
             prompt_caps = caps.get("promptCapabilities") if isinstance(caps, dict) else None
             self.embedded_context = bool(isinstance(prompt_caps, dict) and prompt_caps.get("embeddedContext"))
             mcp_caps = caps.get("mcpCapabilities") if isinstance(caps, dict) else None
@@ -1066,16 +1126,40 @@ class Acp(Adapter):
             if self.session_id and self.can_load:
                 self._loading = True
                 self._call("session/load", {"sessionId": self.session_id, "cwd": cwd, "mcpServers": self._mcp_servers()})
+            elif self.session_id and self.can_resume:  # dsh: resume without replaying the history
+                self._call("session/resume", {"sessionId": self.session_id, "cwd": cwd,
+                                              "mcpServers": self._mcp_servers()})
             else:
                 if self.session_id:
                     self.notices.append(f"{self.d.label} 不支持续接旧会话，已开始一个新会话")
                     self.session_id = None
                 self._call("session/new", {"cwd": cwd, "mcpServers": self._mcp_servers()})
             return []
-        if method in ("session/new", "session/load"):
+        if method in ("session/set_model", "session/set_config_option"):
+            events = []
+            if error is not None:
+                asked = self.opts.model or self._asked_model or "默认模型"
+                self.opts.model = self._model_prev
+                events.append({"type": "error", "level": "warn",
+                               "text": f"{self.d.label} 没有换成模型 {asked}："
+                                       f"{trunc(error.get('message') or '代理拒绝了', 300)}，沿用当前模型"})
+            else:
+                if method == "session/set_config_option" and isinstance(result, dict):
+                    self._note_config(result.get("configOptions"))
+                if method == "session/set_model" and isinstance(self._models, dict) and self._asked_model:
+                    self._models = {**self._models, "currentModelId": self._asked_model}
+                if method == "session/set_config_option" and isinstance(self._model_option, dict) \
+                        and self._asked_model and not (isinstance(result, dict) and result.get("configOptions")):
+                    self._model_option = {**self._model_option, "currentValue": self._asked_model}
+                events += self._model_event()
+            if self._applying:
+                self._applying = False
+                events += self._session_ready()
+            return events
+        if method in ("session/new", "session/load", "session/resume"):
             self._loading = False
             if error is not None:
-                if method == "session/load":  # the old session is gone: start afresh rather than fail
+                if method in ("session/load", "session/resume"):  # the old session is gone: start afresh
                     self.notices.append(f"无法续接会话 {self.session_id}：{error.get('message') or '代理拒绝了'}；"
                                         "已开始一个新会话")
                     self.session_id = None
@@ -1086,14 +1170,19 @@ class Acp(Adapter):
             if method == "session/new":
                 session_id = result.get("sessionId") if isinstance(result, dict) else None
                 self.session_id = str(session_id) if session_id else None
-            self.ready = True
-            events = self._drain_notices()
-            events.append({"type": "status", "state": "running" if self._queued else "idle",
-                           "session_id": self.session_id})
-            for text in self._queued:
-                self._prompt(text)
-            self._queued.clear()
-            return events
+            if isinstance(result, dict):
+                if isinstance(result.get("models"), dict):
+                    self._models = result["models"]
+                self._note_config(result.get("configOptions"))
+            if not self.opts.model:
+                self._default_model = self._current_model()
+            events = self._drain_notices() + self._model_event()
+            notice = self._apply_model()
+            if notice:
+                events.append(notice)
+            if self._applying:  # the first prompt waits for the model switch
+                return events
+            return events + self._session_ready()
         if method == "session/prompt":
             was_stopping = self.stopping
             self.turn_active, self.stopping = False, False
@@ -1118,6 +1207,146 @@ class Acp(Adapter):
                 events.append({"type": "error", "text": f"{self.d.label} 这一轮达到了上限（{reason}）"})
             events += self._context(usage)
             return events + [status]
+        return []
+
+    def _session_ready(self) -> list[dict]:
+        self.ready = True
+        events = [{"type": "status", "state": "running" if self._queued else "idle", "session_id": self.session_id}]
+        for text in self._queued:
+            self._prompt(text)
+        self._queued.clear()
+        return events
+
+    # -- the model (§16.7): Gemini's session/set_model, dsh's "model" config option
+    def _note_config(self, options: Any) -> None:
+        if isinstance(options, list):
+            found = next((o for o in options if isinstance(o, dict) and
+                          (o.get("id") == "model" or o.get("category") == "model")), None)
+            if found is not None:
+                self._model_option = found
+
+    def model_choices(self) -> list[dict]:
+        """``[{id, label, desc?, value}]``: what the agent offers (``value``: what goes back over ACP)."""
+        out: list[dict] = []
+        if isinstance(self._models, dict):
+            for item in self._models.get("availableModels") or []:
+                if isinstance(item, dict) and item.get("modelId"):
+                    out.append({"id": str(item["modelId"]), "label": str(item.get("name") or item["modelId"]),
+                                "desc": str(item.get("description") or ""), "value": str(item["modelId"])})
+        option = self._model_option
+        if isinstance(option, dict):
+            def walk(items: Any, group: str = "") -> None:
+                for item in items or []:
+                    if not isinstance(item, dict):
+                        continue
+                    if isinstance(item.get("options"), list):
+                        walk(item["options"], str(item.get("name") or item.get("group") or group))
+                        continue
+                    value = item.get("value")
+                    if value is None:
+                        continue
+                    value = value if isinstance(value, str) else json.dumps(value)
+                    out.append({"id": _acp_model_id(value), "value": value,
+                                "label": " · ".join(x for x in (group, str(item.get("name") or "")) if x)
+                                or _acp_model_id(value), "desc": str(item.get("description") or "")})
+            walk(option.get("options"))
+        return out
+
+    def _current_model(self) -> str | None:
+        if isinstance(self._model_option, dict) and self._model_option.get("currentValue") is not None:
+            value = self._model_option["currentValue"]
+            return _acp_model_id(value if isinstance(value, str) else json.dumps(value))
+        if isinstance(self._models, dict) and self._models.get("currentModelId"):
+            return str(self._models["currentModelId"])
+        return None
+
+    def _model_event(self) -> list[dict]:
+        choices = self.model_choices()
+        current = self._current_model()
+        if not choices and not current:
+            return []
+        return [{"type": "model", "model": current,
+                 "options": [{k: c[k] for k in ("id", "label", "desc") if c.get(k)} for c in choices]}]
+
+    def _match_model(self, wanted: str) -> dict | None:
+        key = wanted.casefold()
+        choices = self.model_choices()
+        for choice in choices:
+            names = {choice["id"].casefold(), choice["value"].casefold(), choice["label"].casefold()}
+            try:
+                pair = json.loads(choice["value"])
+            except ValueError:
+                pair = None
+            if isinstance(pair, list) and pair:
+                names.add(str(pair[-1]).casefold())
+            if key in names:
+                return choice
+        if key in GEMINI_ALIASES:  # gemini's own aliases (pro, flash, flash-lite): its newest model of that tier
+            tier = [c for c in choices if re.fullmatch(rf"gemini-[0-9][0-9.]*-{re.escape(key)}", c["id"].casefold())]
+            if tier:
+                return max(tier, key=lambda c: [int(n) for n in re.findall(r"[0-9]+", c["id"])])
+        return None
+
+    def _apply_model(self, wanted: str | None = None) -> dict | None:
+        """Ask for ``wanted`` (default ``opts.model``) in the ready session (sets ``_applying``); a notice when the
+        agent does not offer it. Gemini (``session/set_model``) gets an id it does not list anyway, and its answer
+        decides; a config option (dsh) only takes one of its values."""
+        wanted = self.opts.model if wanted is None else wanted
+        if not wanted or not self.session_id:
+            return None
+        current = (self._current_model() or "").casefold()
+        if wanted.casefold() == current:
+            return None
+        choice = self._match_model(wanted)
+        if choice is not None and choice["id"].casefold() == current:
+            return None
+        if choice is None:
+            if self.d.model_args and not self._models and not self._model_option:
+                return None  # chosen by flag (gemini -m) and the agent tells nothing: nothing to check
+            if self._model_option is not None or not isinstance(self._models, dict):
+                return {"type": "error", "level": "warn", "text": f"{self.d.label} 没有提供模型 {wanted}，沿用当前模型"}
+            choice = {"id": wanted, "value": wanted}
+        if self._model_option is not None:
+            self._call("session/set_config_option", {"sessionId": self.session_id,
+                                                     "configId": str(self._model_option.get("id") or "model"),
+                                                     "value": choice["value"]})
+        else:
+            self._call("session/set_model", {"sessionId": self.session_id, "modelId": choice["value"]})
+        self._applying = True
+        self._asked_model = choice["value"]
+        return None
+
+    def set_model(self, model: str, live: bool = False) -> list[dict]:
+        """No process: the next start takes it (flag, or asked at session start). A session starting: asked once it
+        is ready. A ready session: asked now, and announced from the agent's answer (``_model_event``); a model it
+        does not offer, or a way back to a default it never reported, keeps the current model."""
+        if not live:
+            self.opts.model = model
+            return [{"type": "model", "model": model or None}] if self.d.model_args or not model else []
+        if not self.ready:
+            self.opts.model = model
+            return []  # applied when the session is ready
+        prev = self.opts.model
+        if not model:
+            if not self._default_model:
+                current = self._current_model()
+                return [{"type": "error", "level": "notice", "text": f"{self.d.label} 这个会话没有报告默认模型，"
+                                                                    f"保持当前模型{(' ' + current) if current else ''}"}]
+            target = self._default_model
+        else:
+            target = model
+        self._model_prev = prev
+        self.opts.model = model
+        before = self._asked_model
+        self._asked_model = None
+        notice = self._apply_model(target)
+        sent = self._applying
+        self._applying = False  # a live session: the next prompt is sent later anyway
+        if notice:
+            self.opts.model, self._asked_model = prev, before
+            return [notice]
+        if not sent:  # already the session's model
+            return self._model_event() or [{"type": "model", "model": model or None}]
         return []
 
     def _context(self, turn: dict | None) -> list[dict]:
@@ -1205,6 +1434,12 @@ class Acp(Adapter):
                      for entry in entries if isinstance(entry, dict)]
             return [{"type": "tool", "id": "plan", "name": "plan", "title": "计划", "status": "ok",
                      "output": "\n".join(lines)}]
+        if kind == "config_option_update":  # dsh: the options changed (e.g. the model)
+            self._note_config(update.get("configOptions"))
+            return self._model_event()
+        if kind == "current_model_update" and isinstance(self._models, dict) and update.get("modelId"):
+            self._models = {**self._models, "currentModelId": update["modelId"]}
+            return self._model_event()
         if kind == "usage_update":  # ACP's (unstable) context report: {used, size, cost?}
             used, size = sessions._int(update.get("used")), sessions._int(update.get("size"))
             if not used and not size:
@@ -1276,6 +1511,17 @@ class Acp(Adapter):
 
 _SESSION_KEYS = ("sessionId", "session_id", "threadId", "thread_id")
 _TEXT_KEYS = ("text", "delta", "content", "message", "output", "result")
+
+
+def _acp_model_id(value: str) -> str:
+    """dsh's option values are JSON pairs ``["provider","model"]``: shown and asked for as ``provider/model``."""
+    try:
+        pair = json.loads(value)
+    except ValueError:
+        return value
+    if isinstance(pair, list) and pair and all(isinstance(x, str) for x in pair):
+        return "/".join(pair)
+    return value
 
 
 class Text(Adapter):

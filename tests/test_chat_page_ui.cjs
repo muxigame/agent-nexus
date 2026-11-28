@@ -155,8 +155,9 @@ test("the settings are one chip row inside the composer; a light head line repla
     assert.ok(at > 0, cls);
     assert.ok(chat.slice(at, at + 600).includes(opener), `${cls} opens ${opener}`);
   }
-  assert.match(chat, /mount\(chips, device, agent, dir, perm\)/);
-  assert.match(chat, /`dot \$\{status\.tone/, "the Agent chip has a status dot");
+  assert.match(chat, /mount\(chips, device, agent, modelChip, dir, perm\)/);
+  assert.match(chat, /agentChipMark\(status\)/, "the Agent chip shows the CLI's mark");
+  assert.match(chat, /mark\.dataset\.tone = status\.tone/, "with a status dot when the CLI is not ready");
   // head line: session toggle · current title · ⋯ (the ⋯ menu keeps presets / temp dirs / 新对话; the work context
   // moved into the 目录 chip)
   assert.match(chat, /const head = el\("div", \{ class: "chat-head" \}, sideBtn, headTitle, moreBtn\)/);
