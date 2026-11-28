@@ -403,3 +403,30 @@ def test_a_helper_of_another_release_is_replaced(tmp_path, monkeypatch):
         await registry.stop()
 
     asyncio.run(scenario())
+
+
+def test_device_commands_run_as_the_user_without_sudo_or_uv(monkeypatch, tmp_path):
+    module = load_launcher(monkeypatch, tmp_path, system=True)
+    monkeypatch.setattr(module, "_is_root", lambda: False)
+    monkeypatch.setattr(module.os, "execvp", lambda *a: (_ for _ in ()).throw(AssertionError("sudo")))
+    python = module.ROOT / ".venv" / "bin" / "python"
+    python.parent.mkdir(parents=True, exist_ok=True)
+    python.write_text("")
+    seen = []
+
+    class Replaced(Exception):
+        pass
+
+    def execve(path, command, env):
+        seen.append((path, command, env))
+        raise Replaced()
+    # the launcher is replaced (no child to SIGKILL on Ctrl+C), never a subprocess
+    monkeypatch.setattr(module.os, "execve", execve)
+    monkeypatch.setattr(module.subprocess, "call", lambda *a, **k: (_ for _ in ()).throw(AssertionError("call")))
+    with pytest.raises(Replaced):
+        module.main(["anx", "exec", "nas", "--", "uname", "-a"])
+    path, command, env = seen[-1]
+    assert path == str(python)
+    assert command == [str(python), "-P", "-m", "agent_nexus.cli", "--root", str(module.ROOT),
+                       "exec", "nas", "--", "uname", "-a"]
+    assert "ANX_ROOT" not in env

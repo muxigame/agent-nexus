@@ -102,6 +102,18 @@ UI：侧栏顶部是 CLI 标签（Claude Code / Codex / DeepSeek / 全部），�
 - `agent_run_stop {rid}`：中断当前轮；`agent_run_close {rid}`；`agent_run_list {}`：在跑的 run
 
 进程一律以执行账户启动（`accounts.effective(root, "terminal")` 的 `popen_args` / env），工作目录必须存在且在允许范围内（§7）。
+
+**运行环境里的 `anx`**（`agents/anx_shim.py`，`Runs._env(..., path_first)`）：安装包从不把 `anx` 放进 PATH（Windows、macOS 直接用运行时
+venv 的 python 启动核心，deb 只装 `/usr/bin/agent-nexus`），而 venv 自己的 bin 目录也不能放进去（里面的 `python` 和依赖脚本会盖住用户的
+工具）。所以 hub 在每个 run 的临时目录里建一个只有 `anx` 的 `.bin`，放在 PATH 最前面（PATH 的键名不分大小写，Windows 上是 `Path`）：
+POSIX 是一个 `#!/bin/sh` 脚本，`exec <这个客户端的 python> -P -m agent_nexus.cli --root <root> "$@"`；Windows 复制 venv 的 `anx.exe`
+（uv 的启动器，内含 python 的绝对路径，PowerShell / cmd 都能找到，也不经 cmd.exe 二次解析 `& | ^ %`），没有可用的启动器时改写
+`anx.cmd`；两种情况旁边都有一个无扩展名的 sh 脚本 `anx`，给 Git Bash（Windows 上 Claude Code 的 shell）用（与 npm 的做法相同：bash 优先
+运行它，PowerShell / cmd 按 PATHEXT 不会选它）。它先 `export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'` 再启动 `anx.exe`：否则 MSYS
+会把传给原生程序的 `/srv/app`、`/var/log` 这类参数改写成 `C:/Program Files/Git/srv/app`，在 Linux 设备上运行错误的命令。只对 anx
+关掉路径转换，不改整个 run 的环境（Claude 的其他命令仍按 Git Bash 的习惯转换）。临时目录在交给执行账户之后写入，账户可读可执行；Android 不写（应用数据不能执行，也没有 CLI Agent）。
+同时设置 `ANX_CONSOLE_URL=http://127.0.0.1:<控制台端口>`：`anx devices / exec / wait / kill / cp` 只连这个地址（本机 MCP 的 `/mcp`
+和 `/mcp/self`），不读根目录、不需要凭据；`ANX_ROOT` 照旧被去掉（所以脚本带 `--root`）。API 模型（§16.4）不写这些。
 事件缓冲每个 run 最多 2000 条 / 4 MB，超出丢最旧的并记录 `dropped`。run 空闲 30 分钟自动关闭进程（会话文件仍在，可续接）。
 
 **权限模式**（每个 CLI 映射到自己的参数）：
@@ -145,13 +157,27 @@ UI：侧栏顶部是 CLI 标签（Claude Code / Codex / DeepSeek / 全部），�
 ```
 
 - 内置片段可编辑，可“还原”；可新增、排序、启用/停用、按 CLI 和模式限定。
-- 变量：`$device $device_id $os $workdir $tmpdir $session $address $agent $date $time $owner $gateway $handle $context_device $context_workdir`，
-  未知变量原样保留并在预览里标黄；`$$` 输出 `$`。
+- 变量：`$device $device_id $os $workdir $tmpdir $session $address $agent $date $time $owner $gateway $handle $context_device $context_workdir`
+  `$target_device $target_workdir $mcp $mcp_prefix $mcp_state $mcp_hint $devices_cli`，
+  未知变量原样保留并在预览里标黄；`$$` 输出 `$`（变量的值不会再被展开）。
 - `prompt_preview {preset, context}` 返回 `{text, segments:[{id,title,chars}], unknown_vars}`。
 - 传给 CLI：Claude `--append-system-prompt <text>`；Codex `-c developer_instructions=<text>`；dsh / 其他：作为首条消息前缀。
 
 内置片段（中文）：身份与环境、工作目录与临时目录、与用户沟通（ask_user / mail）、团队协作（mail_who / @all）、
+Agent Nexus MCP 与工作区（`$mcp_hint`）、用命令行操作其他设备（`$devices_cli`）、
 网关工作方式（仅 gateway 模式，含 use_device + $handle）、项目说明（提示读取 AGENTS.md / CLAUDE.md）。
+
+**用命令行操作其他设备**（`devices_cli`，紧跟 `nexus_mcp`，默认和精简预设都开着）：`$devices_cli` 由 hub 填（`hub.devices_cli_hint`），
+一段约 350 字的说明：`anx devices`、`anx exec <设备> [--shell S] [--cwd 目录] [--timeout 秒] -- <命令>`（输出和退出码原样返回，长任务
+`--detach` 后 `anx wait` / `anx kill`）、`anx cp <设备>:<路径> <设备>:<路径>`，以及引号提示：命令里有引号、`$`、反斜杠或通配符时用
+`--stdin` 传原文，否则本地 shell 会先展开一遍。例子按 CLI 实际用的 shell 选：bash 的 `<<'EOF'`（也包括 Windows 上的 Claude Code，
+它用 Git Bash）；Windows 上的其他 CLI（Codex、Gemini、dsh 用 PowerShell）给多行 here-string，并先设
+`$OutputEncoding=[Text.UTF8Encoding]::new()`——Windows PowerShell 5.1 经管道传给原生程序时按 ASCII 编码，中文会悄悄变成 `?`。
+这些命令只在这里出现，网关 MCP 的说明和工具描述里没有。以下情况为空（片段被跳过，不占 token）：API 模型；没写成 `anx`（Android）；
+本机 MCP 关闭、对外监听、未加入网关、已吊销、凭据被拒、网关过旧或网关主人关闭了设备接入（这些状态下 `anx exec <其他设备>` 一直
+失败，不值得每次付这段 token；锁定和离线可能在 run 中途恢复，照常提示）；只读模式；Codex 不是“完全访问”（`workspace-write` / `read-only` 沙箱不允许连回环地址）。
+Claude 在“需要审批”模式下每条 `anx exec` 都照常走审批。文字里没有 `%`、`!` 和换行（批处理启动的 CLI 会拒绝这些参数）。
+存过的 prompts.json 会自动补上这个内置片段（`normalize` 放回原位）。
 
 ## 7. 工作目录
 

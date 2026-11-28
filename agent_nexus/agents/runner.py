@@ -78,6 +78,21 @@ STRIP_ENV = ("VIRTUAL_ENV", "ANX_ROOT", "MCPM_ROOT", "UV_CACHE_DIR", "UV_PYTHON_
 STATES = ("starting", "running", "idle", "done", "failed", "stopped", "closed")
 
 
+def prepend_path(env: dict, folders: list[str], *, windows: bool = WINDOWS) -> None:
+    """Put ``folders`` first on ``env``'s PATH (in place), found case-insensitively ("Path" on Windows), once."""
+    key = next((k for k in env if k.upper() == "PATH"), "Path" if windows else "PATH")
+    sep = ";" if windows else ":"
+
+    def norm(path: str) -> str:
+        path = path.rstrip("\\/") or path
+        return path.lower() if windows else path
+
+    first = [folder for folder in folders if folder]
+    wanted = {norm(folder) for folder in first}
+    rest = [part for part in str(env.get(key) or "").split(sep) if part and norm(part) not in wanted]
+    env[key] = sep.join([*first, *rest])
+
+
 class RunError(Exception):
     def __init__(self, message: str, code: str = "error"):
         super().__init__(message)
@@ -796,11 +811,13 @@ class Runs:
             raise RunError("这个对话已经结束或不存在", "not_found")
         return run
 
-    def _env(self, account: Any, extra: dict | None) -> dict:
+    def _env(self, account: Any, extra: dict | None, path_first: list[str] | None = None) -> dict:
         env = account.env() if account is not None else dict(os.environ)
         for key in STRIP_ENV:
             env.pop(key, None)
         env.update({key: str(value) for key, value in (extra or {}).items() if value is not None})
+        if path_first:
+            prepend_path(env, path_first)
         return env
 
     def _workdir(self, value: Any, account: Any, *, checked: bool = False) -> str:
@@ -818,13 +835,14 @@ class Runs:
     async def open(self, params: dict, *, binary: str | None = None, env: dict | None = None,
                    run_as: dict | None | bool = False, system_prompt: str | None = None, tmpdir: str | None = None,
                    address: str = "", rid: str | None = None, events: list[dict] | None = None,
-                   extra: dict | None = None, workdir_ok: bool = False) -> dict:
+                   extra: dict | None = None, workdir_ok: bool = False, path_first: list[str] | None = None) -> dict:
         """Start a run. ``params`` (from the console): ``kind, workdir, prompt, resume_id?, permission?,
         title?``. The keyword arguments come from the hub, never from the console: an explicit ``binary``,
         extra ``env``, ``run_as`` (``Account.popen_args()``; False = the account's), the rendered
         ``system_prompt``, the run's ``tmpdir`` and mailbox ``address``, and ``events`` to show right after
         the starting status (the hub's notes, e.g. that there is no gateway). ``workdir_ok``: the hub already allowed
-        the work folder (it also accepts folders this device ran a CLI in), so the roots are not checked again."""
+        the work folder (it also accepts folders this device ran a CLI in), so the roots are not checked again.
+        ``path_first``: folders put first on the run's PATH (the hub's private ``anx``, agents/anx_shim.py)."""
         self._reap()
         self._ensure_reaper()
         if len(self.runs) >= self.max_runs:
@@ -861,7 +879,7 @@ class Runs:
                 raise RunError(f"{d.label} 不支持“{_MODE_NAMES.get(permission, permission)}”权限模式", "bad_permission")
         account = self.account()
         workdir = self._workdir(params.get("workdir"), account, checked=workdir_ok)
-        run_env = self._env(account, env)
+        run_env = self._env(account, env, path_first)
         popen = (account.popen_args() if account is not None else None) if run_as is False else (run_as or None)
         if d.adapter == "api":  # an API model: no binary, the loop runs in process (§16.4)
             binary = binary or "api"

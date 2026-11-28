@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import types
 
 import httpx
@@ -130,7 +131,7 @@ def test_not_ready_answers_locally_with_only_the_status_tool(tmp_path, state, kw
     note = call(mcp, body={"jsonrpc": "2.0", "method": "notifications/initialized"})
     assert note.status_code == 202
     batch = call(mcp, body=[{"jsonrpc": "2.0", "id": 5, "method": "ping"}, {"jsonrpc": "2.0", "id": 6, "method": "x/y"}]).json()
-    assert batch[0]["result"] == {} and batch[1]["error"]["code"] == -32001
+    assert set(batch[0]["result"]) == {"_meta"} and batch[1]["error"]["code"] == -32001
     assert not seen  # nothing went to the gateway
 
 
@@ -183,3 +184,75 @@ def test_the_audit_line_has_no_arguments(tmp_path):
     entry = json.loads(line)
     assert entry["tool"] == "file_read" and entry["ws"] == "01234567" and entry["state"] == "not_joined"
     assert "secret" not in line and "plan" not in line
+
+
+def test_degraded_answers_carry_the_state_for_scripts(tmp_path):
+    mcp, _ = make(tmp_path, state="disabled")
+    init = call(mcp).json()
+    assert init["result"]["_meta"] == {"anx/state": "not_joined", "anx/reason": init["result"]["_meta"]["anx/reason"]}
+    refused = call(mcp, body={"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                              "params": {"name": "device_list", "arguments": {}}}).json()
+    assert refused["result"]["isError"] and refused["result"]["_meta"]["anx/state"] == "not_joined"
+    other = call(mcp, body={"jsonrpc": "2.0", "id": 3, "method": "bogus/x"}).json()
+    assert other["error"]["data"]["anx/state"] == "not_joined"
+
+
+def self_make(tmp_path, *, locked=False, plugin=("http://127.0.0.1:8400/mcp", "plugin-token"), handler=None,
+              mcp_local=None):
+    mcp, seen = make(tmp_path, state="disabled", locked=locked, handler=handler, mcp_local=mcp_local)
+    mcp._device_plugin = lambda: plugin
+    return mcp, seen
+
+
+def test_mcp_self_reaches_the_local_device_plugin_without_the_gateway(tmp_path):
+    mcp, seen = self_make(tmp_path)
+    app = mcp.self_app
+    got = call(app, path="/mcp/self")
+    assert got.status_code == 200 and b'"ok":true' in got.content
+    request = seen[-1]
+    assert str(request.url) == "http://127.0.0.1:8400/mcp"
+    assert request.headers["authorization"] == "Bearer plugin-token" and "x-anx-device" not in request.headers
+    # the same guard as /mcp
+    assert call(app, path="/mcp/self", headers={"Origin": "https://evil"}).status_code == 403
+    assert call(app, path="/mcp/self", headers={"Host": f"evil:{PORT}"}).status_code == 403
+    assert call(app, path="/mcp/self", client=("10.0.0.5", 1)).status_code == 403
+    assert call(app, path="/mcp/self", headers={"Content-Type": "text/plain"}).status_code == 415
+    off, _ = self_make(tmp_path, mcp_local={"enabled": False})
+    assert call(off.self_app, path="/mcp/self").status_code == 404
+
+
+def test_mcp_self_locked_and_without_a_device_plugin(tmp_path):
+    locked, seen = self_make(tmp_path, locked=True)
+    answer = call(locked.self_app, path="/mcp/self").json()
+    assert answer["result"]["_meta"]["anx/state"] == "locked" and not seen
+    missing, _ = self_make(tmp_path, plugin=None)
+    assert missing.self_state() == "no_device"
+    assert call(missing.self_app, path="/mcp/self").json()["result"]["_meta"]["anx/state"] == "no_device"
+
+    def down(request):
+        raise httpx.ConnectError("refused", request=request)
+    gone, _ = self_make(tmp_path, handler=down)
+    assert call(gone.self_app, path="/mcp/self").json()["result"]["_meta"]["anx/state"] == "no_device"
+
+
+def test_mcp_self_obeys_revocation_and_the_device_access_switch(tmp_path):
+    """Not joined still works (no network on this route); revoked, rejected and the gateway owner's device-MCP
+    switch refuse it as /mcp does."""
+    mcp, seen = self_make(tmp_path)
+    assert mcp.self_state() == "ready"
+    for change, state in ((lambda: mcp.cloud_status.update(state="revoked"), "revoked"),
+                          (lambda: mcp.cloud_status.update(state="connected", gateway_device_mcp=False),
+                           "device_access_off"),
+                          (lambda: (mcp.cloud_status.pop("gateway_device_mcp"),
+                                    setattr(mcp, "_rejected_until", time.monotonic() + 30)), "rejected")):
+        change()
+        assert mcp.self_state() == state
+        seen.clear()
+        answer = call(mcp.self_app, path="/mcp/self").json()
+        assert answer["result"]["_meta"]["anx/state"] == state and not seen
+
+
+def test_local_only_leaves_mcp_self_to_its_own_guard(tmp_path):
+    mcp, _ = self_make(tmp_path)
+    app = LocalOnly(Starlette(routes=[Route("/mcp/self", mcp.self_app)]), "127.0.0.1", PORT)
+    assert call(app, path="/mcp/self").status_code == 200  # no X-ANX needed

@@ -818,3 +818,76 @@ async def test_codex_model_list_is_asked_once_at_a_time_and_a_failure_is_not_ret
     assert listed["source"] == "cli" and listed["models"][0]["id"] == "gpt-6" and len(calls) == 2
     assert (await handlers["agent_models"]({"kind": "codex", "fresh": True}))["models"][0]["id"] == "gpt-6"
     assert len(calls) == 2
+
+
+async def test_runs_get_a_private_anx_and_the_devices_cli_hint_only_where_it_works(box):
+    import subprocess
+    hub, link = linked_hub(box)
+    link.probe.put("user", "codex", {"state": "absent", "connectors": [], "source": "probe"})
+    link.account_name = lambda account: "user"
+    await link.reconcile("test")
+    handlers = hub.handlers()
+    log = box["tmp"] / "argv-cli.jsonl"
+    os.environ["FAKE_ARGV_LOG"] = str(log)
+    try:
+        opened, _, argv = await open_and_argv(handlers, log, {
+            "kind": "codex", "workdir": str(box["home"] / "proj"), "prompt": "hi", "permission": "full"})
+        record = json.loads(log.read_text().splitlines()[-1])
+        assert record["console"] == "http://127.0.0.1:8399"
+        first = record["path"].split(os.pathsep)[0]
+        assert first == os.path.join(opened["tmpdir"], ".bin") and str(box["bin"]) in record["path"].split(os.pathsep)
+        shim = Path(first) / "anx"
+        assert os.access(shim, os.X_OK)
+        done = subprocess.run([str(shim), "exec", "--help"], capture_output=True, text=True, timeout=60,
+                              env={**os.environ, "PATH": record["path"]})
+        assert done.returncode == 0 and "用法：anx exec" in done.stderr
+        text = codex_prompt(argv)
+        assert "anx devices" in text and "--stdin" in text and "anx exec <设备>" in text
+        # Codex outside full mode: its sandbox blocks loopback, so no hint (the PATH is still there)
+        _, _, argv = await open_and_argv(handlers, log, {
+            "kind": "codex", "workdir": str(box["home"] / "proj"), "prompt": "hi", "permission": "ask"})
+        assert "anx devices" not in codex_prompt(argv)
+        assert json.loads(log.read_text().splitlines()[-1])["path"].split(os.pathsep)[0].endswith(".bin")
+    finally:
+        os.environ.pop("FAKE_ARGV_LOG", None)
+        hub.close()
+
+
+@pytest.mark.parametrize("kwargs,shown", [
+    ({}, True),
+    ({"kind": "codex", "adapter": "codex-exec", "permission": "full"}, True),
+    ({"kind": "codex", "adapter": "codex-exec", "permission": "ask"}, False),
+    ({"adapter": "api"}, False),
+    ({"runnable": False}, False),
+    ({"permission": "readonly"}, False),
+    ({"local_state": "not_joined"}, False),
+    ({"local_state": "off"}, False),
+    ({"local_state": "revoked"}, False),
+    ({"local_state": "rejected"}, False),
+    ({"local_state": "device_access_off"}, False),
+    ({"local_state": "gateway_old"}, False),
+    ({"local_state": "locked"}, True),
+    ({"local_state": "offline"}, True),
+])
+def test_devices_cli_hint_conditions(kwargs, shown):
+    args = {"kind": "claude", "adapter": "claude-stream", "permission": "ask", "runnable": True,
+            "local_state": "ready", **kwargs}
+    text = hub_mod.devices_cli_hint(**args)
+    assert bool(text) is shown
+    if text:
+        assert "%" not in text and "!" not in text and "\n" not in text  # a batch-launched CLI refuses those
+        assert len(text) < 400
+
+
+def test_devices_cli_hint_example_for_powershell():
+    # every CLI but Claude Code (Git Bash) runs commands in PowerShell on Windows: a multi-line here-string, with
+    # $OutputEncoding first (Windows PowerShell 5.1 pipes ASCII to a native program: Chinese would become '?')
+    for kind, adapter in (("codex", "codex-exec"), ("gemini", "acp"), ("dsh", "acp")):
+        text = hub_mod.devices_cli_hint(kind=kind, adapter=adapter, permission="full", runnable=True,
+                                        local_state="ready", windows=True)
+        assert "$OutputEncoding=[Text.UTF8Encoding]::new(); @'<换行>命令<换行>'@ | anx exec nas --stdin" in text
+        assert "<<'EOF'" not in text
+        assert "%" not in text and "!" not in text and "\n" not in text and len(text) < 460
+    text = hub_mod.devices_cli_hint(kind="claude", adapter="claude-stream", permission="ask", runnable=True,
+                                    local_state="ready", windows=True)
+    assert "anx exec nas --stdin <<'EOF'" in text and "OutputEncoding" not in text

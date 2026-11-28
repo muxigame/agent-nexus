@@ -70,6 +70,7 @@ VARIABLES: tuple[tuple[str, str], ...] = (
     ("mcp_prefix", "该连接器的工具名前缀"),
     ("mcp_state", "连接器状态（local / gateway_config / gateway_account / both / none / unknown）"),
     ("mcp_hint", "已接入的 Agent Nexus MCP 和选好的工作区（一段说明）"),
+    ("devices_cli", "在 shell 里用 anx 命令操作其他设备的说明（这次用不了时为空）"),
 )
 VARIABLE_NAMES = tuple(name for name, _ in VARIABLES)
 _DESCRIPTIONS = dict(VARIABLES)
@@ -99,6 +100,7 @@ BUILTIN_FRAGMENTS: tuple[dict, ...] = (
         "- 需要别人配合时用 mail_send 发给对方的地址；确实需要所有人知道的事才发给 @all。\n"
         "- 工具结果末尾提示有未读邮件时，用 mail_inbox / mail_read 查看，回复里写清楚结论。")},
     {"id": "nexus_mcp", "title": "Agent Nexus MCP 与工作区", "scope": "all", "kinds": [], "text": "$mcp_hint"},
+    {"id": "devices_cli", "title": "用命令行操作其他设备", "scope": "all", "kinds": [], "text": "$devices_cli"},
     {"id": "gateway", "title": "网关工作方式", "scope": "gateway", "kinds": [], "text": (
         "这次要操作的是另一台设备：$context_device 上的 $context_workdir，不是你所在的 $device。\n"
         "- 通过上面说的 Agent Nexus MCP 的设备工具操作它（file_read、file_write、edit_file、file_grep、exec_command 等），"

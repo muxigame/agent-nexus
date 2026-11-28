@@ -33,6 +33,7 @@ from .mcp_probe import codex_models, codex_models_cache
 from .prompts import Prompts
 from .runner import RunError, Runs
 from .tmpdirs import TmpDirs
+from . import anx_shim
 from .workdirs import Recent
 
 log = logging.getLogger(__name__)
@@ -186,6 +187,37 @@ def mcp_hint(nx: dict | None, v: dict) -> str:
     if ours and nx.get("local_state") not in (None, "ready"):
         head += f"注意：本机 MCP 现在不可用（{nx.get('local_reason')}），恢复前这些工具只会返回状态。"
     return head + tail
+
+
+#: 本机 MCP states in which ``anx`` cannot reach other devices for a long while (lock and offline pass: they may
+#: change mid-run, so the hint stays)
+NO_DEVICES_CLI = ("off", "exposed", "not_joined", "revoked", "rejected", "device_access_off", "gateway_old")
+
+
+def devices_cli_hint(*, kind: str, adapter: str, permission: str, runnable: bool, local_state: str,
+                     windows: bool = os.name == "nt") -> str:
+    """The ``devices_cli`` fragment's text: the ``anx`` commands for other devices, or "" when the run cannot use
+    them (an API model, no private anx, the 本机 MCP off / not joined, a read-only run, Codex outside full mode:
+    its sandbox blocks loopback).
+
+    The --stdin example follows the shell the CLI runs commands in: bash's heredoc, also for Claude Code on
+    Windows (Git Bash); PowerShell's here-string for the other CLIs on Windows, with ``$OutputEncoding`` set to
+    UTF-8 first -- Windows PowerShell 5.1 pipes to a native program as ASCII and turns non-ASCII into '?'. The
+    text never holds ``%``, ``!`` or a newline (a batch-launched CLI would mangle them)."""
+    if adapter == "api" or not runnable or local_state in NO_DEVICES_CLI or permission == "readonly":
+        return ""
+    if adapter == "codex-exec" and permission != "full":
+        return ""
+    if windows and kind != "claude":
+        example = ("PowerShell：`$OutputEncoding=[Text.UTF8Encoding]::new(); @'<换行>命令<换行>'@ | anx exec nas "
+                   "--stdin`，@' 和 '@ 各占一行末尾/开头；不设 $OutputEncoding 中文会变成 ?")
+    else:
+        example = "`anx exec nas --stdin <<'EOF'`"
+    return ("操作其他设备也可以在你自己的 shell 里用 anx 命令（经本机客户端，不需要凭据）：`anx devices` 列出设备"
+            "（在线、系统、shell、工作目录）；`anx exec <设备> [--shell S] [--cwd 目录] [--timeout 秒] -- <命令>` "
+            "在那台设备上运行，输出和退出码原样返回（长任务加 --detach，之后 `anx wait <会话>` / `anx kill <会话>`）；"
+            "`anx cp <设备>:<路径> <设备>:<路径>` 复制文件或文件夹。设备写名称或 ID。命令含引号、$、反斜杠或通配符时"
+            f"用 --stdin 从标准输入传原文（如 {example}），否则本地 shell 会先展开一遍。")
 
 
 def shadow_hint(nx: dict | None) -> str:
@@ -371,6 +403,26 @@ class AgentHub:
         info.setdefault("id", "")
         info.setdefault("gateway", "")
         return info
+
+    def _local_mcp(self) -> Any:
+        return getattr(self.mcp_link, "local", None) if self.mcp_link is not None else None
+
+    def _console_url(self) -> str | None:
+        """``http://127.0.0.1:<port>``: the console this hub runs in (None without a 本机 MCP to reach)."""
+        local = self._local_mcp()
+        url = getattr(local, "url", None) if local is not None else None
+        if not isinstance(url, str) or not url.endswith("/mcp"):
+            return None
+        return url[:-len("/mcp")]
+
+    def _local_mcp_state(self) -> str:
+        local = self._local_mcp()
+        if local is None:
+            return "off"
+        try:
+            return str(local.state())
+        except Exception:  # noqa: BLE001
+            return "unknown"
 
     def _prompt_defaults(self) -> dict:
         info = self._device()
@@ -774,6 +826,20 @@ class AgentHub:
         variables.update(mcp=connector or "", mcp_prefix=(nx or {}).get("tool_prefix") or "" if connector else "",
                          mcp_state=(nx or {}).get("state") or "")
         variables["mcp_hint"] = mcp_hint(nx, variables) if handle else shadow_hint(nx)
+        permission = str(params.get("permission") or "ask")
+        # `anx devices / exec / wait / kill / cp` for the CLI's own shell: a private anx first on PATH and the
+        # client's address (agents/anx_shim.py, docs/agent-chat.md §5)
+        cli_env: dict = {}
+        cli_path: list[str] = []
+        console_url = self._console_url() if api_spec is None else None
+        if console_url:
+            shim = await asyncio.to_thread(anx_shim.write, tmpdir, self.root)
+            if shim:
+                cli_path.append(shim)
+            cli_env["ANX_CONSOLE_URL"] = console_url
+        variables["devices_cli"] = devices_cli_hint(
+            kind=kind, adapter=d.adapter, permission=permission, runnable=bool(cli_path),
+            local_state=self._local_mcp_state())
         draft = params.get("draft") if isinstance(params.get("draft"), dict) else None
         if draft is None and isinstance(params.get("fragments"), list):
             draft = {"fragments": params["fragments"], "presets": self.prompts.load()["presets"]}
@@ -797,7 +863,6 @@ class AgentHub:
             if nx is not None and nx.get("ready"):
                 api_spec.update(mcp_url=nx["url"])  # the 本机 MCP's tools, the handle filled in
         extra: dict = {"api": api_spec} if api_spec is not None else {}
-        permission = str(params.get("permission") or "ask")
         if nx is not None and api_spec is None:
             use = nx.get("use")
             if nx.get("local_state") not in ("off", "exposed"):
@@ -844,7 +909,8 @@ class AgentHub:
                 extra["mcp_approve"] = names
         try:
             result = await self.runs.open(console, binary=binary, system_prompt=system_prompt, tmpdir=str(tmpdir),
-                                          address=address, rid=rid, events=events, extra=extra, workdir_ok=True)
+                                          address=address, rid=rid, events=events, extra=extra, workdir_ok=True,
+                                          env=cli_env or None, path_first=cli_path or None)
         except RunError as exc:
             await asyncio.to_thread(self.tmp.clean, rid)
             if handle:

@@ -58,7 +58,7 @@ class LocalOnly:
         self.hosts = {f"{name}:{port}" for name in ("127.0.0.1", "localhost", "[::1]", host)}
         #: the 本机 MCP's path: MCP clients send no X-ANX, so its own, stricter guard decides there
         #: (agent_nexus.local_mcp.LocalMcp.guard: loopback peer, exact loopback Host, Origin, JSON only)
-        self.mcp_paths = {mcp_path, mcp_path + "/"} if mcp_path else set()
+        self.mcp_paths = {mcp_path, mcp_path + "/", mcp_path + "/self"} if mcp_path else set()
 
     async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
         if scope["type"] == "websocket":
@@ -1977,6 +1977,8 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
         # the 本机 MCP: no X-ANX (LocalOnly leaves /mcp to LocalMcp.guard)
         Route("/mcp", local_mcp),
         Route("/mcp/", local_mcp),
+        # this computer's own device plugin for `anx exec .` (same guard; works without the gateway)
+        Route("/mcp/self", local_mcp.self_app),
         Route("/api/mcp/local", mcp_local_api, methods=["GET", "PUT"]),
         Route("/api/mcp/local/clis", mcp_local_clis, methods=["POST"]),
         Route("/api/mcp/local/unlink", mcp_local_unlink, methods=["POST"]),

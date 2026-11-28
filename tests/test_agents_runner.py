@@ -879,3 +879,67 @@ def test_codex_gateway_mode_auto_approves_only_the_agent_nexus_connectors():
                          "-c", 'mcp_servers."my hub".default_tools_approval_mode="approve"']
     plain = adapters.make(d, adapters.AdapterOptions(binary="codex", workdir="/w")).argv("hi")
     assert not any("default_tools_approval_mode" in a for a in plain)
+
+
+def test_prepend_path_puts_folders_first_once_and_keeps_the_key():
+    env = {"Path": r"C:\Windows;C:\Tools\;c:\run\.bin", "OTHER": "1"}
+    runner.prepend_path(env, [r"C:\run\.bin"], windows=True)
+    assert env == {"Path": "C:\\run\\.bin;C:\\Windows;C:\\Tools\\", "OTHER": "1"}
+    env = {"PATH": "/usr/bin:/t/.bin/:/bin"}
+    runner.prepend_path(env, ["/t/.bin"], windows=False)
+    assert env["PATH"] == "/t/.bin:/usr/bin:/bin"
+    env = {}
+    runner.prepend_path(env, ["/t/.bin"], windows=False)
+    assert env == {"PATH": "/t/.bin"}
+
+
+def test_env_adds_the_console_and_path_first_but_strips_the_root(monkeypatch):
+    monkeypatch.setenv("ANX_ROOT", "/secret/root")
+    monkeypatch.setenv("PATH", "/usr/bin")
+    runs = Runs(registry.definitions)
+    env = runs._env(None, {"ANX_CONSOLE_URL": "http://127.0.0.1:8399"}, ["/run/.bin"])
+    assert env["ANX_CONSOLE_URL"] == "http://127.0.0.1:8399" and "ANX_ROOT" not in env
+    assert env["PATH"].split(os.pathsep)[0] == "/run/.bin"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the POSIX shim")
+def test_the_anx_shim_runs_this_client(tmp_path):
+    import subprocess
+    from agent_nexus.agents import anx_shim
+    root = tmp_path / "it's a root"
+    root.mkdir()
+    folder = anx_shim.write(tmp_path / "run", root)
+    assert folder == str(tmp_path / "run" / ".bin") and sorted(os.listdir(folder)) == ["anx"]
+    text = (Path(folder) / "anx").read_text()
+    assert text.startswith("#!/bin/sh\nexec ") and "-P -m agent_nexus.cli --root" in text and '"$@"' in text
+    done = subprocess.run([str(Path(folder) / "anx"), "exec", "-h"], capture_output=True, text=True, timeout=60)
+    assert done.returncode == 0 and "用法：anx exec" in done.stderr
+
+
+def test_the_windows_shim_copies_a_launcher_or_falls_back_to_cmd(tmp_path, monkeypatch):
+    from agent_nexus.agents import anx_shim
+    python = tmp_path / "venv" / "Scripts" / "python.exe"
+    python.parent.mkdir(parents=True)
+    python.write_bytes(b"")
+    launcher = python.parent / "anx.exe"
+    launcher.write_bytes(b"MZ" + b"\0" * 100 + b"#!" + str(python).encode() + b"\nUVUV")
+    monkeypatch.setattr(anx_shim.sysconfig, "get_path", lambda name: str(python.parent))
+    folder = anx_shim.write(tmp_path / "run", tmp_path, python=str(python), windows=True)
+    assert sorted(os.listdir(folder)) == ["anx", "anx.exe"]
+    # Git Bash runs the sh script: MSYS path conversion off, then the launcher beside it
+    text = (Path(folder) / "anx").read_text()
+    assert text == ("#!/bin/sh\nexport MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'\n"
+                    'exec "${0%/*}/anx.exe" "$@"\n')
+    if sys.platform != "win32":  # what the script does, with a stand-in for the launcher
+        import subprocess
+        stand_in = Path(folder) / "anx.exe"
+        stand_in.write_text('#!/bin/sh\necho "$MSYS_NO_PATHCONV|$MSYS2_ARG_CONV_EXCL|$*"\n')
+        stand_in.chmod(0o755)
+        done = subprocess.run(["sh", str(Path(folder) / "anx"), "exec", "--cwd", "/srv/app", "--", "ls", "/var/log"],
+                              capture_output=True, text=True, timeout=30)
+        assert done.stdout == "1|*|exec --cwd /srv/app -- ls /var/log\n", done.stderr
+    launcher.write_bytes(b"MZ not ours")
+    folder = anx_shim.write(tmp_path / "run2", tmp_path, python=str(python), windows=True)
+    assert sorted(os.listdir(folder)) == ["anx", "anx.cmd"]
+    assert "%*" in (Path(folder) / "anx.cmd").read_text()
+    assert "MSYS_NO_PATHCONV=1" in (Path(folder) / "anx").read_text()

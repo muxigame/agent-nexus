@@ -47,7 +47,7 @@ def test_variables_defaults_and_placeholders():
 def test_builtins_and_default_render(store):
     doc = store.load()
     ids = [f["id"] for f in doc["fragments"]]
-    assert ids == ["identity", "workdir", "communicate", "team", "nexus_mcp", "gateway", "project"]
+    assert ids == ["identity", "workdir", "communicate", "team", "nexus_mcp", "devices_cli", "gateway", "project"]
     assert all(f["builtin"] and not f["modified"] for f in doc["fragments"])
     assert {p["id"] for p in doc["presets"]} == {"default", "minimal"}
     out = store.render("default", CTX)
@@ -194,3 +194,22 @@ def test_delivery_claude_codex_other():
     assert P.delivery("claude", "")["mode"] == "none"
     assert P.prefix_message("说明", "你好") == "说明\n\n---\n\n你好"
     assert P.prefix_message("", "你好") == "你好"
+
+
+def test_devices_cli_fragment_follows_nexus_mcp_and_is_dropped_when_empty(store):
+    hint = "也可以用 anx exec <设备> -- <命令>；命令含 $ 时用 --stdin"
+    for preset in ("default", "minimal"):
+        out = store.render(preset, {**CTX, "mcp_hint": "MCP 已接入", "devices_cli": hint})
+        ids = [s["id"] for s in out["segments"]]
+        assert "devices_cli" in ids and hint in out["text"]  # a value's own $ is never expanded again
+        if "nexus_mcp" in ids:
+            assert ids.index("devices_cli") == ids.index("nexus_mcp") + 1
+    out = store.render("default", CTX)
+    assert {"id": "devices_cli", "title": "用命令行操作其他设备", "reason": "empty"} in out["skipped"]
+
+
+def test_a_stored_document_gets_the_new_builtin_back_in_place(tmp_path):
+    old = [f for f in P.BUILTIN_FRAGMENTS if f["id"] != "devices_cli"]
+    doc = P.normalize({"fragments": [dict(f) for f in old]})
+    ids = [f["id"] for f in doc["fragments"]]
+    assert ids.index("devices_cli") == ids.index("nexus_mcp") + 1

@@ -670,6 +670,33 @@ def _is_hook_call(argv: list[str]) -> bool:
     return index < len(argv) and argv[index] == "hook"
 
 
+def _remote_call(argv: list[str]) -> tuple[int, str | None] | None:
+    """``anx [--root R] devices|exec|wait|kill|cp ...``: (index of the command, --root) or None. Found before
+    argparse: exec takes the rest of the line as the remote command, options included, and none of these needs a
+    configuration, logging set-up or write access to the root (they only talk to the client on loopback)."""
+    from .remote_cli import COMMANDS as REMOTE_COMMANDS
+    index, root = 0, None
+    while index < len(argv) and argv[index].startswith("-"):
+        if argv[index] == "--root" and index + 1 < len(argv):
+            root = argv[index + 1]
+            index += 2
+            continue
+        if argv[index].startswith("--root="):
+            root = argv[index].split("=", 1)[1]
+            index += 1
+            continue
+        return None  # -h and friends: argparse
+    if index < len(argv) and argv[index] in REMOTE_COMMANDS:
+        return index, root
+    return None
+
+
+def cmd_remote(args: argparse.Namespace, root: Path) -> int:
+    """Only reached when argparse saw the command first (main() normally hands it over before parsing)."""
+    from .remote_cli import main as remote_main
+    return remote_main([args.cmd, *args.rest], str(root))
+
+
 def _main_hook(argv: list[str]) -> int:
     import io
     try:
@@ -760,7 +787,9 @@ def cmd_term(args: argparse.Namespace, root: Path) -> int:
 
 
 ROOT_COMMANDS = {"migrate": cmd_migrate, "secrets": cmd_secrets, "device": cmd_device, "wake": cmd_wake,
-                 "hook": cmd_hook, "integrate": cmd_integrate, "term": cmd_term, "mcp": cmd_mcp}
+                 "hook": cmd_hook, "integrate": cmd_integrate, "term": cmd_term, "mcp": cmd_mcp,
+                 "devices": cmd_remote, "exec": cmd_remote, "wait": cmd_remote, "kill": cmd_remote,
+                 "cp": cmd_remote}
 
 COMMANDS = {
     "serve": cmd_serve, "status": cmd_status, "start": cmd_lifecycle, "stop": cmd_lifecycle,
@@ -888,6 +917,14 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("leave", help="leave the gateway (remove this device's token)")
     from .term_cli import add_parser as add_term_parser
     add_term_parser(sub)
+    for name, text in (("devices", "list devices: online state, OS, shells (default *), workdirs [--json]"),
+                       ("exec", "run a command on a device: anx exec <device> [--shell S] [--cwd DIR] [--timeout S] "
+                                "[--detach] [--stdin] -- <command...>; its exit code is anx's"),
+                       ("wait", "wait for a detached or timed-out command: anx wait <device>:<session>"),
+                       ("kill", "stop a remote command: anx kill <device>:<session>"),
+                       ("cp", "copy files or folders between devices: anx cp <dev>:<path> <dev>:<path> [--overwrite]")):
+        p = sub.add_parser(name, help=text, add_help=False, prefix_chars="\0")
+        p.add_argument("rest", nargs=argparse.REMAINDER)
 
     p = sub.add_parser("plugin", help="install, remove, enable and list plugins (design §6.5)")
     plugin_sub = p.add_subparsers(dest="plugin_cmd", required=True)
@@ -924,6 +961,15 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     if _is_hook_call(sys.argv[1:] if argv is None else list(argv)):
         return _main_hook(sys.argv[1:] if argv is None else list(argv))
+    remote = _remote_call(sys.argv[1:] if argv is None else list(argv))
+    if remote is not None:
+        index, root_arg = remote
+        from .remote_cli import main as remote_main
+        argv_list = sys.argv[1:] if argv is None else list(argv)
+        for stream in (sys.stdout, sys.stderr):
+            with contextlib.suppress(AttributeError, ValueError):
+                stream.reconfigure(errors="replace")  # Chinese text on a legacy console
+        return remote_main(argv_list[index:], root_arg)
     if _is_mcp_link(sys.argv[1:] if argv is None else list(argv)):
         args = build_parser().parse_args(sys.argv[1:] if argv is None else list(argv))
         return cmd_mcp(args, Path("."))

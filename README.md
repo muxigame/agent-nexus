@@ -11,7 +11,7 @@ Agent Nexus：MCP 插件管理器与云端网关（gateway）：本机服务管�
 1. **下载安装包**：在网关的下载页 `https://hub.example.test/downloads`（不用登录）下载 Windows 安装包；或打开 GitHub 仓库的 [Releases](https://github.com/muxigame/agent-nexus/releases)，下载最新版本的 `agent-nexus_<version>_x64-setup.exe`（Windows 10/11 x64）。同一页的 `SHA256SUMS` 可以核对文件：PowerShell 里执行 `Get-FileHash .gent-nexus_<version>_x64-setup.exe`。安装包没有代码签名证书，SmartScreen 提示时选择“仍要运行”。Ubuntu 用户下载 `agent-nexus_<version>_amd64.deb`，执行 `sudo apt install ./agent-nexus_<version>_amd64.deb`。macOS 用户下载 `agent-nexus_<version>_aarch64.dmg`（Apple 芯片）或 `_x64.dmg`（Intel），把 Agent Nexus 拖进“应用程序”；没有 Apple 开发者签名时，首次打开要到“系统设置 → 隐私与安全性”点“仍要打开”。Android 10 及以上的手机在手机上下载 `agent-nexus_<version>_arm64.apk` 并允许安装。
    - **核心和界面分开（所有平台同一个架构）**：核心（网关连接、自动更新、P2P、远程桌面、所有插件）和界面分开，类似 Clash 的服务和窗口。Windows 安装时可选“为所有用户安装”（需要管理员一次）或“仅为我安装”：前者的核心是 Windows 服务 `AgentNexus`（LocalSystem），数据在 `%ProgramData%\AgentNexus`，开机即在线、注销后不断线，由核心自己静默更新；后者保持原来的用户级运行（数据在 `%LOCALAPPDATA%\AgentNexus`）。Ubuntu 的核心是 root 系统服务 `agent-nexus.service`（数据在 `/var/lib/agent-nexus`）。窗口和托盘、以及共享当前登录桌面的会话助手都是普通用户程序，会话助手不在时核心会自动在当前活跃的会话里启动它。从旧版（用户级）切到系统服务时，原来的数据目录会搬到系统目录（原目录保留），旧的用户级核心自动停用。插件和远程终端以“执行账户”运行（设置 → 执行账户）：Ubuntu 可选任一本机账户，默认是安装它的用户；Windows 可选“当前登录的用户”（默认，插件运行在他的桌面会话里，截图、键鼠、界面自动化照常可用，切换用户后自动跟随）或 SYSTEM，没有人登录时回到 SYSTEM。
   - **Ubuntu 细节**：核心和界面分开，类似 Clash 的服务和窗口。核心（网关连接、自动更新、P2P、远程桌面、所有插件）是 root 系统服务 `agent-nexus.service`，数据在 `/var/lib/agent-nexus`，开机即运行，不依赖任何人登录，自动更新不需要密码；窗口和托盘、以及共享当前登录桌面的会话助手（`agent-nexus session`，登录时自动启动）是普通用户程序。安装包装好后几秒内自动完成设置；从旧版（用户服务）升级时，原来的 `~/.local/share/agent-nexus` 会搬到系统目录（原目录保留），旧的用户服务自动停用。插件和远程终端以“执行账户”运行（设置 → 执行账户，默认是安装它的用户；root 安装的服务器默认 root）。
-  - **没有桌面的 Ubuntu 服务器**：`sudo apt install --no-install-recommends ./agent-nexus_<version>_amd64.deb`（不装 GTK/WebKit），然后 `sudo agent-nexus join <邀请码>`（加入后自动重启核心服务）。`agent-nexus service status` 查看状态和云端连接，`agent-nexus service logs -f` 看日志，`sudo agent-nexus anx <参数>` 运行其他 `anx` 命令。本机控制台用 `ssh -L 8399:127.0.0.1:8399 <用户>@<服务器>` 转发后在浏览器打开 `http://127.0.0.1:8399`。没有 systemd 的环境（容器）用 `agent-nexus --serve` 在前台运行。
+  - **没有桌面的 Ubuntu 服务器**：`sudo apt install --no-install-recommends ./agent-nexus_<version>_amd64.deb`（不装 GTK/WebKit），然后 `sudo agent-nexus join <邀请码>`（加入后自动重启核心服务）。`agent-nexus service status` 查看状态和云端连接，`agent-nexus service logs -f` 看日志，`sudo agent-nexus anx <参数>` 运行其他 `anx` 命令；在其他设备上运行命令用 `agent-nexus anx exec <设备> -- <命令>`（不需要 sudo，见下文「在命令行操作其他设备」）。本机控制台用 `ssh -L 8399:127.0.0.1:8399 <用户>@<服务器>` 转发后在浏览器打开 `http://127.0.0.1:8399`。没有 systemd 的环境（容器）用 `agent-nexus --serve` 在前台运行。
 2. **安装并启动**：按向导安装（只装到当前用户，不需要管理员权限）。安装后托盘出现 Agent Nexus 图标，默认随登录自动启动，可以在托盘菜单里关闭。右键托盘“打开控制台”进入本机控制台。
 3. **加入你的网关**（设计 §11.5）：
    - 网关 owner 打开云端控制台 `https://hub.example.test/`（owner 密码登录），在“设备 → 邀请新设备”生成一次性邀请码（形如 `anx1.…`，或 `agentnexus://enroll?invite=…` 链接，附二维码；默认 24 小时有效，只能用一次）。也可以在网关主机上执行 `anx-gateway invite create --config /etc/agent-nexus/gateway.json`。
@@ -218,7 +218,7 @@ cd WorkSpace/mcp
 uv run --project agent-nexus anx serve --tray --open
 ```
 
-`anx.ps1` / `anx.sh` 不带参数时等于 `serve --tray --open`，带参数时原样转给 `anx`。
+开发检出里的其他命令同样用 `uv run --project agent-nexus anx <参数>`。
 
 控制台地址 `http://127.0.0.1:8399`（端口在 `agent-nexus.json` 的 `manager.port`）。
 
@@ -358,7 +358,7 @@ make desktop                  # 先生成内嵌运行包，再构建 artifacts/a
   - **远程桌面**：查看并控制对方桌面（内置 VNC + noVNC，画质可调、全屏、Ctrl+Alt+Del）。画面是 H.264：对方用显卡硬件编码（NVENC / Quick Sync / AMF / Media Foundation / VAAPI，都没有时 libx264），这边用 WebCodecs 硬件解码，对方主动推帧（不等每帧往返）；不支持 H.264 的查看端自动改用 JPEG。鼠标是本地的、零延迟，对方的指针形状（箭头、输入光标、手形……）同步过来。没有桌面的服务器不提供，只有终端。
   - **终端**：在窗口里打开对方的 shell（xterm.js，Windows Terminal 风格）；“⋯ → 在本机终端打开”用这台电脑的终端（装了 Windows Terminal 就用它）。Windows 上有 PowerShell 7 / Windows PowerShell / 命令提示符 / Git Bash / WSL；Linux / macOS 上有 bash、zsh、fish 等。终端页下方列出对方的命令行环境（Claude Code、Codex、git、node、python、uv、docker……及版本）。
 - **打洞直连（muxi-p2p）**：终端和远程桌面优先走设备之间的直连——IPv6 / 局域网 / 路由器端口映射，其次 UDP+QUIC 和 TCP 打洞，数据不经过网关；页面上的标签写着实际走的路线。终端在直连失败时自动退回网关中转（标签会写原因）；远程桌面只走直连。
-- **没有桌面的机器**：`agent-nexus term [设备]`（Windows 上 `anx term`），`Ctrl+]` 再按 `q` 退出；`--shells` 列出对方的 shell 和命令行工具。
+- **没有桌面的机器**：`agent-nexus term [设备]`（开发检出里是 `uv run anx term`），`Ctrl+]` 再按 `q` 退出；`--shells` 列出对方的 shell 和命令行工具。
 - **文件复制（AI 可用）**：`file_copy(src_device, src_path, dst_device, dst_path, overwrite=false)` 把一个文件或整个文件夹（递归）从一台设备复制到另一台（或同一台的另一个位置），几 GB 的二进制数据也可以；立即返回 `job_id`，用 `file_copy_status(job_id, wait_ms=30000)` 看进度（文件数、字节数、速度、剩余时间、实际线路、错误），`file_copy_cancel` 取消，`file_copy_list` 列出最近的任务。任务由源设备（或目标设备）自己执行，数据优先走直连或中转设备（端到端加密），不经过网关；两端客户端都太旧时才由网关中转（慢，返回里会说明），`route="p2p"` 可禁止网关中转。每个文件写到临时名、核对 sha256 后才改名；重复执行同一个复制会跳过已有的相同文件、续传没传完的文件（任务 `interrupted`、因对方离线而 `failed` 或状态 `unknown` 时，用相同参数再调用一次即可；这也是单向同步的方式，目标端从不删除文件）；`overwrite=false` 时不同内容的已有文件只报错不覆盖，`overwrite=true` 覆盖时保留原文件的权限和属主，新文件沿用源文件的权限位；符号链接不跟进，复制途中被换成链接的文件或文件夹也不会被读写。设备 `agent-nexus.json` 写 `"files": {"jobs": false}` 不在本机运行复制任务，`"files": {"enabled": false}` 完全关闭文件传输。详见 docs/design.md §18。
 - **本机 MCP（不用填网关地址和令牌）**：装了客户端的电脑在本机控制台端口的 `/mcp`（默认 `http://127.0.0.1:8399/mcp`）提供一个本机 MCP，工具和网关 MCP 完全相同（device_list、use_device、各设备的工具、mail_*、ask_user、file_copy……），调用方记为这台设备；不需要任何凭据，只接受本机的连接，设备凭据始终留在客户端进程里。客户端会自动在已安装的 Claude Code（`~/.claude.json`）、Codex（`~/.codex/config.toml`）、Gemini CLI（`~/.gemini/settings.json`）里写入一个名为 `agent-nexus` 的配置项指向它（写入前备份，可在“设置 → 本机 MCP”移除；关掉开关会一并移除）。已经通过云端网关接入的 CLI——配置里已有网关地址，或者在 Claude.ai / ChatGPT 账户里加过 Agent Nexus 连接器——不会重复添加。Agent Nexus 发起的对话会自动带上这个连接器和已选好的工作区（`workspace_id`），模型不用先调 device_list / use_device。设备锁定或被吊销时它只提供一个 `nexus_status` 工具；网关主人可以在网关控制台“设置 → 在 AI 客户端中添加 Agent Nexus”关闭设备接入；网关需要 0.8.31 以上。命令行：`anx mcp status`、`anx mcp unlink --all`；卸载客户端时会自动移除这些配置项。详见 docs/design.md §19。
 - **锁定**：右上角的锁。锁定后这台电脑**不能操作其他设备，但其他设备仍然可以操作它**；锁定密码可选（设置 → 锁定密码）。网关同样拒绝已锁定设备发起的操作。
@@ -392,6 +392,12 @@ anx secrets set <name> --from-file <path>       从文件写入一个凭据（�
 anx join <邀请码> [--agent-id <id>]               用邀请码加入网关（anx1.… 或 agentnexus://enroll?invite=…）
 anx leave                                       退出网关（删除本机设备凭据）
 anx term [设备] [--shell S] [--list|--shells]     打开网关里另一台设备的远程终端（用本机设备凭据；锁定时拒绝）
+anx devices [--json]                            列出设备：在线状态、系统、shell（默认的标 *）、工作目录
+anx exec <设备> [--shell S] [--cwd 目录] [--timeout 秒] [--detach] [--stdin] -- <命令…>
+                                                在那台设备上运行命令：输出实时显示，远程退出码就是 anx 的退出码
+anx wait <设备>:<会话> [--timeout 秒]             接着等一个 --detach 或超时的命令
+anx kill <设备>:<会话>                           停止远程命令（连同它启动的所有进程）
+anx cp <设备>:<路径> <设备>:<路径> [--overwrite]   在设备之间复制文件或文件夹（后台任务，显示进度，可续传）
 anx integrate claude|codex [--dry-run] [--remove] [--hooks]
                                                 给 Claude Code / Codex 装会话 hook（anx hook）：上报会话 id 和标题，
                                                 邮箱地址据此匹配；先备份原文件，可重复运行；Codex 已有别的 notify 时不覆盖
@@ -408,6 +414,49 @@ anx-gateway plugin-repo add|list|remove --config <gateway.json> [x.zip | <name> 
 ```
 
 管理器在跑时命令走它的本地接口；没在跑时直接操作进程，之后 `anx serve` 会接管这些进程。迁移和凭据恢复的细节见 `docs/migration.md`。
+
+### 在命令行操作其他设备（anx devices / exec / wait / kill / cp）
+
+这几个命令只和**本机正在运行的客户端**通信（回环地址上的本机 MCP），由客户端经现有线路（直连、中转设备、网关中转）去操作其他设备；不需要任何凭据，锁定、吊销和网关主人的“设备接入”开关照常生效（对本机 `.` 也一样）。设备写显示名（不区分大小写）或设备 ID，`.` 或省略表示本机；本机不经过网关（本机 MCP 的 `/mcp/self`），没加入网关时也能用，以设备插件的执行账户运行（与本机 MCP 已经允许的相同）。
+
+```bash
+anx devices
+anx exec nas -- df -h /data                         # 退出码就是远程命令的退出码
+anx exec win-pc --shell pwsh --cwd 'D:\work' -- git status
+anx exec nas --timeout 600 -- make test             # 600 秒后还没结束：退出码 124，命令继续在设备上运行
+anx exec nas --detach -- ./long-job.sh              # 只打印会话号，例如 nas-01:1007
+anx wait nas-01:1007                                # 之后接着等（输出和退出码同 anx exec）
+anx kill nas-01:1007
+anx cp nas:/srv/logs .:/tmp/logs/                   # 目标以 / 结尾：复制到这个文件夹里
+anx exec nas --stdin <<'EOF'
+for f in *.log; do grep -c "ERROR" "$f"; done
+EOF
+```
+
+- **引号和 `$`**：不加 `--stdin` 时，`--` 后面的参数先经本地 shell 展开，再用空格连成一条命令交给远程 shell（同 ssh），所以 `$HOME`、`*`、引号会被解析两遍。命令里有引号、`$`、反斜杠或通配符时用 `--stdin` 从标准输入传命令原文（bash/zsh 用 `<<'EOF'` here-doc；PowerShell 用多行 here-string：`@'` 结束第一行、`'@` 开始最后一行，再 `| anx exec nas --stdin`）。Windows PowerShell 5.1 通过管道传非 ASCII 字符时会悄悄变成 `?`，先执行 `$OutputEncoding = [Text.UTF8Encoding]::new()`（PowerShell 7 不需要）。cmd.exe 没有 here-doc：把命令写进文件，`anx exec nas --stdin < cmd.txt`。
+- **Git Bash（Windows）**：Git Bash 会把传给原生程序的 `/srv/app` 这类参数改写成 `C:/Program Files/Git/srv/app`。对话里启动的 CLI 用的 `anx` 已经关掉了这个转换；在自己的 Git Bash 里用 `MSYS_NO_PATHCONV=1 anx exec …`，或者用 `--stdin`（`--cwd` 等参数仍要加 `MSYS_NO_PATHCONV=1`）。远程命令的标准输入总是空的（读标准输入的命令不会卡住）。
+- **输出**：stdout 和 stderr 合并成一个流，原样写到 anx 的标准输出（不是终端时按 UTF-8 写，不带颜色）；anx 自己的提示和错误写到标准错误。每次取回的输出超过约 60000 个字符时中间会被截掉（会提示一次）；需要完整的大量输出时让命令写进远程文件，再用 `anx cp` 取回。
+- **等待和中断**：不加 `--detach` 时一直等到命令结束（服务端每次最多等 50 秒，anx 自己循环，只有 `--timeout` 决定等多久）。Ctrl+C 停止远程命令（连同子进程）后退出 130（`anx wait` 里也一样）；停不掉（设备离线、策略拒绝）时会说明并给出 `anx kill <会话>`；再按一次立即退出（命令可能仍在运行，提示里有 `anx kill`）。标准输出的读者先退出（`anx exec nas -- journalctl -f | head -20`）时同样停止远程命令，退出码 141（Windows 上 1）。
+- **连接中断**：本机客户端重启或更新、网关或设备短暂断开时，`anx exec` / `anx wait` / `anx cp` 最多重试 60 秒；恢复后提示一次“中间可能缺了一段输出”（那段输出在途中丢了）；60 秒内没恢复就退出 251，并打印 `anx wait <会话>`（命令仍在设备上运行）或复制任务号。只有第一次就连不上时才报“客户端没有运行”（250）。`anx cp` 运行任务的设备暂时离线时同样等它回来；放弃时退出 6，任务可能仍在设备上运行——等它结束后再重新运行同一条命令续传，不要同时再开一个。会话在命令结束 10 分钟后（输出没取走时）或闲置 1 小时后清理。
+- **退出码**：
+
+  | 退出码 | 含义 |
+  |---|---|
+  | 远程退出码 | 命令自己的退出码（POSIX 上被信号终止为 128+信号，大于 255 的取低 8 位） |
+  | 2 | 用法错误 |
+  | 3 / 4 / 5 / 6 | `anx cp`：完成但有错误 / 失败 / 已取消 / 中断或状态未知（中断后重新运行同一条命令即可续传） |
+  | 124 | `--timeout` 到了，命令仍在运行 |
+  | 130 | 被 Ctrl+C 中断（SIGTERM 143，SIGHUP 129） |
+  | 141 | 标准输出被关闭（`\| head`），远程命令已停止（Windows 上是 1） |
+  | 250 | 本机客户端没有运行 |
+  | 251 | 本机 MCP 或网关不可用：关闭、未加入网关、离线、已吊销、已锁定、网关过旧、设备接入被关闭；或连接中断超过 60 秒 |
+  | 252 | 设备不存在、不在线或名称不唯一 |
+  | 253 | 设备上没有指定的 shell |
+  | 254 | 远程工具报错：策略拒绝、工作目录不允许、会话数已满、会话不存在或已过期 |
+  | 255 | 协议或内部错误 |
+
+  远程命令自己用 250–255 退出时与这些码重合；需要区分时看标准错误里 anx 的提示。
+- **哪里有 `anx`**：Agent Nexus 对话里启动的 CLI（Claude Code、Codex……）自动有：每次对话的临时目录里有一个只放 `anx` 的 `.bin`，放在 PATH 最前面，并设置 `ANX_CONSOLE_URL` 指向本机客户端（docs/agent-chat.md §5）。Codex 只有“完全访问”模式能用（其他模式的沙箱不允许连回环地址），只读模式和 API 模型不提示。自己的终端里：Ubuntu 用 `agent-nexus anx exec …`（不需要 sudo）；开发检出用 `uv run anx exec …`；Windows、macOS、Android 的安装包目前不往 PATH 里放 `anx`。客户端地址默认取 `ANX_CONSOLE_URL`，否则是根目录配置的 `manager.port`（默认 8399），也可以用 `--console http://127.0.0.1:<端口>` 指定。
 
 ## 行为约定
 

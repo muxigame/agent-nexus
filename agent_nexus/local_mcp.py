@@ -35,6 +35,8 @@ from . import __version__
 log = logging.getLogger(__name__)
 
 PATH = "/mcp"
+#: ``anx exec .`` and friends: this computer's own device plugin, without the gateway (see :meth:`LocalMcp.self_app`)
+SELF_PATH = "/mcp/self"
 BODY_MAX = 8 * 1024 * 1024
 AUDIT_MAX = 5 * 1024 * 1024
 AUDIT_KEEP = 3
@@ -57,10 +59,11 @@ REASONS = {
     "locked": "这台设备已锁定，解锁后才能使用 Agent Nexus 网关工具",
     "gateway_old": "网关版本过旧，不支持本机 MCP 接入；请把网关更新到 0.8.31 或更新版本",
     "device_access_off": "网关主人关闭了设备 MCP 接入",
+    "no_device": "本机的设备插件没有运行（本机控制台 → 插件 → device）",
     "ready": "已就绪：与网关 MCP 相同的工具，调用方记为本设备",
 }
 #: States in which the endpoint answers at all (off: 404; exposed: 403 to everybody).
-SERVING = tuple(state for state in REASONS if state not in ("off", "exposed"))
+SERVING = tuple(state for state in REASONS if state not in ("off", "exposed", "no_device"))
 
 
 def is_loopback(host: str | None) -> bool:
@@ -116,7 +119,8 @@ class LocalMcp:
 
     def __init__(self, cfg: Any, cloud_status: dict, hub: Any, lock: Any, *,
                  credentials: Callable[[Path], tuple[str, str, str]] | None = None,
-                 http: Callable[[], Any] | None = None, accounts: Callable[[], set[str]] | None = None):
+                 http: Callable[[], Any] | None = None, accounts: Callable[[], set[str]] | None = None,
+                 device_plugin: Callable[[], tuple[str, str | None] | None] | None = None):
         self.cfg = cfg
         self.cloud_status = cloud_status
         self.hub = hub
@@ -125,6 +129,11 @@ class LocalMcp:
         self._credentials_fn = credentials or remote.credentials
         self._http = http or remote.gateway_http
         self._accounts = accounts or self._allowed_users
+        if device_plugin is None:
+            from .local_device import DevicePluginCache
+            device_plugin = DevicePluginCache(Path(cfg.root)).get
+        #: () -> (endpoint, token) of this computer's device plugin, or None (``/mcp/self``)
+        self._device_plugin = device_plugin
         self._creds: tuple[float, tuple[str, str, str]] | None = None
         self._device_off_until = 0.0
         self._rejected_until = 0.0
@@ -177,6 +186,28 @@ class LocalMcp:
         if time.monotonic() < self._rejected_until:
             return "rejected"
         return "ready"
+
+    def self_state(self) -> str:
+        """The state of ``/mcp/self``: the switch, the console's address, the lock, and -- as on ``/mcp`` -- a
+        revocation and the gateway owner's device-MCP switch. Not being joined, the gateway being offline or old
+        do not matter: this route never uses the network."""
+        if not self.settings["enabled"]:
+            return "off"
+        if not is_loopback(getattr(self.cfg, "host", "127.0.0.1")):
+            return "exposed"
+        if self.cloud_status.get("state") == "revoked":
+            return "revoked"
+        try:
+            locked = bool(self.lock.locked)
+        except Exception:  # noqa: BLE001
+            locked = False
+        if locked:
+            return "locked"
+        if self.cloud_status.get("gateway_device_mcp") is False or time.monotonic() < self._device_off_until:
+            return "device_access_off"
+        if time.monotonic() < self._rejected_until:
+            return "rejected"
+        return "ready" if self._device_plugin() is not None else "no_device"
 
     def status(self) -> dict:
         state = self.state()
@@ -291,6 +322,14 @@ class LocalMcp:
 
     # -- ASGI ------------------------------------------------------------------------------------------------
     async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
+        await self._serve(scope, receive, send, local=False)
+
+    @property
+    def self_app(self) -> "SelfEndpoint":
+        """The ASGI app of ``/mcp/self`` (see :class:`SelfEndpoint`)."""
+        return SelfEndpoint(self)
+
+    async def _serve(self, scope: dict, receive: Any, send: Any, *, local: bool) -> None:
         if scope.get("type") != "http":  # pragma: no cover - LocalOnly closes websockets on /mcp
             return
         headers = _headers(scope)
@@ -317,13 +356,13 @@ class LocalMcp:
                                          "error": {"code": -32700, "message": "Parse error"}})
             return
         messages, batch = parsed
-        state = self.state()
+        state = self.self_state() if local else self.state()
         outcome = state
         if state == "ready":
-            outcome = await self._forward(scope, headers, body, send, messages, batch, receive)
+            outcome = await self._forward(scope, headers, body, send, messages, batch, receive, local=local)
         else:
             await self.degraded(send, state, messages, batch, method=scope["method"])
-        self._audit(scope, messages, outcome, started)
+        self._audit(scope, messages, outcome, started, local=local)
 
     async def _plain(self, send: Any, status: int, text: str, extra: dict | None = None) -> None:
         data = text.encode("utf-8")
@@ -345,6 +384,16 @@ class LocalMcp:
         if "method" not in message or "id" not in message or message.get("id") is None:
             return None
         reason = REASONS.get(state, state)
+        answer = self._local_answer(state, reason, message)
+        # machine-readable for `anx exec` and other scripts: never parse the text
+        if isinstance(answer.get("result"), dict):
+            answer["result"]["_meta"] = {"anx/state": state, "anx/reason": reason}
+        elif isinstance(answer.get("error"), dict):
+            answer["error"]["data"] = {"anx/state": state, "anx/reason": reason}
+        return answer
+
+    @staticmethod
+    def _local_answer(state: str, reason: str, message: dict) -> dict:
         method = message.get("method")
         rid = message.get("id")
         params = message.get("params") if isinstance(message.get("params"), dict) else {}
@@ -421,34 +470,48 @@ class LocalMcp:
         return None
 
     async def _forward(self, scope: dict, headers: dict[str, str], body: bytes, send: Any,
-                       messages: list[dict], batch: bool, receive: Any = None) -> str:
+                       messages: list[dict], batch: bool, receive: Any = None, *, local: bool = False) -> str:
+        """Pass the request on: to ``<gateway>/mcp/device`` with this device's credential, or (``local``) to this
+        computer's device plugin with its bearer token."""
         import httpx
-        mcp_path = str(self.cloud_status.get("gateway_mcp_path") or "/mcp")
-        try:
-            origin, agent_id, token = await self.credentials()
-        except Exception as exc:  # noqa: BLE001 - RemoteError: not joined / no credential
-            log.info("local mcp: no device credential (%s)", getattr(exc, "code", type(exc).__name__))
-            await self.degraded(send, "not_joined", messages, batch, method=scope["method"])
-            return "not_joined"
-        from . import remote
         forward = {key: headers[key] for key in FORWARD_HEADERS if key in headers}
-        forward.update(remote.headers(agent_id, token))
+        if local:
+            target = self._device_plugin()
+            if target is None:
+                await self.degraded(send, "no_device", messages, batch, method=scope["method"])
+                return "no_device"
+            url, plugin_token = target
+            if plugin_token:
+                forward["authorization"] = f"Bearer {plugin_token}"
+            unreachable = "no_device"
+        else:
+            mcp_path = str(self.cloud_status.get("gateway_mcp_path") or "/mcp")
+            try:
+                origin, agent_id, token = await self.credentials()
+            except Exception as exc:  # noqa: BLE001 - RemoteError: not joined / no credential
+                log.info("local mcp: no device credential (%s)", getattr(exc, "code", type(exc).__name__))
+                await self.degraded(send, "not_joined", messages, batch, method=scope["method"])
+                return "not_joined"
+            from . import remote
+            forward.update(remote.headers(agent_id, token))
+            url = origin.rstrip("/") + mcp_path + "/device"
+            unreachable = "offline"
         # the body is streamed on as it comes: never let a proxy in front of the gateway compress it
         forward["accept-encoding"] = "identity"
-        url = origin.rstrip("/") + mcp_path + "/device"
         client = self._http()
         timeout = httpx.Timeout(connect=10.0, read=None, write=60.0, pool=10.0)
         try:
             request = client.build_request(scope["method"], url, content=body, headers=forward, timeout=timeout)
             upstream = await client.send(request, stream=True)
         except (httpx.HTTPError, OSError) as exc:
-            log.info("local mcp: gateway unreachable (%s)", type(exc).__name__)
-            await self.degraded(send, "offline", messages, batch, method=scope["method"])
-            return "offline"
+            log.info("local mcp: %s unreachable (%s)", "device plugin" if local else "gateway", type(exc).__name__)
+            await self.degraded(send, unreachable, messages, batch, method=scope["method"])
+            return unreachable
         try:
             if upstream.status_code >= 400:
                 data = await upstream.aread()
-                mapped = self._upstream_state(upstream.status_code, data, session="mcp-session-id" in headers)
+                mapped = None if local else self._upstream_state(upstream.status_code, data,
+                                                                 session="mcp-session-id" in headers)
                 if mapped is not None:
                     await self.degraded(send, mapped, messages, batch, method=scope["method"])
                     return mapped
@@ -503,7 +566,7 @@ class LocalMcp:
                 await upstream.aclose()
 
     # -- audit -----------------------------------------------------------------------------------------------
-    def _audit(self, scope: dict, messages: list[dict], outcome: str, started: float) -> None:
+    def _audit(self, scope: dict, messages: list[dict], outcome: str, started: float, *, local: bool = False) -> None:
         calls = [m for m in messages if m.get("method") == "tools/call" and isinstance(m.get("params"), dict)]
         if not calls:
             return
@@ -512,9 +575,12 @@ class LocalMcp:
         for call in calls:
             params = call["params"]
             arguments = params.get("arguments") if isinstance(params.get("arguments"), dict) else {}
-            entry = {"ts": round(time.time(), 3), "state": self.state(), "tool": str(params.get("name") or "")[:80],
+            entry = {"ts": round(time.time(), 3), "state": self.self_state() if local else self.state(),
+                     "tool": str(params.get("name") or "")[:80],
                      "ws": str(arguments.get("workspace_id") or "")[:8], "outcome": outcome,
                      "ms": int((time.monotonic() - started) * 1000)}
+            if local:
+                entry["via"] = "self"
             if peer.get("pid"):
                 entry["peer_pid"] = peer["pid"]
             if peer.get("user"):
@@ -535,3 +601,16 @@ class LocalMcp:
                 handle.write("\n".join(lines) + "\n")
         except OSError as exc:
             log.debug("local mcp: audit log not written: %s", exc)
+
+
+class SelfEndpoint:
+    """``/mcp/self``: the same guard as ``/mcp``, then this computer's own device plugin as it is (its own tools,
+    raw results), with the plugin's bearer token added by the console. Used by ``anx exec .`` / ``anx devices``
+    and works when not joined. It runs commands as the plugin's account -- what ``/mcp`` already lets any loopback
+    caller do once joined, so no new privilege; the lock applies as on ``/mcp``."""
+
+    def __init__(self, owner: LocalMcp):
+        self.owner = owner
+
+    async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
+        await self.owner._serve(scope, receive, send, local=True)

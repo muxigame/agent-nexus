@@ -10,6 +10,7 @@ headless commands instead of failing:
     agent-nexus service status|logs|disable
     agent-nexus term [device]          remote terminal on another device of the gateway
     agent-nexus anx <args>             any `anx` command (status, leave, plugin...)
+    agent-nexus anx exec <device> -- <command>   run a command on another device (also devices, wait, kill, cp)
     agent-nexus --serve                run the manager in the foreground
 
 System mode (a package with systemd): like Clash's service and its window, the core -- the
@@ -335,6 +336,7 @@ HEADLESS_HELP = """Agent Nexus（无桌面模式）
   agent-nexus service disable      停止并取消自启
   agent-nexus term [设备]          打开网关里另一台设备的远程终端（--list 列出设备，--shells 列出 shell 和命令行工具）
   agent-nexus anx <参数>           其他 anx 命令，例如 anx status、anx leave、anx plugin list
+  agent-nexus anx exec <设备> -- <命令>   在另一台设备上运行命令（另有 anx devices / wait / kill / cp）
   agent-nexus --serve              在前台运行管理器（调试用）
 
 本机控制台在 http://127.0.0.1:8399 ；在自己电脑上执行
@@ -352,6 +354,7 @@ SYSTEM_HELP = """Agent Nexus（系统服务模式：核心以 root 运行在 age
   sudo agent-nexus service disable      停止并取消自启
   sudo agent-nexus term [设备]          打开网关里另一台设备的远程终端
   sudo agent-nexus anx <参数>           其他 anx 命令，例如 anx status、anx leave、anx plugin list
+  agent-nexus anx exec <设备> -- <命令>  在另一台设备上运行命令，不需要 sudo（另有 anx devices / wait / kill / cp）
 
 插件和远程终端以“执行账户”运行（控制台 设置 → 执行账户）。
 本机控制台在 http://127.0.0.1:8399 ；在自己电脑上执行
@@ -683,6 +686,26 @@ def anx(arguments):
     return subprocess.call(command, env=env, cwd=str(ROOT))
 
 
+#: anx commands that only talk to the running client on loopback: no sudo, no `uv run` (which may want to sync a
+#: venv this user cannot write), nothing written to the root
+DEVICE_COMMANDS = ("devices", "exec", "wait", "kill", "cp")
+
+
+def device_cli(arguments):
+    """``anx devices|exec|wait|kill|cp ...`` as the calling user, straight from the installed venv."""
+    python = ROOT / ".venv/bin/python"
+    if not python.exists():
+        return anx(arguments)
+    env = dict(os.environ)
+    env.pop("ANX_ROOT", None)
+    env.pop("MCPM_ROOT", None)
+    command = [str(python), "-P", "-m", "agent_nexus.cli", "--root", str(ROOT), *arguments]
+    # Replace this process instead of waiting on a child: a terminal Ctrl+C reaches the whole process group, and
+    # subprocess.call would SIGKILL anx 0.25 s later, before its exec_kill could stop the remote command.
+    os.execve(str(python), command, env)
+    return 0  # not reached
+
+
 def has_display():
     if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
         return False
@@ -716,6 +739,8 @@ def main(argv):
             return 0
         if args.command == "session":
             return session()
+        if args.command == "anx" and args.rest[:1] and args.rest[0] in DEVICE_COMMANDS:
+            return device_cli(args.rest)
         if args.command in ("anx", "join", "term") or (args.command == "service" and (args.rest[:1] or ["status"])[0]
                                                          in ("enable", "restart", "disable")):
             as_root([args.command, *args.rest])

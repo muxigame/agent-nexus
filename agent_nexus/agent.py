@@ -19,7 +19,6 @@ from uuid import uuid4
 
 from fastmcp import Client
 from fastmcp.client.transports import StdioTransport, StreamableHttpTransport
-from mcpkit import Service
 from mcpkit.config import ConfigError, ServiceConfig, read_secret
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed
@@ -448,23 +447,17 @@ class LocalGateway:
             return dict(self.transports)
         cfg = load_manager_config(self.root)
         targets = {}
+        from .local_device import Unsupported, plugin_endpoint
         for name, spec in discover(cfg).items():
-            if (spec.observed or not spec.enabled or not spec.supported or spec.error or spec.port is None
-                    or not spec.installed or spec.missing):
+            try:
+                found = plugin_endpoint(spec, self.root)
+            except Unsupported:
+                continue  # OAuth interactive login is not suitable for an unattended agent.
+            if found is None:
                 continue
-            service = Service.load(spec.dir, root=self.root)
-            token = None
-            if service.config.auth.bearer_secrets:
-                token = read_secret(service.config, service.config.auth.bearer_secrets[0])
-            elif service.config.auth.mode != "none":
-                # OAuth interactive login is not suitable for an unattended agent.
-                continue
-            host = "127.0.0.1" if spec.host in ("0.0.0.0", "::") else spec.host
-            if ":" in host:
-                host = f"[{host}]"
-            endpoint = f"http://{host}:{spec.port}{service.config.path}"
+            endpoint, base, token = found
             targets[name] = lambda endpoint=endpoint, token=token: StreamableHttpTransport(endpoint, auth=token)
-            self.media_endpoints[name] = f"http://{host}:{spec.port}"
+            self.media_endpoints[name] = base
             self.descriptions[name] = spec.description
 
         # Extra MCPs needn't be managed processes. HTTP, legacy SSE and stdio

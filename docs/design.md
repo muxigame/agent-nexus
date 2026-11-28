@@ -1709,9 +1709,13 @@ CLI ──HTTP（无凭据）──▶ 本机控制台 127.0.0.1:8399/mcp（Loca
 | rejected | 网关不接受这台设备的凭据（已被吊销或需要重新加入；上游 401 后 30 秒内） |
 | ready | 已就绪：与网关 MCP 相同的工具，调用方记为本设备 |
 
+本地应答的每个结果都带 `_meta: {"anx/state": 状态, "anx/reason": 原因}`（JSON-RPC 错误放在 `error.data`），脚本（`anx exec`）据此判断，不解析文字。
+
+- **`/mcp/self`**（`LocalMcp.self_app`）：同样的 guard，之后原样转发到**本机的设备插件**（它自己的 `http://127.0.0.1:<端口>/mcp`，加上插件的 bearer 令牌，`local_device.py` 每 5 秒重新读一次端口和令牌），工具和结果都是插件原样的。给 `anx exec .`、`anx devices` 用：不经网关，没加入网关、网关离线或过旧时也能用；但与 `/mcp` 一样服从锁定、吊销和网关主人的设备接入开关：锁定、已吊销（`revoked`，以及凭据刚被网关拒绝的 `rejected`）、设备接入被关闭（`device_access_off`）时只本地应答这个状态，没有设备插件（未运行、连不上）时是 `no_device`。它以设备插件的执行账户运行命令——就绪时 `/mcp` 已经允许任何本机调用方这样做，不是新的权限。审计记 `via: self`。
+
 ### 19.3 访问控制（guard）
 
-依次检查，第一条不满足就拒绝：开关关闭 → 404；控制台监听的不是回环地址 → 403；对端 IP 不是 127.0.0.0/8、::1、::ffff:127.x → 403；Host 必须正好是 `127.0.0.1:<端口>`、`localhost:<端口>` 或 `[::1]:<端口>`（不接受 `manager.host`，防 DNS rebinding 和伪造的局域网 Host）；带 Origin 时必须是这三个之一（`null` 拒绝），从不发送 CORS 头；只接受 POST / DELETE（GET 405）；POST 必须 `application/json`（挡住浏览器的“简单请求”）；`mcp_local.peers = "accounts"` 时用 psutil 按完整的四元组（客户端 IP 和端口、服务端 IP 和端口，状态 ESTABLISHED，每次现查不缓存）找到对端进程和用户，只放行核心自己的用户、执行账户和 Windows 当前登录用户；查不到或有多个候选一律拒绝；这时修改本机 MCP 设置（`PUT /api/mcp/local`）也要求同样的账户。注意控制台其余部分仍对这台电脑的所有本地账户开放，`accounts` 只限制本机 MCP；请求体最大 8 MiB。`LocalOnly` 对 `/mcp` 不再要求 `X-ANX`（MCP 客户端不会带），其余路径不变。
+依次检查，第一条不满足就拒绝：开关关闭 → 404；控制台监听的不是回环地址 → 403；对端 IP 不是 127.0.0.0/8、::1、::ffff:127.x → 403；Host 必须正好是 `127.0.0.1:<端口>`、`localhost:<端口>` 或 `[::1]:<端口>`（不接受 `manager.host`，防 DNS rebinding 和伪造的局域网 Host）；带 Origin 时必须是这三个之一（`null` 拒绝），从不发送 CORS 头；只接受 POST / DELETE（GET 405）；POST 必须 `application/json`（挡住浏览器的“简单请求”）；`mcp_local.peers = "accounts"` 时用 psutil 按完整的四元组（客户端 IP 和端口、服务端 IP 和端口，状态 ESTABLISHED，每次现查不缓存）找到对端进程和用户，只放行核心自己的用户、执行账户和 Windows 当前登录用户；查不到或有多个候选一律拒绝；这时修改本机 MCP 设置（`PUT /api/mcp/local`）也要求同样的账户。注意控制台其余部分仍对这台电脑的所有本地账户开放，`accounts` 只限制本机 MCP；请求体最大 8 MiB。`LocalOnly` 对 `/mcp`、`/mcp/self` 不再要求 `X-ANX`（MCP 客户端不会带），其余路径不变。
 
 每次工具调用在 `<root>/.anx/logs/local-mcp.jsonl`（0600，5 MB × 3 轮转）记一行：时间、状态、工具名、workspace_id 前 8 位、结果、耗时、（peers=accounts 时）对端 pid / 用户；不记参数和结果。
 
