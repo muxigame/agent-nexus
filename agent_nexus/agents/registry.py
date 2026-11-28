@@ -793,7 +793,7 @@ def _mcp_entries(kind: str, home: Path, env: dict) -> list[tuple[str, Any]] | No
         try:
             if path.stat().st_size > 32 * 1024 * 1024:
                 return None
-            return json.loads(path.read_text(encoding="utf-8", errors="replace"))
+            return json.loads(path.read_text(encoding="utf-8-sig", errors="replace"))
         except (OSError, ValueError):
             return None
 
@@ -815,7 +815,7 @@ def _mcp_entries(kind: str, home: Path, env: dict) -> list[tuple[str, Any]] | No
         import tomllib
         root = Path(env["CODEX_HOME"]) if env.get("CODEX_HOME") else home / ".codex"
         try:
-            data = tomllib.loads((root / "config.toml").read_text(encoding="utf-8", errors="replace"))
+            data = tomllib.loads((root / "config.toml").read_text(encoding="utf-8-sig", errors="replace"))
         except (OSError, ValueError):
             return []
         return servers(data.get("mcp_servers"))

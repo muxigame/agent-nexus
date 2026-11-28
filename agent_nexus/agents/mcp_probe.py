@@ -140,7 +140,7 @@ def _claude_entries(home: Path, env: dict, workdir: str | None) -> list[tuple[st
         try:
             if path.stat().st_size > 32 * 1024 * 1024:
                 return None
-            return json.loads(path.read_text(encoding="utf-8", errors="replace"))
+            return json.loads(path.read_text(encoding="utf-8-sig", errors="replace"))
         except (OSError, ValueError):
             return None
 
@@ -472,7 +472,7 @@ def codex_models_cache(home: Path, env: dict) -> list[dict]:
     """Codex's own ``models_cache.json`` (CODEX_HOME, not a credential), read leniently: ``[{id, label, desc}]``."""
     base = Path(env.get("CODEX_HOME") or Path(home) / ".codex")
     try:
-        data = json.loads((base / "models_cache.json").read_text(encoding="utf-8"))
+        data = json.loads((base / "models_cache.json").read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         return []
     items = data.get("models") if isinstance(data, dict) else data
@@ -630,4 +630,5 @@ def resolve(kind: str, *, account: str | None, home: Path, env: dict, gateway_ho
             base["tool_prefix"] = "codex_apps"  # the app's own name is not known: only the server that carries it
         base["also"] = [n[0] for n in ordered[1:]]
     return {**base, "state": state, "account_answer": (answer or {}).get("state"),
+            "others_config": any(n[2] == "config" for n in others),
             "config_path": str(path) if path else None}

@@ -432,6 +432,12 @@ Agent Nexus MCP……不要调用 <名字>.*”（没有 handle 时也有这一�
 工具列表过时只作为交互式 Codex 的提醒放在最后（刷新它对对话没有用）。
 被动检测只看得到 `codex_apps`，不再用它覆盖检测到的连接器名和“过时”标记。
 
+**0.8.34 起（主人的决定）**：既然账户连接器在 `codex exec` 里批准不了、工具列表又是快照，Codex 只有账户连接器（`gateway_account`，或
+`both` 且另一个不是配置项）时，客户端照样把专用配置项永久写进 `~/.codex/config.toml`，并且无需审批：
+`[mcp_servers.agent-nexus]` 带 `url`、`tool_timeout_sec`、`default_tools_approval_mode = "approve"`（Gemini 的条目同理带 `"trust": true`）。
+之后状态是 `both`，对话里用 `agent-nexus`；主人手动删除的条目不再加回。早先写入的、缺少审批设置的条目会自动补上。上面“按运行临时接入”
+只在本机 MCP 当时提供不了网关工具、条目还没写入时才用得上。读取各 CLI 的配置文件时忽略 BOM（Windows 编辑器常带）。
+
 **Claude Code（真机，Mac mini）**：桌面版自带的 Claude Code 2.1.331 需要单独 `auth login`（桌面版的登录不给命令行用；登录信息进钥匙串
 `Claude Code-credentials`）。登录后：`claude-stream` 两轮对话正常（第一轮用 `Read` 读测试文件并回复内容，第二轮续接）；会话出现在列表里，
 目录和标题正确，历史含工具调用；"需要审批"模式下 `echo` 这类只读命令 Claude Code 自己放行，`touch` 这类写操作经 anx 的审批 MCP

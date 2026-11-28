@@ -85,10 +85,12 @@ def config_path(kind: str, home: Path | None = None, env: dict | None = None) ->
 def wanted(kind: str, url: str) -> dict:
     if kind == "claude":
         return {"type": "http", "url": url}
+    # No approval prompts for Agent Nexus' own tools (the owner's choice): codex exec refuses every call that
+    # needs one, and the device's lock and the gateway still decide what a caller may do.
     if kind == "codex":
-        return {"url": url, "tool_timeout_sec": TOOL_TIMEOUT_S}
+        return {"url": url, "tool_timeout_sec": TOOL_TIMEOUT_S, "default_tools_approval_mode": "approve"}
     if kind == "gemini":
-        return {"httpUrl": url, "timeout": TOOL_TIMEOUT_S * 1000}
+        return {"httpUrl": url, "timeout": TOOL_TIMEOUT_S * 1000, "trust": True}
     raise LinkError(f"unsupported CLI {kind!r}")
 
 
@@ -189,7 +191,8 @@ def plan_codex(path: Path, url: str, *, remove: bool) -> integrate.Plan:
             lines[-1] += newline
         block = ([newline] if lines else []) + [
             f"{ENTRY_COMMENT}{newline}", f"[mcp_servers.{NAME}]{newline}",
-            f"url = {json.dumps(url)}{newline}", f"tool_timeout_sec = {TOOL_TIMEOUT_S}{newline}"]
+            f"url = {json.dumps(url)}{newline}", f"tool_timeout_sec = {TOOL_TIMEOUT_S}{newline}",
+            f'default_tools_approval_mode = "approve"{newline}']
         lines += block
     new_text = "".join(lines)
     reparsed = tomllib.loads(new_text)  # never write a file Codex could not read
@@ -746,6 +749,19 @@ class MCPLink:
             return False
         return entry is not None and mcp_probe.entry_url(entry) == owned.get("url")
 
+    def _entry_outdated(self, account: Any, kind: str) -> bool:
+        """Our entry lacks something the current version writes (e.g. the approval setting added in 0.8.34)."""
+        env = self.env_of(account)
+        path = config_path(kind, self.home_of(account, env), env)
+        try:
+            entry = current(kind, path) if path else None
+        except LinkError:
+            return False
+        if entry is None or kind == "claude":
+            return False
+        want = wanted(kind, mcp_probe.entry_url(entry) or self.local.url)
+        return any(entry.get(key) != value for key, value in want.items())
+
     def decide(self, kind: str, account: Any, view: dict, local_state: str, auto: bool) -> str | None:
         """"add" / "remove" / "update" / None for one CLI (the decision table of docs/design.md)."""
         name = self.account_name(account)
@@ -756,11 +772,20 @@ class MCPLink:
         if view.get("too_old"):
             return "remove" if ours else None  # this Codex could not even read its config with it
         state = view["state"]
+        if kind == "codex" and auto and not self.suspended and (
+                state == "gateway_account" or (state == "both" and not view.get("others_config"))):
+            # A ChatGPT account app is Codex's only other way to the gateway, and codex exec cannot approve its
+            # tools (and its tool list is a snapshot): the owner wants ours there for good, approved.
+            if ours:
+                return "update" if self._entry_outdated(account, kind) else None
+            if owned.get("state") in ("user_removed",) or local_state in NOT_SERVING:
+                return None
+            return "add"
         if state in ("gateway_config", "gateway_account", "both"):
             # never two sets of Agent Nexus tools: ours goes unless the owner pinned it
             return "remove" if ours and owned.get("state") != "pinned" else None
         if state == "local":
-            if ours and owned.get("url") != self.local.url:
+            if ours and (owned.get("url") != self.local.url or self._entry_outdated(account, kind)):
                 return "update"
             return None
         if local_state in NOT_SERVING:
@@ -868,11 +893,13 @@ class MCPLink:
             view = await asyncio.to_thread(self.view, kind, account, env)
             if view["state"] == "name_taken":
                 return {"error": "agent-nexus 这个名称已被另一个配置项占用，未修改", "code": "name_taken", "status": 409}
-            if view["state"] in ("gateway_config", "gateway_account") and not force:
+            codex_account = kind == "codex" and view["state"] == "gateway_account"  # see decide()
+            if view["state"] in ("gateway_config", "gateway_account") and not force and not codex_account:
                 return {"error": f"{view['label']}：再添加会出现两套 Agent Nexus 工具", "code": "duplicate",
                         "status": 409, "cli": view}
             result = await asyncio.to_thread(self._write, account, kind, remove=False,
-                                             pinned=view["state"] in ("gateway_config", "gateway_account"))
+                                             pinned=view["state"] == "gateway_config" or
+                                             (view["state"] == "gateway_account" and not codex_account))
         elif action == "remove":
             if not self._entry_is_ours(account, kind, {}):
                 path = config_path(kind, self.home_of(account, env), env)

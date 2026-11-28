@@ -206,10 +206,10 @@ def _cli_default_model(kind: str, home: Path, env: dict) -> str | None:
         if kind == "codex":
             import tomllib
             base = Path(env.get("CODEX_HOME") or Path(home) / ".codex")
-            value = tomllib.loads((base / "config.toml").read_text(encoding="utf-8")).get("model")
+            value = tomllib.loads((base / "config.toml").read_text(encoding="utf-8-sig")).get("model")
         elif kind == "claude":
             import json
-            value = json.loads((Path(home) / ".claude" / "settings.json").read_text(encoding="utf-8")).get("model")
+            value = json.loads((Path(home) / ".claude" / "settings.json").read_text(encoding="utf-8-sig")).get("model")
         else:
             return None
     except (OSError, ValueError, AttributeError):

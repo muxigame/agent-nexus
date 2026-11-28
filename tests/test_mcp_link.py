@@ -41,7 +41,7 @@ def test_codex_append_and_remove_are_byte_exact_and_keep_everything_else(tmp_pat
     assert result["ok"] and result["changed"] and result["backup"]
     assert open(result["backup"], "rb").read() == original
     data = tomllib.loads(path.read_text(encoding="utf-8-sig"))
-    assert data["mcp_servers"]["agent-nexus"] == {"url": URL, "tool_timeout_sec": 900}
+    assert data["mcp_servers"]["agent-nexus"] == {"url": URL, "tool_timeout_sec": 900, "default_tools_approval_mode": "approve"}
     assert data["mcp_servers"]["unityMCP"] == {"url": "http://127.0.0.1:8401/mcp"}
     assert data["model"] == "gpt-5" and path.read_bytes().startswith(b"\xef\xbb\xbf")
     assert b"\r\n[mcp_servers.agent-nexus]\r\n" in path.read_bytes()
@@ -69,7 +69,7 @@ def test_gemini_and_claude_json_edits_keep_the_rest(tmp_path):
     before = settings.read_text()
     assert mcp_link.write("gemini", URL, home=tmp_path, env=env_for(tmp_path))["changed"]
     data = json.loads(settings.read_text())
-    assert data["mcpServers"]["agent-nexus"] == {"httpUrl": URL, "timeout": 900000} and data["theme"] == "dark"
+    assert data["mcpServers"]["agent-nexus"] == {"httpUrl": URL, "timeout": 900000, "trust": True} and data["theme"] == "dark"
     assert mcp_link.write("gemini", URL, remove=True, home=tmp_path, env=env_for(tmp_path))["changed"]
     assert settings.read_text() == before
 
@@ -182,17 +182,17 @@ def test_reconcile_adds_where_nothing_reaches_the_gateway_and_never_duplicates(t
     assert run(lk.reconcile("again")) == []
 
 
-def test_reconcile_removes_ours_when_an_account_connector_appears_and_skips_unknown(tmp_path):
+def test_codex_keeps_ours_when_an_account_connector_appears_and_skips_unknown(tmp_path):
+    """A ChatGPT account app cannot be approved by codex exec: ours stays next to it (the owner's choice)."""
     lk, home, writes = link(tmp_path, kinds=("codex",))
     lk.probe.put("user", "codex", {"state": "absent", "connectors": [], "source": "probe"})
     run(lk.reconcile("t"))
     assert lk.view("codex", None)["state"] == "local"
     lk.probe.observe("user", "codex", [{"name": "Agent Nexus", "prefix": ""}])
-    done = run(lk.reconcile("t"))
-    assert done and done[0]["action"] == "remove"
+    assert run(lk.reconcile("t")) == []
     view = lk.view("codex", None)
-    assert view["state"] == "gateway_account" and "ChatGPT 账户连接器" in view["label"]
-    assert "agent-nexus" not in (home / ".codex" / "config.toml").read_text()
+    assert view["state"] == "both" and view["use"] == "agent-nexus"
+    assert 'default_tools_approval_mode = "approve"' in (home / ".codex" / "config.toml").read_text()
 
 
 def test_unknown_account_state_adds_nothing(tmp_path, monkeypatch):
@@ -256,7 +256,7 @@ def test_pinned_stays_next_to_a_gateway_connector(tmp_path):
     assert lk.view("codex", None)["state"] == "gateway_account"
     added = run(lk.action("codex", None, "add", force=True))
     assert added["cli"]["state"] == "both" and added["cli"]["use"] == "agent-nexus"
-    assert lk.owned.get("user", "codex")["state"] == "pinned"
+    assert lk.owned.get("user", "codex")["state"] == "ours"  # Codex next to an account app: ours, not pinned
     assert run(lk.reconcile("t")) == []  # pinned: not removed
     removed = run(lk.action("codex", None, "remove"))
     assert removed["result"]["ok"] and lk.owned.get("user", "codex")["state"] == "user_removed"
@@ -317,7 +317,7 @@ for line in sys.stdin:
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="a POSIX script stands in for codex")
-def test_the_work_pc_codex_account_connector_is_found_and_nothing_is_added(tmp_path):
+def test_the_work_pc_codex_account_connector_is_found_and_ours_is_added_approved(tmp_path):
     lk, home, writes = link(tmp_path, kinds=("codex",))
     config = home / ".codex" / "config.toml"
     config.parent.mkdir()
@@ -328,10 +328,12 @@ def test_the_work_pc_codex_account_connector_is_found_and_nothing_is_added(tmp_p
     answer = mcp_probe.probe_codex(str(script), env_for(tmp_path), None, "gw.example", timeout=5)
     assert answer["state"] == "present", answer
     lk.probe.put("user", "codex", {**answer, "source": "probe"})
-    assert run(lk.reconcile("work pc")) == [] and writes == []
-    assert config.read_bytes() == CODEX_TOML.encode("utf-8")  # untouched, no duplicate tools
+    done = run(lk.reconcile("work pc"))
+    assert [d["action"] for d in done] == ["add"]  # the account app cannot be approved by codex exec: ours, for good
+    assert config.read_bytes().startswith(CODEX_TOML.encode("utf-8"))  # everything else byte for byte
+    assert 'default_tools_approval_mode = "approve"' in config.read_text(encoding="utf-8-sig")
     view = lk.view("codex", None)
-    assert view["state"] == "gateway_account" and view["use"] and view["tool_prefix"] == "My Gateway." and view["use"] == "My Gateway"
+    assert view["state"] == "both" and view["use"] == "agent-nexus" and "My Gateway" in view["also"]
 
 
 def test_gateway_connectors_are_known_by_their_tools_not_their_name_or_address():
@@ -357,6 +359,7 @@ def test_an_account_connector_with_an_old_tool_list_is_used_but_marked_stale():
 
 
 def test_codex_with_an_account_connector_attaches_the_local_mcp_for_the_run_only(tmp_path):
+    pytest.skip("superseded in 0.8.34: ours is now written for good next to the account app (see the work-pc test)")
     """codex exec runs with approval "never": an account app's tools (codex_apps) are refused ("MCP tool call
     requires approval"), so a run of Codex uses the 本机 MCP by per-run flags; nothing is written."""
     lk, home, writes = link(tmp_path, kinds=("codex",))
@@ -389,3 +392,17 @@ def test_a_run_observing_codex_apps_keeps_the_app_name_and_stale_flag(tmp_path):
     assert probe.get("user", "codex")["connectors"] == [{"name": "workspace", "prefix": "", "stale": True}]
     probe.observe("user", "codex", [{"name": "fresh", "prefix": ""}])  # a real name: the observation wins
     assert probe.get("user", "codex")["connectors"] == [{"name": "fresh", "prefix": ""}]
+
+
+def test_config_files_saved_with_a_bom_are_read(tmp_path):
+    """Windows editors save config.toml / settings.json with a BOM: Codex and Gemini read them, so must we."""
+    home = tmp_path
+    (home / ".codex").mkdir()
+    (home / ".codex" / "config.toml").write_bytes(
+        "﻿[mcp_servers.agent-nexus]\nurl = \"http://127.0.0.1:8399/mcp\"\n".encode("utf-8"))
+    (home / ".gemini").mkdir()
+    (home / ".gemini" / "settings.json").write_bytes(
+        '﻿{"mcpServers": {"agent-nexus": {"httpUrl": "http://127.0.0.1:8399/mcp"}}}'.encode("utf-8"))
+    for kind in ("codex", "gemini"):
+        found = mcp_probe.nexus_entries(kind, home, env_for(home), "gw.example", "http://127.0.0.1:8399/mcp")
+        assert found["local"] == ["agent-nexus"], kind
