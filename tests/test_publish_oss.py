@@ -99,3 +99,18 @@ def test_dry_run_announces_the_manifest(tmp_path: Path, capsys) -> None:
 def test_the_desktop_updater_polls_the_oss_feed() -> None:
     conf = json.loads((ROOT / "desktop/src-tauri/tauri.conf.json").read_text(encoding="utf-8"))
     assert conf["plugins"]["updater"]["endpoints"] == [f"{publish.DEFAULT_PUBLIC_BASE}/latest.json"]
+
+
+def test_an_apk_is_listed_from_the_github_release_and_not_uploaded(tmp_path: Path, monkeypatch) -> None:
+    """Aliyun refuses .apk downloads through the OSS endpoint (ApkDownloadForbidden)."""
+    dist = release(tmp_path)
+    (dist / "agent-nexus_0.2.1_arm64.apk").write_bytes(b"PK apk")
+    assert not any(path.suffix == ".apk" for path, _ in publish.plan(dist, "0.2.1", "agent-nexus"))
+    monkeypatch.setenv("GITHUB_REPOSITORY", "owner/repo")
+    monkeypatch.delenv("GITHUB_RELEASE_BASE", raising=False)
+    listing = publish.manifest(dist, "0.2.1", BASE, "2026-11-28", publish.github_base())
+    apk = next(item for item in listing["files"] if item["filename"].endswith(".apk"))
+    assert apk["url"] == "https://github.com/owner/repo/releases/download/v0.2.1/agent-nexus_0.2.1_arm64.apk"
+    assert all(item["url"].startswith(BASE) for item in listing["files"] if item is not apk)
+    with pytest.raises(publish.PublishError):
+        publish.manifest(dist, "0.2.1", BASE, "2026-11-28", None)

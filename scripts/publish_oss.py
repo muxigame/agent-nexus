@@ -49,6 +49,24 @@ PART_BYTES = 8 * 1024 * 1024
 UPLOAD_THREADS = 8
 
 
+#: Files OSS will not hand out through its own endpoint (ApkDownloadForbidden: an .apk needs a CNAME):
+#: not uploaded; the download list points at the GitHub release of the same tag instead.
+GITHUB_ONLY = (".apk",)
+
+
+def github_base() -> str | None:
+    """``https://github.com/<owner>/<repo>/releases/download`` (GITHUB_RELEASE_BASE, else Actions' repository)."""
+    base = os.environ.get("GITHUB_RELEASE_BASE")
+    if base:
+        return base.rstrip("/")
+    repository = os.environ.get("GITHUB_REPOSITORY")
+    return f"https://github.com/{repository}/releases/download" if repository else None
+
+
+def github_only(path: Path) -> bool:
+    return path.suffix.lower() in GITHUB_ONLY
+
+
 class PublishError(RuntimeError):
     pass
 
@@ -67,7 +85,7 @@ def plan(dist: Path, version: str, prefix: str) -> list[tuple[Path, str]]:
     if not any(path.name == FEED for path in files):
         raise PublishError(f"{dist} has no {FEED}")
     base = f"{prefix.strip('/')}/releases/{version}"
-    ordered = [path for path in files if path.name != FEED] + [dist / FEED]
+    ordered = [path for path in files if path.name != FEED and not github_only(path)] + [dist / FEED]
     return [(path, f"{base}/{path.name}") for path in ordered]
 
 
@@ -88,7 +106,7 @@ def check_feed(feed_path: Path, version: str, public_base: str) -> dict:
     return feed
 
 
-def manifest(dist: Path, version: str, public_base: str, published_at: str) -> dict:
+def manifest(dist: Path, version: str, public_base: str, published_at: str, github: str | None = None) -> dict:
     """The download list for ``<prefix>/downloads.json``: installers only (no feed, signatures or sums)."""
     files = []
     for path in sorted(dist.iterdir()):
@@ -100,8 +118,14 @@ def manifest(dist: Path, version: str, public_base: str, published_at: str) -> d
         with path.open("rb") as handle:
             for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                 digest.update(chunk)
-        files.append({"filename": path.name, "size": path.stat().st_size, "sha256": digest.hexdigest(),
-                      "url": f"{public_base.rstrip('/')}/releases/{quote(version)}/{quote(path.name)}"})
+        if github_only(path):
+            if not github:
+                raise PublishError(f"{path.name} cannot be served from OSS and no GitHub release is known "
+                                   "(GITHUB_REPOSITORY / GITHUB_RELEASE_BASE)")
+            url = f"{github}/v{quote(version)}/{quote(path.name)}"
+        else:
+            url = f"{public_base.rstrip('/')}/releases/{quote(version)}/{quote(path.name)}"
+        files.append({"filename": path.name, "size": path.stat().st_size, "sha256": digest.hexdigest(), "url": url})
     if not files:
         raise PublishError(f"{dist} has no installer to list in {MANIFEST}")
     return {"version": version, "published_at": published_at, "files": files}
@@ -162,11 +186,14 @@ def main(argv: list[str] | None = None) -> int:
     try:
         steps = plan(args.dist, version, args.prefix)
         check_feed(args.dist / FEED, version, args.public_base)
-        downloads = manifest(args.dist, version, args.public_base, _dt.date.today().isoformat())
+        downloads = manifest(args.dist, version, args.public_base, _dt.date.today().isoformat(), github_base())
         latest_key = f"{args.prefix.strip('/')}/{FEED}"
         manifest_key = f"{args.prefix.strip('/')}/{MANIFEST}"
         for path, key in steps:
             print(f"{'would upload' if args.dry_run else 'upload'} {path.name} -> oss://{args.bucket}/{key}")
+        for item in downloads["files"]:
+            if not item["url"].startswith(args.public_base.rstrip("/")):
+                print(f"{item['filename']}: listed from {item['url']} (not on OSS)")
         if prerelease(version):
             print(f"{version} is a prerelease: {latest_key} and {manifest_key} stay as they are")
         else:
