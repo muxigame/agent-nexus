@@ -27,10 +27,11 @@ def tree(tmp_path):
 
 
 # ------------------------------------------------------------------ list_dirs
+# (drives=False: these test the confinement itself; Windows adds the drive roots by default, tested below)
 
 def test_roots_listing(tree):
     home, ws, _ = tree
-    roots = W.default_roots(home, [{"name": "工作区", "path": ws}, str(ws), "/does/not/exist"])
+    roots = W.default_roots(home, [{"name": "工作区", "path": ws}, str(ws), "/does/not/exist"], drives=False)
     assert [r["kind"] for r in roots] == ["home", "workspace"]
     out = W.list_dirs(None, roots)
     assert out["path"] is None and [d["path"] for d in out["dirs"]] == [str(home), str(ws)]
@@ -38,7 +39,7 @@ def test_roots_listing(tree):
 
 def test_lists_only_dirs_sorted_hidden_toggle(tree):
     home, ws, _ = tree
-    roots = W.default_roots(home, [ws])
+    roots = W.default_roots(home, [ws], drives=False)
     out = W.list_dirs(str(home), roots)
     assert [d["name"] for d in out["dirs"]] == ["b-dir", "docs", "proj"]
     assert out["hidden"] == 1 and out["parent"] is None and out["root"]["kind"] == "home"
@@ -51,7 +52,7 @@ def test_lists_only_dirs_sorted_hidden_toggle(tree):
 
 def test_tilde_and_relative(tree):
     home, ws, _ = tree
-    roots = W.default_roots(home, [ws])
+    roots = W.default_roots(home, [ws], drives=False)
     assert W.list_dirs("~", roots)["path"] == str(home)
     assert W.list_dirs("~/proj", roots)["path"] == str(home / "proj")
     assert W.list_dirs("proj", roots)["path"] == str(home / "proj")
@@ -59,7 +60,7 @@ def test_tilde_and_relative(tree):
 
 def test_no_escape(tree):
     home, ws, outside = tree
-    roots = W.default_roots(home, [ws])
+    roots = W.default_roots(home, [ws], drives=False)
     for bad in (str(outside), str(home / ".." / "outside"), "~/../outside", "/"):
         out = W.list_dirs(bad, roots)
         assert out["code"] == "outside", bad
@@ -75,7 +76,7 @@ def test_symlinks_cannot_escape(tree):
     home, ws, outside = tree
     os.symlink(outside, home / "link-out")
     os.symlink(ws / "repo", home / "link-in")
-    roots = W.default_roots(home, [ws])
+    roots = W.default_roots(home, [ws], drives=False)
     names = [d["name"] for d in W.list_dirs(str(home), roots)["dirs"]]
     assert "link-out" not in names and "link-in" in names
     assert W.list_dirs(str(home / "link-out"), roots)["code"] == "outside"
@@ -86,7 +87,7 @@ def test_symlinks_cannot_escape(tree):
 
 def test_parent_of_nested_workspace(tree):
     home, ws, _ = tree
-    roots = W.default_roots(home, [ws])
+    roots = W.default_roots(home, [ws], drives=False)
     out = W.list_dirs(str(ws / "repo"), roots)
     assert out["parent"] == str(ws)
     assert W.list_dirs(str(ws), roots)["parent"] is None
@@ -269,3 +270,14 @@ def test_create_with_account_where_chown_does_not_exist(tmp_path, monkeypatch):
     path = tmp_path / "run" / "r3"
     accounts.hand_over(accounts.Account("me", 0, 0, str(tmp_path), "/bin/sh", []), path)
     assert path.is_dir()
+
+
+def test_windows_lists_drive_roots_by_default(tree, monkeypatch):
+    home, ws, _ = tree
+    drive = home.parent / "drive-d"
+    drive.mkdir()
+    monkeypatch.setattr(W, "drive_roots", lambda: [str(drive)])
+    monkeypatch.setattr(W, "WINDOWS", True)
+    assert [r["kind"] for r in W.default_roots(home, [ws])] == ["home", "workspace", "drive"]
+    monkeypatch.setattr(W, "WINDOWS", False)
+    assert [r["kind"] for r in W.default_roots(home, [ws])] == ["home", "workspace"]
