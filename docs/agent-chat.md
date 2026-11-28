@@ -95,8 +95,10 @@ UI：侧栏顶部是 CLI 标签（Claude Code / Codex / DeepSeek / 全部），�
 
 `agent_nexus/agents/runner.py`。一个 run = 一个会话窗口，在运行设备上：
 
-- `agent_run_open {kind, workdir, resume_id?, prompt, permission, preset?, fragments?, context?, model?}` → `{rid, session_id?, model}`
-- `agent_run_send {rid, prompt, model?}`：发下一轮（claude-stream 写入 stdin；codex-exec 启动 `exec resume`）；`model` 与当前不同时从这一轮起换模型（§16.7）
+- `agent_run_open {kind, workdir, resume_id?, prompt, permission, preset?, fragments?, context?, model?, attachments?, stage?}` → `{rid, session_id?, model, moved_from?}`
+  （`attachments` / `stage` 见 §18；`workdir` 和会话记录的目录不同时是“换目录续接”，见 §19，成功时带 `moved_from` = 原目录）
+- `agent_run_send {rid, prompt, model?, attachments?, stage?}`：发下一轮（claude-stream 写入 stdin；codex-exec 启动 `exec resume`）；`model` 与当前不同时从这一轮起换模型（§16.7）；
+  有附件时 `prompt` 可以为空
 - `agent_run_read {rid, cursor, wait≤20}` → `{events, cursor, state}`（长轮询，与 `term_read` 一样有上限，不取消进行中的调用）
 - `agent_run_answer {rid, approval_id, allow, remember?}`：回应审批
 - `agent_run_stop {rid}`：中断当前轮；`agent_run_close {rid}`；`agent_run_list {}`：在跑的 run
@@ -207,6 +209,8 @@ Claude 在“需要审批”模式下每条 `anx exec` 都照常走审批。文�
 - 每个 run 一个 `$tmpdir` = `<root>/.anx/agents/tmp/<rid>`，以执行账户创建（Unix 下 chown）。
 - `agent_tmp_list` → `[{rid,path,size,files,updated_at,session,kind,active}]`；`agent_tmp_clean {rid?|older_than_days?}`。
 - 自动清理：run 关闭 7 天后删除；总量超过 2 GB 时从最旧删起；同时清理 `.anx/wake/*.log` 超过 14 天的。
+- 附件在 `$tmpdir/attachments/`（§18），跟着这个目录一起被列出、计入总量、自动清理。
+- **删除会话时一起删掉它的临时目录**（`TmpDirs.clean_session`）：索引里记着这个会话的、已不活动的 run 目录和附件暂存目录。
 
 ## 9. 传输
 
@@ -352,7 +356,9 @@ class AgentHub:  # 组合以上；handlers() -> {"agent_info": …, "agent_insta
                  #  "agent_sessions": …, "agent_session_read": …, "agent_session_meta": …,
                  #  "agent_run_open"/"send"/"read"/"answer"/"stop"/"close"/"list",
                  #  "agent_dirs", "agent_prompts", "agent_prompt_save", "agent_prompt_preview",
-                 #  "agent_tmp_list", "agent_tmp_clean"}
+                 #  "agent_tmp_list", "agent_tmp_clean", "agent_models",
+                 #  "agent_file_stat", "agent_file_read",   # 见 §17（fileview.py）
+                 #  "agent_attach_begin", "agent_attach_put", "agent_attach_drop"}   # 见 §18（attachments.py）
 FEATURE = "agents/1"
 ```
 
@@ -554,3 +560,178 @@ Agent Nexus MCP……不要调用 <名字>.*”（没有 handle 时也有这一�
   分隔线、“其他模型…”（输入框，同一个正则先在浏览器里检查，示例“opus、gpt-5.6-sol、gemini-2.5-pro”）。选择按 CLI 记在控制台存储的
   `modelByKind` 里（别名到处一样，所以不按设备）；模型列表（`agent_models` 的结果、ACP 报告的选项）按“设备:CLI”缓存，换设备不串。打开对话时带上 `model`；已有对话里改了模型，下一次 `agent_run_send` 带上新的
   `model`，正在运行时提示“下一轮起使用 X”。
+
+### 16.8 长会话不变卡
+
+长会话（上千个事件、大段工具输出、子 Agent）以前越聊越卡，最后整个桌面应用卡死。用合成的长会话（每轮约 75 个事件）测出的原因和对策：
+
+- **动画让每一帧都遍历整个文档**：会话列表里运行中的绿点用 `box-shadow` 脉冲、消息流底部的“正在工作”三个点，都让浏览器每帧对整个文档做
+  pre-paint / paint，文档越大每帧越贵——没有新事件时主线程也一直忙，这是“越来越卡直到卡死”的主因。现在绿点的脉冲是一个只动
+  `transform` / `opacity` 的 `::after` 圆环（合成层），页面不可见时（`chat-bg`，桌面窗口隐藏也算）两个动画都暂停，`prefers-reduced-motion` 时不动。
+- **消息流的 DOM 有上限**：文档里最多留 `DOM_KEEP = 240` 块（超出 60 块时整理一次），更早的块移出文档（能按事件重建的块只留事件，不留 DOM），消息流顶部出现
+  “显示更早的内容（还有 N 条）”，每次拿回 200 块并保持滚动位置。内存里最多 `OLDER_KEEP = 4000` 块，再早的丢掉，
+  按钮改为“更早的 N 条已不在这里显示，可以重新打开会话查看”。待批准的请求、没回答的提问永远留在文档里。
+- **往上翻着看、或点了“显示更早”时也有上限** `DOM_HARD = 640` 块：超过时先把视野上方一屏以外的块移出（视野里的内容不动，
+  按移走的高度校正滚动位置）；没有可移的，新到的块只记事件、不建 DOM，底部按钮显示“有 N 条新内容”，回到底部（或点按钮）时才建，
+  超过 240 块的部分直接进“更早的内容”。“显示更早”拿回一页后，视野下方超出上限的块同样退回“新内容”。待批准 / 提问总是立刻显示。
+  每块有一个序号，留在原处的块（当时待批准）之后被移出或拿回时按序号插回原来的位置，不会排到更新的块后面。
+- **打开历史记录只建最后 240 块**：`agent_session_read` 最多 2000 个事件，读入时只记下每块的事件和构建函数，更早的块在点“显示更早的内容”时
+  才建。工具输出、diff、思考过程的正文在第一次展开时才建（多数块从来不展开，而 8 KB 的输出占了节点内存的大头）。
+- **流式回答增量渲染**：以前每帧把整段回答重新解析成 DOM，越长越慢。现在以“代码块外的空行、且下一行开始新的顶层块（不缩进、不是列表项）”
+  为界（`markdown.js` 的 `stableCut`），界前的部分只渲染一次，每帧只重画最后一段；思考过程的增量也合并到每帧一次。
+- **邮件和提问轮询不重建卡片**：`/api/inbox/conversation` 每 4 秒（空闲 12 秒）返回最多 200 封邮件，以前每次都重建全部卡片；现在内容没变就不动
+  DOM（这也修了“Agent 在问你”卡片每隔几秒被替换、正在输入的回答丢失的问题）。
+- 其他：每个事件不再扫描全部块来判断“等你回应”，`renderWelcome` / `renderComposer` 只在需要时调用。
+
+压测页：`docs/mockups/agent-chat-bench.html`（参数见文件头；`?ui=<目录>` 可以加载另一份 `static/ui` 做对比），驱动脚本
+`docs/mockups/agent-chat-bench.cjs`（playwright + CDP `Performance.getMetrics`）。2026-11 在同一台机器上、同一份合成数据的结果
+（“以前”是改动前的 `static/ui`）：
+
+| 场景 | 以前 | 现在 |
+|---|---|---|
+| 16000 个事件（约 210 轮）：每个事件的主线程时间，第 1k / 8k / 16k 个 | 1.18 / 6.56 / 14.0 ms（线性增长） | 1.49 / 2.55 / 2.90 ms |
+| 同上：每 1000 个事件的耗时（固定节奏） | 2.1 s → 14.3 s | 2.3 s → 3.7 s |
+| 同上：长任务（>50 ms） | 541 个，共 42 s，最长 277 ms | 2 个（启动时），最长 71 ms |
+| 16000 个事件之后空闲 5 秒的主线程时间 | 4666 ms（几乎占满） | 44 ms |
+| 文档里的元素数 / 消息流的块数 / GC 后的 DOM 节点 | 61282 / 2742 / 135505 | 5460 / 241 / 14252 |
+| 一段 1500 个增量、约 90 KB 的回答：末尾每个事件 / 长任务 | 19.5 ms（布局 9.4 ms）/ 156 个 | 3.6 ms（布局 0.3 ms）/ 0 个 |
+| 打开 5000 个事件的历史：最长任务 / 消息流块数 / DOM 节点 | 179 ms / 661 / 42377 | 112 ms / 241 / 7677 |
+| 200 封邮件 + 1 个提问，空闲 12 秒 | 126 ms，DOM 节点 6.3k → 11.2k | 19 ms，不增长 |
+
+现在的 JS 堆比以前大一些（16000 个事件后 GC 后约 34 MB）：移出文档的块只保留事件，事件里有工具输出的文字。
+
+## 17. 消息里的 Markdown、图片和文件链接
+
+### 17.1 渲染（安全）
+- `ui/markdown.js` 是纯解析器：文本 → 普通对象组成的树，没有 DOM、没有 HTML；`chat.js` 的 `renderTree` 只用 `el()` 和文本节点建 DOM，
+  从不用 `innerHTML`。原文里的 HTML 标签原样显示为文字。属性只有固定几种：链接 `href` 只能是 `http(s):` / `mailto:`；图片 `src` 只能是
+  原文里的 `data:image/(png|jpeg|gif|webp|bmp|avif|svg+xml);base64,…`（≤ 5 MB）或我们从设备读到的字节拼成的 `data:` 地址；有序列表的 `start`
+  是解析出的整数；任务列表的勾选框总是 `disabled`。
+- 支持：`#`–`######` 标题（5、6 级按 4 级的样子）、段落（保留换行）、`---` / `***` / `___` 分隔线、` ``` ` 和 `~~~` 代码块（结束标记要同一字符且
+  不短于开头；没结束的代码块标记为 `open`，流式输出时用）、GFM 表格（对齐、`\|` 转义、代码里的 `|` 不分列，最多 2000 行，横向滚动）、
+  引用（可嵌套，最多 6 层，里面可以有列表和代码）、嵌套列表（续行缩进到内容列；有序列表保留起始编号；换符号或换类型开始新列表；项之间可以有空行）、
+  任务列表 `- [ ]` / `- [x]`；行内：`` `代码` ``（任意个反引号）、`\` 转义、`**粗**` / `__粗__`、`*斜*` / `_斜_`（下划线要求两边不是字母数字，
+  `snake_case_name` 不变斜体，中文正常）、`~~删除线~~`（单个 `~` 不算，`1~2 天`）、`***粗斜***`、链接 `[文字](url)` / `<https://…>` / 裸网址、图片 `![说明](地址)`。
+  不安全的链接（`javascript:` 等）原样显示为文字。用户自己发的消息也按 Markdown 显示。
+- 邮件正文和“Agent 在问你”的上下文来自别的会话或设备，也按 Markdown 显示，但其中的路径**不**变成链接（不按这次运行的设备解析）。
+
+### 17.2 路径识别
+- 形状：`/a/b`、`~/a`（或 `~\a`）、`C:\a` / `C:/a`、`./a`、`../a`、带斜杠的相对路径 `a/b.ext`；名字里可以有中文（`docs/设计/方案.md`）。
+  行号后缀：`:12`、`:12:5`、`:12-20`、`#L12`、`#L12-L20`。
+- 排除：网址里的路径、版本号（`v0.8.35`、`1.2.3`、`3/4`）、只有一级的路由（`/mcp`、`/s`）、通配符（`*`、`?`）；正文里的相对路径要有斜杠且最后一级有扩展名
+  （`a/b` 只在代码里算）；没有斜杠的文件名（`chat.js`）只在整个代码片段就是它、且扩展名在已知列表里时才算，所以正文里的 `node.js`、`e.g.` 不是；
+  空格只在整个代码片段、尖括号链接或 `file://` 里允许；末尾的标点去掉；和中文粘在一起时取出 ASCII 部分（`修改了src/app.py文件` → `src/app.py`）。
+  Windows 路径先于 `\` 转义处理（`C:\Users\me\.codex` 不被拆开），代码片段里的 Windows 路径保持原样。
+- **最后一道关是文件是否存在**：识别出的路径先显示成普通的 `span.chat-path`，向它所在的设备查过、确认是文件才变成链接；所以 `/api/agents`
+  这类形状像路径的文字不会变成死链接。正在流式输出的最后一段不查，回答结束（或下一块出现）后才查；只查屏幕上和附近一屏的，
+  300–400 ms 合并一次，每个设备和目录一次最多 200 个，结果按“设备 + 目录 + 原文”缓存（最多 2000 条）。
+- 在哪台设备、哪个目录解析：直连模式是运行所在的设备和会话目录（运行中用这次运行的目录）；经网关模式先查工作上下文的设备和目录，
+  不存在的绝对路径再到运行所在的设备上查（临时目录和附件在那里）。`~` 和相对路径都**在设备上**按它自己的系统规则解析，浏览器只发原文和目录。
+  工具卡片标题里的文件（Read / Edit / Write 的 `file_path`、其他工具的 `path`）和文件改动卡片的路径也是这样的链接；点它们打开文件，不展开卡片。
+
+### 17.3 设备端：`agent_file_stat` / `agent_file_read`（`agents/fileview.py`）
+- `agent_file_stat {base, paths: [≤200 个原文]}` → `{files: [{raw, path(解析后的绝对路径), exists, dir, size, mtime_ns, kind: text|image|binary, mime, name}]}`。
+  `kind` 按扩展名和前 8 KB 里有没有 NUL 字节判断。
+- `agent_file_read {path, base?, mode}`：`mode: "text"` 带 `line` 时返回该行附近约 1000 行 `{text, first_line, total_lines, truncated, scanned_all, encoding}`，
+  依次按 utf-8、utf-8-sig、gb18030（中文 Windows 的文件）解码，最多扫描 8 MB；`mode: "bytes"` 带 `offset` / `length`（≤ 1 MiB）返回
+  `{data(base64), size, mime, eof}`。
+- 权限和文件共享（files/1）、终端一样：核心进程读，`~` 是执行账户的 HOME。**拒绝 Agent Nexus 自己的数据目录**（`.anx`、`.mcp-manager`，
+  里面有网关凭据；先解析符号链接再判断），只放行其中的托管临时目录 `.anx/agents/tmp`（附件和 Agent 的临时文件在那里）。
+- **拒绝网络路径**（`network`）：`\\host\share`、`//host/share`、`\\?\UNC\…`、`\\.\…`、`file://host/…`，以及这样的 `base`，在任何
+  realpath / stat 之前就拒绝——Windows 上一次 stat 就会向模型写出的主机发起 SMB 连接并送出账户的 NTLM 凭据，而页面会自动查看屏幕附近的路径。
+  浏览器端（`markdown.js` 的 `isNetworkPath`）也不把这类路径做成链接或设备图片，旧设备的 files/1 回退同样不读。
+- **设备关了文件共享（`files.enabled = false`）时**，其他设备和云端控制台经 `agents/1` 调这两个 op 只能看托管临时目录（对话的附件），
+  其他路径返回 `files_disabled`；本机控制台不受影响（`hub.remote_handlers(..., files=...)`）。
+  远程调用和其他 op 一样经 `agents/1`；网关只转发它自己版本的 op 列表，所以要设备和网关都升级。
+- 旧设备或旧网关（`unknown_op` / `gateway_too_old` / 404）：不查是否存在，只把绝对路径（和浏览器按目录分隔符拼出的相对路径）当链接，
+  经 files/1 读：云端控制台 `GET /api/devices/{id}/files/read`，本地控制台 `GET /api/remote/devices/{id}/files/download`。
+
+### 17.4 预览、图片和下载
+- 点链接：文本文件在右侧抽屉里预览（行号、跳到并高亮那一行，显示复制路径 / 下载）；图片在弹窗里放大（可下载）；其他文件直接下载。
+- `![说明](路径)` 的图片：确认存在后从设备分块读（每块 768 KB，最多 10 MB）拼成 `data:` 地址显示（最大高 320 px，点开放大）；更大的显示为“点击下载”。
+  缓存最多 64 MB，切换会话时清空。用 `data:` 而不用 `blob:`，因为云端控制台页面的 CSP 是 `img-src 'self' data:`。
+- 外部 `http(s)` 图片默认不加载（隐私）：显示“加载外部图片（域名）”，本地控制台点了才加载（`referrerpolicy=no-referrer`）；
+  云端控制台的 CSP 不允许外部图片，点了在新标签页打开（`noopener noreferrer`）。适配器上的 `externalImages` 决定是哪种。
+- 下载：分块读成 `application/octet-stream` 的 Blob，用 `<a download>` 保存，最多 256 MB；旧设备在本地控制台走 files/1 的下载地址。
+  **从不在页面里打开 `blob:` / `data:` 文件**（SVG、HTML 文件在本站源下打开会运行脚本），也不用 iframe / object：图片只进 `<img>`，其他只下载。
+
+## 18. 附件（上传到运行设备，再交给 CLI）
+
+`agents/attachments.py`。输入框可以点回形针选文件、粘贴截图、把文件拖进来；文件**立刻**上传到 CLI 所在的设备，放进托管的临时目录，
+发消息时把路径交给 CLI。和其他 op 一样走 `agents/1`（本机、其他设备、云端控制台同一条路），所以 `files` 关掉时也能用。
+
+### 18.1 放在哪里
+- 已有 run：`<root>/.anx/agents/tmp/<rid>/attachments/`（就是这次运行的 `$tmpdir` 下面）。
+- 新对话还没有 run：先 `agent_attach_begin {kind, resume_id?}` → `{stage, dir, limits}` 要一个**暂存目录**（同样在 `.anx/agents/tmp/<stage>/`，
+  建好就标记为已关闭，没被用上就按 7 天规则清掉）；之后 `agent_run_open {…, stage}` 直接把它当作这次运行的目录（rid = stage），
+  所以 Claude 的 `--add-dir`、提示词里的 `$tmpdir` 都正好包含附件。会话已经在别的窗口运行时（§5 “同一会话只跑一个进程”），
+  暂存的附件被移进那个 run 的目录再发过去。
+- 属主和 run 目录一样是执行账户（root 服务时 `fchown`；Windows 继承目录的权限）。执行账户能改自己的 run 目录，所以服务端所有读写都用
+  `O_NOFOLLOW` 的目录描述符一级级打开（POSIX），只开普通文件：把 `attachments` 换成指向别处的链接不会让核心写到或读到别的地方。
+  文件以 `O_NONBLOCK` 打开后立刻 fstat，不是普通文件就拒绝：执行账户把 `.part` 换成 FIFO 也不会让上传线程（以及等同一把锁的所有上传）卡住。
+- 删除会话时连同附件一起删除（§8）。
+
+### 18.2 上传
+- `agent_attach_put {rid | stage, name, size, offset, data(base64), id?}`：每块最多 512 KiB 原始字节（base64 后仍在网关 1 MiB 的请求上限内）；
+  `offset` 0 且没有 `id` 时开始一个上传，返回 `{id, have, size, done}`，最后一块写完后从 `.<id>.part` 改名，返回 `{path, name, display, mime}`。
+  块必须连续（`bad_offset`），超过声明大小拒绝；一小时没有新块的上传被丢弃。
+- 文件名：去掉目录、控制字符和 `, % ! ^ & | < > " * ? : ; $ ' `` ` ``（Codex 的 `--image` 按逗号分割；Windows `.cmd` 启动器不能带
+  `% ! ^ & | < > "`），去掉开头的 `.` 和 `-`，最长 120 个字符，空白换成 `_`（消息里的路径到空格就断了），保留扩展名；同名时加 `-2`。界面上仍显示原名。
+- `agent_attach_drop {rid | stage, path | id}`：发送前移除（只能删这个目录里的文件）。
+- 限制（服务端检查）：单个文件 50 MB，一条消息最多 10 个、合计 100 MB，一个 run 的附件目录合计 500 MB。`agent_info.caps.attachments`
+  告诉界面这些数字；没有 `caps.attachments` 的旧设备不显示回形针。网关只转发它自己版本的 op，旧网关上传会失败（界面提示版本太旧）。
+
+### 18.3 交给 CLI
+`agent_run_open` / `agent_run_send` 的 `attachments: [path, …]` 由 hub 逐个检查：必须是这个 run（或它的 stage）的 `attachments/` 里的普通文件，
+数量和合计大小在限制内（`bad_attachment` / `too_many` / `too_large`）。runner 只接受 hub 检查过的列表（`Runs.open/send(files=…)`，
+控制台参数里的同名字段无效），`user` 事件带 `attachments: [{path, name, size, mime}]`（不含文件内容）。消息只有附件时，发给 CLI 的文字是“请查看附件。”。
+
+| CLI | 图片（png / jpeg / gif / webp） | 其他文件 |
+|---|---|---|
+| Codex | 每张一个 `--image=<绝对路径>`：`exec` 放在提示词前，`exec resume` 放在 `resume` 后面（`-i a.png 提示词` 会把提示词当成第二张图；相对路径按进程目录而不是 `-C` 解析） | 消息里写出路径（沙箱能读工作目录外的文件） |
+| Claude Code | stream-json 的 `image` 内容块（base64，≤ 3.75 MB，API 的 5 MB base64 上限）；更大的写路径。注意 base64 会写进 Claude 的会话记录 | 写路径；启动时带 `--add-dir=<tmpdir>`（-p 模式默认拒绝读工作目录外的文件，实测 `permission_denials`） |
+| ACP（Gemini、dsh） | 代理声明 `promptCapabilities.image` 时用 ACP `image` 块（≤ 7 MB，带 `file://` uri），否则写路径 | 写路径 |
+| 文本方式、API 模型 | 写路径 | 写路径 |
+
+“写路径”= 消息末尾加一段“附件（已上传到这台设备，可以直接读取）：”和每个文件的绝对路径。ACP 排队等握手的那一轮、回退到文本方式时
+重发的那一轮都带着附件（`Run.last_files`）。
+
+### 18.4 界面
+- 待发附件是输入框上方的一排小卡片：图片有缩略图（浏览器本地读成 `data:` 地址，云端控制台的 CSP 不允许 `blob:` 图片），上传中显示百分比和进度条，
+  失败显示原因，每个都能移除（调 `agent_attach_drop`）。上传没完成或有失败的附件时不能发送。切换会话、设备或新开对话时丢弃未发出的附件。
+- 粘贴：剪贴板里只有文件时才当附件（从 Office 复制的文字会同时带一张图片，那时按文字粘贴）；粘贴的截图命名为 `截图-年月日-时分秒.png`。
+- 已发出的消息里，附件显示在气泡里：图片是缩略图，点开放大（可下载）；文本文件点开在侧边预览、旁边有下载按钮；其他文件点了直接下载。
+  都经 `agent_file_read` 从运行设备读（§17.4 的规则：`data:` 图片、`<a download>` 的 octet-stream，从不在页面里打开文件）。
+  回答里提到的附件路径和其他路径一样变成链接（§17）。
+
+## 19. 原目录没了，换个目录续接
+
+会话记录里的工作目录已经不存在（项目删了、改名了、换了盘符）时，列表标 `cwd_missing`。能不能在别的目录接着聊同一个会话，取决于 CLI：
+
+- **Codex**：会话按日期存（`~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`），和目录无关；`codex exec -C <新目录> … resume <id>` 直接在新目录续接，
+  新的一轮写一条新 cwd 的 `turn_context`。我们的模板本来就是这样，不需要额外处理。
+- **Claude Code**：会话存在 `<配置目录>/projects/<目录名>/<id>.jsonl`（配置目录是 `$CLAUDE_CONFIG_DIR` 或 `~/.claude`），旁边的 `<id>/` 里是子代理和工具结果。
+  目录名的规则（从 2.1.332 的程序里读出，`sessions.claude_project_name`）：路径先做 NFC，每个不是 `[A-Za-z0-9]` 的 UTF-16 单元换成 `-`；
+  超过 200 个字符时截到 200 再加 `-` 和路径的 Java 式 32 位哈希的绝对值的 36 进制。实测：在 b 目录 `--resume <id>` 一个 a 目录的会话，
+  新版会找到并**往 a 的原文件里追加**（旧版找不到：“No conversation found”）；`--fork-session` 会换成新的会话 ID。
+  所以我们**先把 `<id>.jsonl` 和 `<id>/` 复制到新目录对应的项目目录，再普通地 `--resume <id>`**：Claude 优先用当前项目目录里的那份
+  （实测副本从 2 行增长到 27 行，原文件一个字节不变），会话 ID 不变，旧版也能用。复制而不是硬链接（CLI 追加写，硬链接会改到原文件）；
+  目标已经有这份时不再复制。项目目录名按新目录的**物理路径**算（POSIX 上先 realpath）：Claude Code 用 `process.cwd()`，
+  经符号链接进入的目录（macOS 的 `/tmp` → `/private/tmp`、链接过去的 home 或项目目录）否则会复制到它从不读的地方。root 服务时只复制执行账户自己的普通文件，所有目录从 `/` 开始以 `O_NOFOLLOW` 逐级打开，新建的东西交给执行账户（`sessions.relocate_claude`）。
+- **dsh**：`session/resume`、`session/load` 都要求 cwd 和会话记录的一致（`session cwd does not match`），记录在 zstd 压缩的会话文件里，改它太脆弱：**不支持**。
+- **Gemini CLI**：`session/load` 只在新目录的项目存储（按 `~/.gemini/projects.json` 的短 ID）里找，换目录找不到；我们的注册表里 Gemini 本来也没开续接。**不支持**。
+
+实现：
+- `AgentDef.relocate`（Claude、Codex 为真；自定义 CLI 可在 `agents.custom` 里设），`supports.relocate` 告诉界面。
+- `agent_run_open` 带 `resume_id` 且 `workdir` 和会话记录的目录不同（`sessions.same_dir`：规范化、Windows / macOS 不分大小写、解析链接）时：
+  不支持的 CLI 返回 `relocate_unsupported`（不再像以前那样悄悄开一个新会话）；Claude 先复制（失败返回 `relocate_failed`，原记录不动）；
+  ACP 代理带 `strict_resume`：加载失败就让这次运行失败，而不是开新会话、也不回退到文本方式。成功后在会话元数据里记 `cwd`（带时间），
+  CLI 还没写新记录之前列表就显示新目录、不再是 `cwd_missing`。
+- 列表的 cwd 取**最近的**记录（Claude 每条记录的 `cwd`，Codex 最后一条 `turn_context`），合并多个文件时取最近写过的那个文件的；
+  `cwds` 列出用过的目录，`_workdir_ok` 都认（和以前认会话记录的 cwd 一样的信任程度）。在终端里换过目录的会话也因此不再显示目录不存在。
+- 界面：打开这样的会话时，输入框上方写“这个会话原来的目录 X 已不存在”，按钮“选择新目录续接”（Claude、Codex）和“在其他目录新开对话”；
+  选好后写“将在 Y 续接这个会话（原目录已不存在，原记录保持不变）”，可以“换一个”。dsh、Gemini 只有“在其他目录新开对话”，并说明会话和原目录绑定。
+  经网关模式下换的是运行设备上 CLI 自己的目录，工作上下文不变。
+
+新开的对话（不续接）：直连模式的工作目录就是“目录”里选的那个；经网关模式下 CLI 在运行设备上执行账户的主目录里启动（它操作的是另一台设备的目录），
+都**不在**托管的临时目录里——临时目录只放附件和 Agent 自己的临时文件（`$tmpdir`）。

@@ -20,13 +20,14 @@
 //   conversation(address)   -> Promise<{messages, asks}>   (me ↔ the run's mailbox address, §10)
 //   answerAsk(id, answer)   -> Promise<result>             answer = {choice} | {choices} | {text}
 
-import { el, icon, mount, toast, modal, drawer, confirmDialog, relTime, copy } from "./ui.js";
+import { el, icon, mount, toast, modal, drawer, confirmDialog, relTime, copy, bytes } from "./ui.js";
 import {
   xicon, KINDS, KIND_ORDER, kindLabel as baseLabel, kindShort as baseShort, kindMark as baseMark, callOp, normalizeAgents, agentStatus, notReadyReason,
   watchInstall, progressBar, jobActive, loginCommand, shortPath, toSeconds, mountTmpManager,
 } from "./agent-admin.js";
 import { mountPromptEditor } from "./prompts.js";
 import { kindSvg } from "./kind-icons.js";
+import { isNetworkPath, parseBlocks, stableCut } from "./markdown.js";
 
 const PERMISSIONS = [
   ["ask", "需要审批", "改文件、运行命令前先问你"],
@@ -76,6 +77,8 @@ export function devicePrefs(stored, id) {
 
 // ---------------------------------------------------------------- folders on other devices (§1 mode gateway)
 
+// file names a sent attachment previews as text (the rest download)
+const TEXT_NAME = /\.(?:md|markdown|txt|log|json|jsonl|ya?ml|toml|ini|cfg|conf|env|csv|tsv|xml|html?|css|scss|less|js|mjs|cjs|jsx|ts|tsx|vue|svelte|py|pyi|rb|go|rs|java|kt|kts|swift|c|cc|cpp|cxx|h|hh|hpp|cs|php|sh|bash|zsh|ps1|psm1|bat|cmd|sql|lua|pl|r|dart|scala|gradle|proto|diff|patch)$/i;
 const folderBase = (path) => String(path || "").replace(/[\\/]+$/, "").split(/[\\/]/).filter(Boolean).pop() || String(path || "");
 
 /**
@@ -333,23 +336,14 @@ function menu(anchor, items, opts = {}) {
   return pop;
 }
 
-// ---------------------------------------------------------------- markdown-lite (text only; never innerHTML)
+// ---------------------------------------------------------------- markdown (text only; never innerHTML, §17)
+// markdown.js parses into a tree of plain objects; this builds it with el() and text nodes only. Attributes come
+// from a fixed list: href only http(s)/mailto, img src only a data:image URL (of the text itself, or built here
+// from the device's bytes), list start only a parsed integer, task checkboxes always disabled.
 
-const INLINE = /(`[^`\n]+`)|(\*\*[^*\n]+\*\*)|(\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\))|(https?:\/\/[^\s<>()（）]+[^\s<>().,;:!?'"）。，、])/g;
-function inline(text) {
-  const out = [];
-  let last = 0;
-  for (const match of text.matchAll(INLINE)) {
-    if (match.index > last) out.push(text.slice(last, match.index));
-    if (match[1]) out.push(el("code", { class: "chat-ic" }, match[1].slice(1, -1)));
-    else if (match[2]) out.push(el("strong", {}, match[2].slice(2, -2)));
-    else if (match[3]) out.push(el("a", { href: match[5], target: "_blank", rel: "noopener noreferrer" }, match[4]));
-    else if (match[6]) out.push(el("a", { href: match[6], target: "_blank", rel: "noopener noreferrer" }, match[6]));
-    last = match.index + match[0].length;
-  }
-  if (last < text.length) out.push(text.slice(last));
-  return out;
-}
+const SAFE_HREF = /^(?:https?:\/\/|mailto:)/i;
+export const DATA_IMAGE = /^data:image\/(?:png|jpe?g|gif|webp|bmp|avif|svg\+xml);base64,[A-Za-z0-9+/=\s]+$/i;
+const DATA_IMAGE_MAX = 7 * 1024 * 1024;   // a 5 MB image as base64
 
 function codeBlock(code, lang = "") {
   return el("div", { class: "chat-code" },
@@ -358,49 +352,78 @@ function codeBlock(code, lang = "") {
     el("pre", {}, el("code", {}, code)));
 }
 
-const LIST_ITEM = /^\s*([-*+]|\d+[.)])\s+/;
-export function renderMarkdown(text) {
-  const root = el("div", { class: "chat-md" });
-  const lines = String(text || "").replace(/\r\n?/g, "\n").split("\n");
-  let para = [];
-  const flush = () => { if (para.length) { root.append(el("p", {}, inline(para.join("\n")))); para = []; } };
-  for (let i = 0; i < lines.length;) {
-    const line = lines[i];
-    const fence = line.match(/^\s*(`{3,}|~{3,})\s*([\w+#.-]*)/);
-    if (fence) {
-      flush();
-      const buf = [];
-      for (i += 1; i < lines.length && !lines[i].trim().startsWith(fence[1]); i += 1) buf.push(lines[i]);
-      i += 1;
-      root.append(codeBlock(buf.join("\n"), fence[2]));
-      continue;
+/** An external image is never fetched on its own (privacy): a click loads it (or opens it, where the CSP forbids). */
+function externalImage(n, ctx) {
+  let host = "";
+  try { host = new URL(n.src).host; } catch { host = ""; }
+  const box = el("span", { class: "chat-img-ext" });
+  const button = el("button", { class: "btn btn-sm btn-ghost", type: "button", title: n.src,
+    onclick: () => {
+      if (!ctx.externalImages) { window.open(n.src, "_blank", "noopener,noreferrer"); return; }
+      // a click opens it in a new tab (it is not the device's: no lightbox), so the cursor says "open", not zoom
+      const img = el("img", { class: "chat-img ext", alt: n.alt || "", referrerpolicy: "no-referrer", src: n.src, title: `${n.src}（点击在新标签页打开）` });
+      img.addEventListener("click", () => window.open(n.src, "_blank", "noopener,noreferrer"));
+      img.addEventListener("error", () => {
+        // unreachable host / not an image: a clear state with a retry and the link, never the broken-image glyph
+        const failed = el("span", { class: "chat-img-ext failed", title: n.src },
+          icon("image", { size: 14 }), el("span", {}, `外部图片加载失败${host ? `（${host}）` : ""}`),
+          el("button", { class: "btn btn-sm btn-ghost", type: "button", onclick: () => { const again = externalImage(n, ctx); failed.replaceWith(again); again.querySelector("button")?.click(); } }, "重试"),
+          el("button", { class: "btn btn-sm btn-ghost", type: "button", onclick: () => window.open(n.src, "_blank", "noopener,noreferrer") }, icon("external-link", { size: 13 }), "在新标签页打开"));
+        img.replaceWith(failed);
+      }, { once: true });
+      box.replaceWith(img);
+    } }, icon("image", { size: 14 }), ctx.externalImages ? `加载外部图片${host ? `（${host}）` : ""}` : `打开外部图片${host ? `（${host}）` : ""}`);
+  box.append(button, n.alt ? el("span", { class: "faint xs" }, n.alt) : null);
+  return box;
+}
+
+function mdNode(n, ctx) {
+  const kids = () => renderTree(n.children || [], ctx);
+  switch (n.t) {
+    case "text": return document.createTextNode(n.text);
+    case "code": return el("code", { class: "chat-ic" }, n.text);
+    case "strong": return el("strong", {}, kids());
+    case "em": return el("em", {}, kids());
+    case "del": return el("del", {}, kids());
+    case "span": return el("span", {}, kids());
+    case "link": return SAFE_HREF.test(n.href) ? el("a", { href: n.href, target: "_blank", rel: "noopener noreferrer" }, kids()) : el("span", {}, kids());
+    case "file": return ctx.file ? ctx.file(n, n.children ? kids() : null) : el("span", { class: `chat-path${n.code ? " mono" : ""}` }, n.children ? kids() : n.text);
+    case "img": {
+      if (n.data) return typeof n.src === "string" && n.src.length <= DATA_IMAGE_MAX && DATA_IMAGE.test(n.src) ? el("img", { class: "chat-img", alt: n.alt || "", src: n.src }) : document.createTextNode(n.alt || "[图片]");
+      if (n.external) return externalImage(n, ctx);
+      return ctx.image ? ctx.image(n) : el("span", { class: "chat-path mono" }, n.alt ? `[图片：${n.alt}] ` : "[图片] ", n.path);
     }
-    if (!line.trim()) { flush(); i += 1; continue; }
-    const heading = line.match(/^(#{1,4})\s+(.*)$/);
-    if (heading) { flush(); root.append(el("div", { class: `chat-h h${heading[1].length}` }, inline(heading[2]))); i += 1; continue; }
-    if (LIST_ITEM.test(line)) {
-      flush();
-      const list = el(/^\s*\d/.test(line) ? "ol" : "ul");
-      while (i < lines.length && LIST_ITEM.test(lines[i])) {
-        const item = el("li", {}, inline(lines[i].replace(LIST_ITEM, "")));
-        for (i += 1; i < lines.length && /^\s{2,}\S/.test(lines[i]) && !LIST_ITEM.test(lines[i]); i += 1) item.append("\n", ...inline(lines[i].trim()));
-        list.append(item);
-      }
-      root.append(list);
-      continue;
+    case "p": return el("p", {}, kids());
+    case "h": return el("div", { class: `chat-h h${Math.min(4, Math.max(1, Number(n.level) || 1))}` }, kids());
+    case "hr": return el("hr", {});
+    case "pre": return codeBlock(n.text, n.lang);
+    case "quote": return el("blockquote", {}, kids());
+    case "ul": case "ol": {
+      const start = n.t === "ol" && Number.isInteger(n.start) && n.start !== 1 ? String(n.start) : null;
+      return el(n.t, { start }, kids());
     }
-    if (/^>\s?/.test(line)) {
-      flush();
-      const buf = [];
-      for (; i < lines.length && /^>\s?/.test(lines[i]); i += 1) buf.push(lines[i].replace(/^>\s?/, ""));
-      root.append(el("blockquote", {}, inline(buf.join("\n"))));
-      continue;
+    case "li": return el("li", { class: n.task === null || n.task === undefined ? null : "task" },
+      n.task === null || n.task === undefined ? null : el("input", { type: "checkbox", disabled: true, checked: !!n.task, "aria-label": n.task ? "已完成" : "未完成" }),
+      kids());
+    case "table": {
+      const align = (i) => (["left", "right", "center"].includes(n.align?.[i]) ? { textAlign: n.align[i] } : null);
+      return el("div", { class: "chat-table-wrap" }, el("table", {},
+        el("thead", {}, el("tr", {}, (n.head || []).map((cell, i) => el("th", { style: align(i) }, renderTree(cell, ctx))))),
+        el("tbody", {}, (n.rows || []).map((row) => el("tr", {}, row.map((cell, i) => el("td", { style: align(i) }, renderTree(cell, ctx))))))));
     }
-    para.push(line);
-    i += 1;
+    default: return null;
   }
-  flush();
-  return root;
+}
+
+/** DOM nodes for a parsed tree (block or inline nodes). `ctx`: {file(n, kids), image(n), externalImages}. */
+export function renderTree(nodes, ctx = {}) {
+  const out = [];
+  for (const n of nodes || []) { const node = mdNode(n, ctx); if (node) out.push(node); }
+  return out;
+}
+
+export function renderMarkdown(text, ctx = {}) {
+  return el("div", { class: "chat-md" }, renderTree(parseBlocks(text), ctx));
 }
 
 function diffView(diff) {
@@ -432,6 +455,24 @@ function formatInput(input) {
   try { return JSON.stringify(input, null, 2); } catch { return String(input); }
 }
 
+// ---------------------------------------------------------------- attachments (§18)
+
+/** The name an attachment is uploaded under: a pasted screenshot ("image.png", or no name) gets a dated one. */
+export function pastedName(file, now = new Date()) {
+  const type = String(file?.type || "");
+  if (file?.name && !/^image\.(png|jpe?g|gif|webp)$/i.test(file.name)) return file.name;
+  if (!type.startsWith("image/")) return file?.name || "file";
+  const ext = (type.split("/")[1] || "png").replace("jpeg", "jpg").replace(/[^a-z0-9]/g, "") || "png";
+  const pad = (n) => String(n).padStart(2, "0");
+  return `截图-${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}.${ext}`;
+}
+/** Bytes as base64, in slices (String.fromCharCode on a whole 512 KiB chunk overflows the call stack). */
+export function toB64(buf) {
+  let bin = "";
+  for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
+
 // ---------------------------------------------------------------- the component
 
 export function mountChat(container, api, opts = {}) {
@@ -444,6 +485,9 @@ export function mountChat(container, api, opts = {}) {
     deviceError: "", loading: true, gen: 0, alive: true, usage: null,
     // the model per CLI kind (aliases are the same everywhere, so not per device); modelLists: per "device:kind"; runModel: what the open run uses
     modelByKind: {}, modelLists: {}, runModel: null,
+    // caps: what the device's AgentHub can do beyond the first agents/1 ops (agent_info.caps: attachments, relocate);
+    // relocateTo: the folder a session whose own folder is gone will be continued in (§19)
+    caps: null, relocateTo: null,
   };
   { const stored = store.read().modelByKind; if (stored && typeof stored === "object") S.modelByKind = { ...stored }; }
   const installs = new Map();   // kind -> {watch, job}
@@ -479,7 +523,8 @@ export function mountChat(container, api, opts = {}) {
   const working = el("div", { class: "chat-working", hidden: true }, el("span", { class: "chat-dots", "aria-hidden": "true" }, el("i"), el("i"), el("i")), el("span", {}));
   const welcome = el("div", { class: "chat-welcome-wrap" });
   const scroller = el("div", { class: "chat-scroll" }, welcome, stream, working);
-  const jump = el("button", { class: "btn btn-sm chat-jump", type: "button", hidden: true, onclick: () => scrollToEnd(true) }, xicon("arrow-down", { size: 14 }), "最新消息");
+  const jumpLabel = el("span", {}, "最新消息");
+  const jump = el("button", { class: "btn btn-sm chat-jump", type: "button", hidden: true, onclick: () => scrollToEnd(true) }, xicon("arrow-down", { size: 14 }), jumpLabel);
   const live = el("div", { class: "sr-only", "aria-live": "polite" });
 
   const input = el("textarea", { class: "chat-input", rows: 1, "aria-label": "消息", placeholder: "" });
@@ -503,10 +548,17 @@ export function mountChat(container, api, opts = {}) {
       el("p", { class: "chat-usage-pop-text" }, view.title),
     ], { align: "end", label: "上下文占用", cls: "chat-usage-pop", above: true, onClose: () => { usageClosedAt = Date.now(); } });
   } });
+  // attachments (§18): a paperclip, paste and drag & drop; the chips above the input show the uploads
+  const fileInput = el("input", { type: "file", multiple: true, hidden: true, tabindex: "-1", "aria-hidden": "true" });
+  const attachBtn = el("button", { class: "btn btn-ghost btn-icon chat-attach", type: "button", hidden: true, "aria-label": "添加附件",
+    title: "添加附件（也可以粘贴截图或把文件拖进来）", onclick: () => fileInput.click() }, xicon("paperclip", { size: 17 }));
+  const attRow = el("div", { class: "chat-atts", role: "list", "aria-label": "附件", hidden: true });
   const composer = el("div", { class: "chat-composer" },
     composerNote,
+    attRow,
     input,
-    el("div", { class: "chat-composer-foot" }, chips, el("div", { class: "chat-composer-actions" }, usageNode, stopBtn, sendBtn)));
+    fileInput,
+    el("div", { class: "chat-composer-foot" }, chips, el("div", { class: "chat-composer-actions" }, attachBtn, usageNode, stopBtn, sendBtn)));
   const main = el("section", { class: "chat-main", "aria-label": "对话" }, head, ctxLine, el("div", { class: "chat-body" }, scroller, jump), el("div", { class: "chat-composer-wrap" }, composer), live);
   const root = el("div", { class: "chat" }, side, scrim, main);
   if (opts.height) root.style.setProperty("--chat-h", typeof opts.height === "number" ? `${opts.height}px` : opts.height);
@@ -525,6 +577,8 @@ export function mountChat(container, api, opts = {}) {
   const noApprovals = (info = agentInfo()) => info?.supports?.approvals === false;
   const permLabel = (key = S.permission, info = agentInfo()) => (key === "ask" && noApprovals(info) ? NO_APPROVAL_ASK[0] : PERMISSION_LABEL[key] || key);
   const canResume = (kind) => agentInfo(kind)?.supports?.resume !== false;
+  // a session continued in another folder than its own (§19): Codex and Claude Code; the device must know it too
+  const canRelocate = (kind) => agentInfo(kind)?.supports?.relocate === true;
   // After the Agent changes: a mode it does not have falls back to its first one, and the user is told.
   function fitPermission({ quiet = false } = {}) {
     const info = agentInfo();
@@ -605,16 +659,138 @@ export function mountChat(container, api, opts = {}) {
     renderComposer();
   }
 
+  // --- attachments (§18): uploaded at once to the run device's managed temp folder (the run's, or a stage folder
+  // for a chat with no run yet), in chunks over the same agents/1 call as everything else; sent with the message.
+  const ATT_DEFAULT = { chunk: 512 * 1024, file_max: 50 * 1024 * 1024, files: 10, message_max: 100 * 1024 * 1024 };
+  const att = { items: [], stage: null, stageKey: null, staging: null };
+  let attSeq = 0;
+  const attLimits = () => ({ ...ATT_DEFAULT, ...(S.caps?.attachments && typeof S.caps.attachments === "object" ? S.caps.attachments : {}) });
+  const canAttach = () => !!S.caps?.attachments;
+  const liveAtts = () => att.items.filter((item) => item.state !== "gone");
+  fileInput.addEventListener("change", () => { addFiles(Array.from(fileInput.files || [])); fileInput.value = ""; });
+  input.addEventListener("paste", (event) => {
+    const data = event.clipboardData;
+    const files = Array.from(data?.files || []);
+    // a copy from an office program carries a picture of the text too: then the text is what was meant
+    if (!files.length || (data.getData("text/plain") && files.every((f) => f.type.startsWith("image/")))) return;
+    event.preventDefault();
+    addFiles(files);
+  });
+  const hasFiles = (event) => Array.from(event.dataTransfer?.types || []).includes("Files");
+  composer.addEventListener("dragover", (event) => {
+    if (!hasFiles(event) || !canAttach() || input.disabled) return;
+    event.preventDefault();
+    composer.classList.add("drop");
+  });
+  composer.addEventListener("dragleave", (event) => { if (!composer.contains(event.relatedTarget)) composer.classList.remove("drop"); });
+  composer.addEventListener("drop", (event) => {
+    composer.classList.remove("drop");
+    if (!hasFiles(event) || !canAttach() || input.disabled) return;
+    event.preventDefault();
+    addFiles(Array.from(event.dataTransfer.files || []));
+  });
+  function addFiles(files) {
+    if (!files.length) return;
+    if (!canAttach()) { toast(`${deviceName()} 上的 Agent Nexus 版本较旧，不支持发附件；升级后再试`, { type: "warn" }); return; }
+    const lim = attLimits();
+    for (const file of files) {
+      if (liveAtts().length >= lim.files) { toast(`一条消息最多 ${lim.files} 个附件`, { type: "warn" }); break; }
+      if (file.size > lim.file_max) { toast(`${file.name || "文件"} 有 ${bytes(file.size)}，单个附件不能超过 ${bytes(lim.file_max)}`, { type: "warn" }); continue; }
+      if (liveAtts().reduce((n, item) => n + item.size, 0) + file.size > lim.message_max) { toast(`一条消息的附件合计不能超过 ${bytes(lim.message_max)}`, { type: "warn" }); break; }
+      const item = { key: ++attSeq, file, name: pastedName(file), size: file.size, type: file.type || "", state: "up", have: 0, device: S.device };
+      att.items.push(item);
+      if (/^image\/(png|jpeg|gif|webp|bmp)$/.test(item.type) && file.size <= 8 * 1024 * 1024) {
+        const reader = new FileReader();   // a data: URL: the cloud console's CSP allows no blob: images
+        reader.onload = () => { item.thumb = String(reader.result); renderAtts(); };
+        reader.readAsDataURL(file);
+      }
+      uploadAtt(item);
+    }
+    renderAtts(); renderComposer();
+  }
+  /** Where uploads go now: the open run's folder, else a stage folder of this device (asked for once). */
+  async function attachTarget() {
+    if (S.rid) return { rid: S.rid };
+    const key = devKey(S.device);
+    if (att.stage && att.stageKey === key) return { stage: att.stage };
+    if (!att.staging || att.stagingKey !== key) {
+      att.stagingKey = key;
+      att.staging = call("agent_attach_begin", { kind: S.kind || undefined, resume_id: S.session?.id || undefined })
+        .then((r) => { if (att.stagingKey === key) { att.stage = r.stage; att.stageKey = key; } return r.stage; })
+        .finally(() => { if (att.stagingKey === key) att.staging = null; });
+    }
+    return { stage: await att.staging };
+  }
+  async function uploadAtt(item) {
+    try {
+      const where = await attachTarget();
+      item.where = where;
+      const chunk = Math.max(64 * 1024, Math.min(Number(attLimits().chunk) || ATT_DEFAULT.chunk, 512 * 1024));
+      let offset = 0;
+      for (;;) {
+        if (item.state === "gone") break;
+        const buf = new Uint8Array(await item.file.slice(offset, offset + chunk).arrayBuffer());
+        const r = await call("agent_attach_put", { ...where, name: item.name, size: item.size, offset, data: toB64(buf), ...(item.id ? { id: item.id } : {}) });
+        item.id = r.id;
+        offset = item.have = Number(r.have) || offset + buf.length;
+        if (r.done) {
+          Object.assign(item, { path: r.path, stored: r.name, mime: r.mime, state: item.state === "gone" ? "gone" : "ok" });
+          if (item.state === "gone") dropAtt(item);
+          break;
+        }
+        renderAtts();
+      }
+    } catch (error) {
+      if (item.state === "gone") return;
+      item.state = "err";
+      item.error = unsupported(error) ? `${deviceName()} 或网关的版本较旧，不支持附件` : error.message;
+    }
+    renderAtts(); renderComposer();
+  }
+  function dropAtt(item) {
+    if (!item.where || !(item.path || item.id)) return;
+    callOp(api, "agent_attach_drop", { ...item.where, ...(item.path ? { path: item.path } : { id: item.id }) }, item.device).catch(() => {});
+  }
+  function removeAtt(item) {
+    item.state = "gone";
+    att.items = att.items.filter((x) => x !== item);
+    dropAtt(item);
+    renderAtts(); renderComposer();
+    input.focus();
+  }
+  /** Forgets the pending attachments (another device or chat): ``drop`` also removes the uploaded files. */
+  function clearAtts({ drop = true } = {}) {
+    for (const item of att.items) { if (drop && item.state !== "gone") dropAtt(item); item.state = "gone"; }
+    att.items = [];
+    renderAtts();
+  }
+  function renderAtts() {
+    const items = liveAtts();
+    attRow.hidden = !items.length;
+    mount(attRow, items.map((item) => {
+      const pct = item.size ? Math.round((item.have / item.size) * 100) : 100;
+      const status = item.state === "up" ? `${pct}%` : item.state === "err" ? item.error || "上传失败" : bytes(item.size);
+      return el("div", { class: `chat-att ${item.state}`, role: "listitem", title: item.state === "err" ? `${item.name}：${item.error || "上传失败"}` : `${item.name} · ${bytes(item.size)}` },
+        item.thumb ? el("img", { class: "chat-att-thumb", src: item.thumb, alt: "" }) : el("span", { class: "chat-att-icon" }, item.type.startsWith("image/") ? icon("image", { size: 15 }) : xicon("file", { size: 15 })),
+        el("span", { class: "chat-att-text" }, el("span", { class: "chat-att-name truncate" }, item.name), el("span", { class: "chat-att-meta" }, status)),
+        item.state === "up" ? el("span", { class: "chat-att-bar", "aria-hidden": "true" }, el("i", { style: `width:${pct}%` })) : null,
+        el("button", { class: "chat-att-x", type: "button", "aria-label": `移除 ${item.name}`, title: "移除", onclick: () => removeAtt(item) }, icon("x", { size: 13 })));
+    }));
+  }
+
   // --- scrolling: stick to the bottom unless the user scrolled up
   // Content keeps growing below while we follow it, so only a move *up* from where we last put the
   // view counts as the user leaving the bottom; reaching the bottom again re-attaches.
   let stick = true, autoTop = 0;
   scroller.addEventListener("scroll", () => {
     const atBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80;
-    if (atBottom) { stick = true; jump.hidden = true; }
-    else if (scroller.scrollTop < autoTop - 8) stick = false;
+    if (atBottom) {
+      stick = true; jump.hidden = true;
+      if (newer.length) { flushNewer(); scrollToEnd(true); }   // back at the bottom: the blocks held back come in
+    } else if (scroller.scrollTop < autoTop - 8) stick = false;
   }, { passive: true });
   function scrollToEnd(force = false) {
+    if (force && newer.length) flushNewer();
     if (force || stick) {
       scroller.scrollTop = scroller.scrollHeight;
       autoTop = scroller.scrollTop;
@@ -777,8 +953,9 @@ export function mountChat(container, api, opts = {}) {
     const prefs = prefsFor(id);
     S.device = id;
     store.write({ device: id });
-    Object.assign(S, { agents: [], policy: null, dirs: null, presets: [], runs: [], sessions: [], sessionsState: "loading", deviceError: "", loading: true,
-      session: null, rid: null, cursor: 0, runState: "idle", sessionId: null, address: null });
+    Object.assign(S, { agents: [], policy: null, caps: null, dirs: null, presets: [], runs: [], sessions: [], sessionsState: "loading", deviceError: "", loading: true,
+      session: null, rid: null, cursor: 0, runState: "idle", sessionId: null, address: null, relocateTo: null });
+    clearAtts();
     for (const entry of installs.values()) entry.watch?.stop();
     installs.clear();
     S.kind = prefs.kind || null;
@@ -803,6 +980,7 @@ export function mountChat(container, api, opts = {}) {
     }
     S.agents = normalizeAgents(info.value);
     S.policy = info.value?.policy || null;
+    S.caps = info.value?.caps || null;
     if (sessions.status === "fulfilled") { S.sessions = listOf(sessions.value, "sessions"); S.sessionsState = "ready"; }
     else { S.sessionsState = "error"; S.sessionsError = sessions.reason?.message || "读取会话失败"; }
     S.dirs = dirs.status === "fulfilled" ? dirs.value : null;
@@ -876,6 +1054,7 @@ export function mountChat(container, api, opts = {}) {
       if (gen !== S.gen) return;
       S.agents = normalizeAgents(value);
       S.policy = value?.policy || null;
+      S.caps = value?.caps || null;
     } catch { /* keep the last answer */ }
     renderBar(); renderWelcome(); renderComposer();
   }
@@ -1100,8 +1279,11 @@ export function mountChat(container, api, opts = {}) {
       iconNode: S.kind ? agentChipMark(status) : icon("bot", { size: 14, cls: "chat-chip-icon" }),
       value: [el("span", { class: "truncate" }, agentName), S.kind && status.tone !== "ok" ? el("span", { class: "chat-chip-status" }, status.label) : null],
       onClick: (event) => agentMenu(event.currentTarget) });
-    const folder = folderChip({ workdir: S.workdir, context: gatewayCtx() ? S.context : null, runnerName: deviceName(), targetName: targetName(S.context.device) });
-    const dir = chip({ name: folder.title, cls: `chat-chip-dir ${folder.gateway ? "via" : S.workdir ? "" : "no-dir"} ${folder.gateway && contextProblem() ? "warn" : ""}`,
+    // a session whose folder is gone and no new one picked: the chip names the missing folder, not a leftover one
+    const goneDir = S.session?.cwd_missing && !S.rid && !S.relocateTo ? S.session.cwd || "" : "";
+    const folder = goneDir ? { value: `${folderBase(shortPath(goneDir)) || goneDir}（已不存在）`, device: "", gateway: false, title: `目录：${goneDir}（已不存在，点这里选新目录）` }
+      : folderChip({ workdir: S.workdir, context: gatewayCtx() ? S.context : null, runnerName: deviceName(), targetName: targetName(S.context.device) });
+    const dir = chip({ name: folder.title, cls: `chat-chip-dir ${folder.gateway ? "via" : goneDir ? "warn" : S.workdir ? "" : "no-dir"} ${folder.gateway && contextProblem() ? "warn" : ""}`,
       value: folder.gateway ? [el("span", { class: "truncate chat-chip-folder" }, folder.value), el("span", { class: "truncate chat-chip-on" }, `· ${folder.device}`)] : folder.value,
       iconNode: xicon(folder.gateway ? "network" : "folder", { size: 14, cls: "chat-chip-icon" }), onClick: (event) => dirMenu(event.currentTarget) });
     const perm = chip({ name: `权限：${permLabel()}`, value: permShort(), cls: `chat-chip-perm ${S.permission === "full" ? "danger" : ""}`,
@@ -1382,6 +1564,12 @@ export function mountChat(container, api, opts = {}) {
   // the network: a folder there makes the run work on it through the gateway (§1 mode gateway), one on the run
   // device works directly.
   function useDirect(path) {
+    // a session whose folder is gone: the 目录 chip is where the user picks the new folder (§19) -- the same as
+    // 选择新目录续接 where the CLI can move; elsewhere the pick starts a new chat there (the session cannot continue)
+    if (S.session?.cwd_missing && !S.rid) {
+      if (canRelocate(S.session.kind)) S.relocateTo = path;
+      else newChat();
+    }
     S.workdir = path;
     S.context = directContext();
     persist(); renderBar(); renderComposer(); renderWelcome();
@@ -1666,6 +1854,25 @@ export function mountChat(container, api, opts = {}) {
       el("p", { class: "chat-welcome-foot" }, "左侧会列出这台设备上已有的会话，包括你在终端里和 CLI 聊过的；点一个就能接着聊。")));
   }
 
+  /** A session whose folder is gone, continued in another folder (§19): Codex and Claude Code keep the same session
+   *  there (Claude's transcript is copied into the new folder's project directory, the original stays as it was). */
+  function pickRelocation() {
+    const s = S.session;
+    if (!s) return;
+    browseDirs({
+      title: "选择续接用的目录", initial: S.relocateTo || null,
+      where: `会话原来的目录 ${shortPath(s.cwd)} 在 ${deviceName()} 上已不存在。选一个目录，${kindShort(s.kind, agentInfo(s.kind))} 会在那里接着这个会话聊（同一个会话，原记录保持不变）。`,
+      onPick: (path) => {
+        if (S.session !== s) return;
+        S.relocateTo = path;
+        S.workdir = path;
+        if (gatewayCtx()) { /* the CLI's own folder on the run device moves; the gateway target stays */ } else S.context = directContext();
+        persist(); renderBar(); renderComposer(); renderWelcome();
+        input.focus();
+      },
+    });
+  }
+
   function blockedReason() {
     if (S.deviceError) return { text: S.device === undefined ? "没有可用的设备" : `${deviceName()} 暂时不可用`, action: null };
     if (S.loading) return { text: "正在连接设备…", action: null };
@@ -1678,8 +1885,12 @@ export function mountChat(container, api, opts = {}) {
     if (status.state === "login" && isApiKind(S.kind)) return { text: `${kindLabel(S.kind, info)} 的服务商还没有设置密钥`, action: { label: "设置密钥", icon: "key-round", onClick: () => apiSettings() } };
     if (status.state === "login") return { text: reason, action: { label: "在终端登录", icon: "terminal", onClick: () => login(S.kind) } };
     if (reason) return { text: reason, action: null };
-    if (S.session?.cwd_missing && !S.rid) {
-      return { text: "这个会话的目录已不存在，只能查看记录", action: { label: "在其他目录新开对话", icon: "folder-open", onClick: () => { newChat(); browseDirs(); } } };
+    if (S.session?.cwd_missing && !S.rid && !S.relocateTo) {
+      const fresh = { label: "在其他目录新开对话", icon: "folder-open", onClick: () => { newChat(); browseDirs(); } };
+      if (canRelocate(S.session.kind)) {
+        return { text: `这个会话原来的目录 ${shortPath(S.session.cwd)} 已不存在`, action: { label: "选择新目录续接", icon: "folder-open", onClick: () => pickRelocation() }, alt: { ...fresh, icon: "square-pen" } };
+      }
+      return { text: `这个会话的目录已不存在；${kindShort(S.session.kind, agentInfo(S.session.kind))} 的会话和原目录绑定，只能查看记录`, action: fresh };
     }
     const problem = contextProblem();
     if (problem) return { text: problem, action: { label: `改用${deviceName()}上的目录`, icon: "folder-open", onClick: () => { S.context = directContext(); persist(); renderBar(); renderComposer(); renderWelcome(); } } };
@@ -1697,17 +1908,23 @@ export function mountChat(container, api, opts = {}) {
     input.placeholder = running ? `${name} 正在工作，可以先写下一条…` : `给 ${name} 发消息${keys}`;
     input.title = "Enter 发送 · Shift+Enter 换行";
     stopBtn.hidden = !running;
-    sendBtn.disabled = (!!blocked && !S.rid) || running || !input.value.trim();
-    sendBtn.title = running ? "等这一轮结束后发送" : "发送（Enter）";
+    const atts = liveAtts();
+    attachBtn.hidden = !canAttach();
+    attachBtn.disabled = !!blocked && !S.rid;
+    sendBtn.disabled = (!!blocked && !S.rid) || running || (!input.value.trim() && !atts.length) || atts.some((item) => item.state !== "ok");
+    sendBtn.title = atts.some((item) => item.state === "up") ? "附件还在上传" : running ? "等这一轮结束后发送" : "发送（Enter）";
     composer.classList.toggle("blocked", !!blocked && !S.rid);
     renderTitle();
     // One small line above the input, only for state that matters now (the permission shows in its chip).
     if (blocked && !S.rid) {
       mount(composerNote, el("span", { class: "chat-note-warn" }, icon("info", { size: 14 }), blocked.text),
-        blocked.action ? el("button", { class: "btn btn-sm", type: "button", onclick: blocked.action.onClick }, icon(blocked.action.icon, { size: 13 }), blocked.action.label) : null);
+        blocked.action ? el("button", { class: "btn btn-sm", type: "button", onclick: blocked.action.onClick }, xicon(blocked.action.icon, { size: 13 }), blocked.action.label) : null,
+        blocked.alt ? el("button", { class: "btn btn-sm btn-ghost", type: "button", onclick: blocked.alt.onClick }, xicon(blocked.alt.icon, { size: 13 }), blocked.alt.label) : null);
     } else {
       mount(composerNote,
-        S.session && !S.rid ? el("span", { class: "chat-note-resume" }, canResume(S.session.kind)
+        S.session && !S.rid && S.relocateTo ? el("span", { class: "chat-note-resume" }, `将在 ${shortPath(S.relocateTo)} 续接这个会话（原目录已不存在，原记录保持不变）`,
+          el("button", { class: "btn btn-ghost btn-sm", type: "button", onclick: () => pickRelocation() }, "换一个")) : null,
+        S.session && !S.rid && !S.relocateTo ? el("span", { class: "chat-note-resume" }, canResume(S.session.kind)
           ? "将续接这个会话" : `${kindShort(S.session.kind, agentInfo(S.session.kind))} 不支持续接，发消息会开一个新对话`) : null,
         gatewayCtx() && nexusMcpNote(agentInfo())
           ? el("span", { class: "chat-note-warn", title: nexusMcpNote(agentInfo()).title },
@@ -1725,9 +1942,325 @@ export function mountChat(container, api, opts = {}) {
   let lastModelLine = null;     // the model a "模型：X" line last named (said once per change)
   let turnUsage = null;         // the last live usage event's `turn`, for the "完成 · 输入 … 输出 …" line
   let apiBack = false;          // left for Agent 设置 → API (设置密钥)
+  // Windowing: at most DOM_KEEP blocks stay in the document; older ones are detached into `older` (newest last)
+  // and come back 200 at a time through the "显示更早的内容" button. Past OLDER_KEEP they are dropped for good.
+  // While the user reads above (not stuck to the bottom, or after "显示更早"), at most DOM_HARD blocks: past it the
+  // blocks well above the view are detached, and when none are, new blocks wait in `newer` (entries, no DOM) behind
+  // the "有 N 条新内容" button until the user is back at the bottom -- the document never grows without bound.
+  const DOM_KEEP = 240, DOM_SLACK = 60, OLDER_KEEP = 4000, PAGE = 200, DOM_HARD = DOM_KEEP + PAGE * 2;
+  const older = [];             // detached entries ({node, key?}), oldest first (by entry.n)
+  const newer = [];             // live entries not built yet while the user reads above, oldest first
+  let entrySeq = 0;             // entry.n: the order blocks belong in (a block kept in place sorts back by it)
+  let droppedOlder = 0;
+  const entryOf = new WeakMap(); // node -> entry (keyed updates of a detached block replace entry.node)
+  let waitingCount = 0;         // pending approvals + open asks (setWorking no longer scans every block)
+  const earlier = el("button", { class: "btn btn-ghost btn-sm chat-earlier", type: "button", hidden: true, onclick: () => showEarlier() });
+
+  // ------------------------------------------------ §17: paths and images named in messages
+  // A path becomes a link only once the device where it lives says it is a file (agent_file_stat). Lookups are
+  // batched (one call per device and folder, at most 200 paths) for what is on or near the screen, and cached.
+  const STAT_CACHE_MAX = 2000, STAT_BATCH = 200;
+  const IMAGE_MAX = 10 * 1024 * 1024, IMAGE_CACHE_MAX = 64 * 1024 * 1024, DOWNLOAD_MAX = 256 * 1024 * 1024;
+  const CHUNK = 768 * 1024;                 // a read's length (under the ops' 1 MiB, a multiple of 3)
+  const statCache = new Map();              // device \0 folder \0 raw -> the stat (Map order = LRU)
+  const legacyFiles = new Set();            // devices without agent_file_stat (an older AgentHub): files/1 fallback
+  const imageCache = new Map();             // device \0 path \0 mtime -> {url, size}
+  let imageBytes = 0, scanTimer = null;
+  const pathRef = new WeakMap();            // span -> {raw, line, target, image?, alt?}
+  const devKey = (d) => (d === null || d === undefined ? "" : String(d));
+  const statKey = (target, raw) => `${devKey(target.device)}\u0000${target.base || ""}\u0000${raw}`;
+  const fileCall = (device, op, params) => callOp(api, op, params, device ?? null);
+
+  /** Which device and folder a path in a message is resolved against (the folder the message was shown with). */
+  function fileTarget() {
+    // gateway mode: the context device's folder first; the run device's own files (its tmp area) next
+    if (gatewayCtx()) return { device: S.context.device, base: S.context.workdir, alt: { device: S.device, base: null } };
+    return { device: S.device, base: (S.rid ? S.workdir : S.session?.cwd || S.workdir) || null };
+  }
+  function mdCtx() {
+    const target = fileTarget();
+    return { externalImages: !!api.externalImages, file: (n, kids) => fileSpan(n, kids, target), image: (n) => imageSpan(n, target) };
+  }
+  function cacheStat(key, res) {
+    statCache.delete(key);
+    statCache.set(key, res);
+    if (statCache.size > STAT_CACHE_MAX) statCache.delete(statCache.keys().next().value);
+  }
+  function fileSpan(n, kids, target, cls = "") {
+    // a UNC / //host path is never looked up (an automatic stat would make Windows connect to that host over SMB)
+    if (isNetworkPath(n.path)) return el("span", { class: `${n.code ? "mono" : ""}${cls ? ` ${cls}` : ""}`.trim(), title: n.path }, kids || n.text || n.path);
+    const span = el("span", { class: `chat-path${n.code ? " mono" : ""}${cls ? ` ${cls}` : ""}`, title: n.path }, kids || n.text || n.path);
+    pathRef.set(span, { raw: n.path, line: n.line || null, target });
+    const hit = statCache.get(statKey(target, n.path));
+    if (hit) linkPath(span, hit); else wantScan();
+    return span;
+  }
+  function imageSpan(n, target) {
+    if (isNetworkPath(n.path)) return el("span", { class: "chat-img-wrap", title: n.path }, icon("image", { size: 14 }), el("span", { class: "truncate" }, n.alt || n.path));
+    const box = el("span", { class: "chat-img-wrap", title: n.path }, icon("image", { size: 14 }), el("span", { class: "truncate" }, n.alt || n.path));
+    pathRef.set(box, { raw: n.path, line: null, target, image: true, alt: n.alt || "" });
+    const hit = statCache.get(statKey(target, n.path));
+    if (hit) inlineImage(box, hit); else wantScan();
+    return box;
+  }
+  function wantScan() {
+    if (scanTimer) return;
+    scanTimer = setTimeout(() => { scanTimer = null; scanPaths(); }, 400);
+  }
+  scroller.addEventListener("scroll", () => wantScan(), { passive: true });
+
+  /** Looks up the not yet checked paths on or near the screen (never in a text that is still streaming). */
+  function scanPaths() {
+    if (!stream.isConnected || stream.hidden) return;
+    const view = scroller.getBoundingClientRect();
+    if (!view.height) return;
+    const lo = view.top - view.height, hi = view.bottom + view.height;
+    const groups = new Map();
+    for (const node of stream.querySelectorAll(".chat-path:not([data-s]), .chat-img-wrap:not([data-s])")) {
+      if (node.closest("[data-tail]")) continue;
+      const ref = pathRef.get(node);
+      if (!ref || isNetworkPath(ref.raw)) { node.dataset.s = "0"; continue; }
+      const rect = node.getBoundingClientRect();
+      if (rect.bottom < lo || rect.top > hi) continue;
+      const hit = statCache.get(statKey(ref.target, ref.raw));
+      if (hit) { applyStat(node, ref, hit); continue; }
+      node.dataset.s = "wait";
+      const gk = `${devKey(ref.target.device)}\u0000${ref.target.base || ""}`;
+      if (!groups.has(gk)) groups.set(gk, { target: ref.target, raws: new Map() });
+      const g = groups.get(gk);
+      if (!g.raws.has(ref.raw)) g.raws.set(ref.raw, []);
+      g.raws.get(ref.raw).push(node);
+    }
+    for (const g of groups.values()) {
+      const raws = Array.from(g.raws.keys());
+      for (let i = 0; i < raws.length; i += STAT_BATCH) statBatch(g.target, raws.slice(i, i + STAT_BATCH)).then((results) => {
+        for (const [raw, res] of results) for (const node of g.raws.get(raw) || []) if (node.isConnected || pathRef.has(node)) applyStat(node, pathRef.get(node), res);
+      });
+    }
+  }
+  const unsupported = (error) => ["unknown_op", "gateway_too_old", "http_404", "method_not_found"].includes(error?.code) || /不支持的操作|unknown (?:op|method)/i.test(String(error?.message || ""));
+  /** raw -> stat for one device and folder; a stat names the device it is read from (`device`). */
+  async function statBatch(target, raws) {
+    const out = new Map();
+    let files = null;
+    if (!legacyFiles.has(devKey(target.device))) {
+      try {
+        files = listOf(await fileCall(target.device, "agent_file_stat", { base: target.base, paths: raws }), "files");
+      } catch (error) {
+        if (unsupported(error)) legacyFiles.add(devKey(target.device));
+        else { for (const raw of raws) out.set(raw, { raw, exists: false, transient: true }); return out; }
+      }
+    }
+    if (!files) files = raws.map((raw) => legacyStat(raw, target));
+    const missing = [];
+    raws.forEach((raw, i) => {
+      const res = { ...(files[i] || { exists: false }), raw, device: target.device };
+      out.set(raw, res);
+      if (!res.exists && target.alt && /^(?:\/|[A-Za-z]:[\\/]|~)/.test(raw)) missing.push(raw);
+    });
+    if (missing.length) {
+      const alt = await statBatch({ ...target.alt, alt: null }, missing);
+      for (const [raw, res] of alt) if (res.exists) out.set(raw, res);
+    }
+    for (const [raw, res] of out) if (!res.transient) cacheStat(statKey(target, raw), res);
+    return out;
+  }
+  /** An older device: no existence check; absolute paths (and relative ones joined here) read through files/1. */
+  function legacyStat(raw, target) {
+    if (!api.fileBytes || target.device === null || target.device === undefined) return { exists: false };
+    if (isNetworkPath(raw) || isNetworkPath(target.base)) return { exists: false, code: "network" };
+    let path = raw;
+    if (!/^(?:\/|[A-Za-z]:[\\/])/.test(raw)) {
+      if (raw.startsWith("~") || !target.base) return { exists: false };
+      const sep = target.base.includes("\\") && !target.base.includes("/") ? "\\" : "/";
+      path = `${target.base.replace(/[\\/]+$/, "")}${sep}${raw.replace(/^\.[\\/]/, "")}`;
+    }
+    const ext = (path.match(/\.([A-Za-z0-9]+)$/) || [])[1]?.toLowerCase() || "";
+    const kind = /^(?:png|jpe?g|gif|webp|bmp|svg|ico|avif)$/.test(ext) ? "image"
+      : /^(?:md|markdown|txt|log|json|jsonl|ya?ml|toml|ini|cfg|conf|csv|tsv|xml|html?|css|scss|js|mjs|cjs|jsx|ts|tsx|vue|py|rb|go|rs|java|kt|swift|c|cc|cpp|h|hpp|cs|php|sh|bash|ps1|bat|cmd|sql|lua|diff|patch)$/.test(ext) ? "text" : "binary";
+    const mime = kind === "image" ? (ext === "svg" ? "image/svg+xml" : ext === "jpg" ? "image/jpeg" : `image/${ext}`) : "application/octet-stream";
+    return { exists: true, legacy: true, path, name: path.split(/[\\/]/).pop(), kind, mime, size: null };
+  }
+  function applyStat(node, ref, res) {
+    if (!ref) return;
+    if (ref.image) inlineImage(node, res); else linkPath(node, res);
+  }
+  function linkPath(span, res) {
+    const ref = pathRef.get(span);
+    span.dataset.s = res.exists && !res.dir ? "1" : "0";
+    if (span.dataset.s !== "1") return;
+    span.classList.add("ok");
+    span.setAttribute("role", "link");
+    span.tabIndex = 0;
+    const verb = res.kind === "image" ? "查看图片" : res.kind === "text" ? "预览" : "下载";
+    span.title = `${res.path}${res.size != null ? ` · ${bytes(res.size)}` : ""} · 点击${verb}${res.legacy ? "（未核实文件是否存在）" : ""}`;
+    const open = (event) => {
+      event.preventDefault();
+      event.stopPropagation();   // a path in a tool's <summary> opens the file, not the details
+      openFile(res, ref?.line);
+    };
+    span.addEventListener("click", open);
+    span.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") open(event); });
+  }
+  function openFile(res, line) {
+    if (res.kind === "image") showImage(res);
+    else if (res.kind === "text") openPreview(res, line);
+    else download(res);
+  }
+
+  // --- reading (agent_file_read, or files/1 on an older device)
+  function b64bytes(text) {
+    const bin = atob(String(text || ""));
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i += 1) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+  async function readChunk(res, offset, length) {
+    if (res.legacy) return api.fileBytes(res.device, res.path, { offset, length });
+    const r = await fileCall(res.device, "agent_file_read", { path: res.path, mode: "bytes", offset, length });
+    return { bytes: b64bytes(r.data), size: r.size, eof: !!r.eof };
+  }
+  async function readAll(res, max, onChunk = null) {
+    const parts = [];
+    let offset = 0, size = res.size;
+    for (;;) {
+      const chunk = await readChunk(res, offset, CHUNK);
+      parts.push(chunk.bytes);
+      offset += chunk.bytes.length;
+      if (chunk.size != null) size = chunk.size;
+      onChunk?.(offset, size);
+      if (chunk.eof || !chunk.bytes.length) break;
+      if (offset > max) throw new Error(`文件太大（超过 ${bytes(max)}）`);
+    }
+    return parts;
+  }
+  const dataUrl = (parts, mime) => new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(reader.error || new Error("读取失败"));
+    reader.readAsDataURL(new Blob(parts, { type: mime }));
+  });
+  /** A device image as a data: URL (the cloud console's CSP allows data: images, not blob:), cached by bytes. */
+  async function imageUrl(res) {
+    const key = `${devKey(res.device)}\u0000${res.path}\u0000${res.mtime_ns || ""}`;
+    const hit = imageCache.get(key);
+    if (hit) return hit.url;
+    if (res.size != null && res.size > IMAGE_MAX) throw new Error(`图片太大（${bytes(res.size)}）`);
+    const parts = await readAll(res, IMAGE_MAX);
+    const mime = /^image\/(?:png|jpeg|gif|webp|bmp|svg\+xml|x-icon|avif)$/.test(res.mime || "") ? res.mime : "image/png";
+    const url = await dataUrl(parts, mime);
+    imageCache.set(key, { url, size: url.length });
+    imageBytes += url.length;
+    for (const [k, v] of imageCache) {
+      if (imageBytes <= IMAGE_CACHE_MAX || k === key) break;
+      imageCache.delete(k);
+      imageBytes -= v.size;
+    }
+    return url;
+  }
+  function inlineImage(box, res) {
+    const ref = pathRef.get(box);
+    if (!res.exists || res.dir || res.kind !== "image") {
+      box.dataset.s = "0";
+      box.classList.add("missing");
+      box.title = `${ref?.raw || ""}：${res.exists ? "不是图片" : "找不到这个文件"}`;
+      return;
+    }
+    box.dataset.s = "1";
+    if (res.size != null && res.size > IMAGE_MAX) {
+      box.replaceChildren(icon("image", { size: 14 }), el("span", { class: "truncate" }, `${ref?.alt || res.name}（${bytes(res.size)}，点击下载）`));
+      box.classList.add("ok");
+      box.addEventListener("click", () => download(res));
+      return;
+    }
+    box.classList.add("loading");
+    imageUrl(res).then((url) => {
+      const img = el("img", { class: "chat-img", alt: ref?.alt || res.name || "", title: res.path, src: url, tabindex: "0" });
+      img.addEventListener("click", () => showImage(res));
+      img.addEventListener("keydown", (event) => { if (event.key === "Enter") showImage(res); });
+      box.replaceChildren(img);
+      box.classList.remove("loading");
+      box.classList.add("shown");
+    }, (error) => {
+      box.classList.remove("loading");
+      box.classList.add("missing");
+      box.title = `${res.path}：${error.message}`;
+    });
+  }
+  function showImage(res) {
+    const body = el("div", { class: "chat-lightbox" }, el("span", { class: "spinner" }));
+    modal({ title: res.name || res.path, description: res.path, size: "lg", body,
+      actions: [{ label: "下载", icon: "download", onClick: () => { download(res); return false; } }, { label: "关闭" }] });
+    imageUrl(res).then((url) => mount(body, el("img", { src: url, alt: res.name || "" })),
+      (error) => mount(body, el("div", { class: "chat-error" }, icon("circle-alert", { size: 16 }), el("div", {}, error.message))));
+  }
+  async function openPreview(res, line) {
+    const body = el("div", { class: "chat-preview" }, el("div", { class: "chat-history-loading" }, el("span", { class: "spinner" }), "读取中…"));
+    drawer({ title: res.name || res.path, description: `${res.path}${res.size != null ? ` · ${bytes(res.size)}` : ""}`, size: "lg", body,
+      actions: [
+        { label: "复制路径", icon: "copy", onClick: () => { copy(res.path); return false; } },
+        { label: "下载", icon: "download", onClick: () => { download(res); return false; } },
+      ] });
+    try {
+      let text = "", first = 1, note = "";
+      if (res.legacy) {
+        const chunk = await readChunk(res, 0, CHUNK);
+        text = new TextDecoder("utf-8").decode(chunk.bytes);
+        if (!chunk.eof) note = `只显示开头 ${bytes(chunk.bytes.length)}`;
+      } else {
+        const r = await fileCall(res.device, "agent_file_read", { path: res.path, mode: "text", line: line || 1 });
+        text = String(r.text || "");
+        first = Number(r.first_line) || 1;
+        const count = text ? text.split("\n").length : 0;
+        if (r.truncated) note = `显示第 ${first}–${first + Math.max(0, count - 1)} 行，共 ${r.total_lines}${r.scanned_all ? "" : "+"} 行`;
+        if (r.encoding && r.encoding !== "utf-8") note = `${note ? `${note} · ` : ""}编码 ${r.encoding}`;
+      }
+      let hl = null;
+      const lines = text.split("\n").map((t, i) => {
+        const row = el("div", { class: `ln${first + i === line ? " hl" : ""}` }, el("span", { class: "no", "aria-hidden": "true" }, String(first + i)), el("span", { class: "tx" }, t || " "));
+        if (first + i === line) hl = row;
+        return row;
+      });
+      mount(body, note ? el("div", { class: "faint xs chat-preview-note" }, note) : null, el("div", { class: "chat-preview-code mono", tabindex: "0" }, lines));
+      if (hl) requestAnimationFrame(() => hl.scrollIntoView({ block: "center" }));
+    } catch (error) {
+      mount(body, el("div", { class: "chat-error" }, icon("circle-alert", { size: 16 }), el("div", {}, `读不到这个文件：${error.message}`)));
+    }
+  }
+  /** Saves a file: an attachment URL where the console has one for an older device, else the bytes as an
+   *  application/octet-stream Blob through <a download> (never opened: a blob: page would run as this origin). */
+  async function download(res) {
+    const name = res.name || String(res.path).split(/[\\/]/).pop() || "download";
+    const direct = res.legacy ? api.fileDownloadUrl?.(res.device, res.path) : null;
+    if (direct) { el("a", { href: direct, download: name }).click(); return; }
+    if (res.size != null && res.size > DOWNLOAD_MAX) { toast(`文件太大（${bytes(res.size)}），请用文件页下载`, { type: "bad" }); return; }
+    const big = res.size == null || res.size > 4 * 1024 * 1024;
+    if (big) toast(`正在下载 ${name}…`, { type: "info" });
+    try {
+      const parts = await readAll(res, DOWNLOAD_MAX);
+      const url = URL.createObjectURL(new Blob(parts, { type: "application/octet-stream" }));
+      const a = el("a", { href: url, download: name, hidden: true });
+      document.body.append(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    } catch (error) {
+      toast(error.message, { type: "bad", title: `没有下载 ${name}` });
+    }
+  }
+  function clearFileViews() {
+    clearTimeout(scanTimer);
+    scanTimer = null;
+    imageCache.clear();
+    imageBytes = 0;
+  }
 
   function clearStream() {
     blocks.clear();
+    older.length = 0; newer.length = 0; droppedOlder = 0; waitingCount = 0; bulk = null;
+    renderNewer();
+    textQueue.clear(); thinkQueue.clear(); streaming.clear();
+    clearFileViews();
     lastBlock = null;
     pendingUser.length = 0;
     notices.clear();
@@ -1736,30 +2269,216 @@ export function mountChat(container, api, opts = {}) {
     S.usage = null;
     renderUsage();
     mount(stream);
+    renderEarlier();
     setWorking(false);
     stick = true;
     jump.hidden = true;
   }
 
-  function put(key, node, ev, { at = null } = {}) {
+  // `make` is a node or a function that builds it. While a history opens (`bulk`), blocks are only recorded:
+  // endBulk() builds the newest DOM_KEEP of them, the older ones are built when "显示更早的内容" brings them back.
+  let bulk = null;
+  function build(entry) {
+    if (!entry.node) {
+      entry.node = entry.build();
+      entry.build = null;
+      entryOf.set(entry.node, entry);
+      if (entry.t) entry.node.dataset.t = entry.t;
+    }
+    return entry.node;
+  }
+  function put(key, make, ev, { at = null } = {}) {
     const existing = key ? blocks.get(key) : null;
+    if (existing && !existing.node) {   // not built yet: only what it will be built from changes
+      existing.build = typeof make === "function" ? make : () => make;
+      existing.ev = ev;
+      return existing;
+    }
+    if (!existing && (bulk || holdBack(ev))) {
+      const entry = { node: null, build: typeof make === "function" ? make : () => make, ev, key, type: ev.type, role: ev.role, t: Number(ev.t) ? String(Number(ev.t)) : "", n: ++entrySeq };
+      if (key) blocks.set(key, entry);
+      if (bulk) bulk.push(entry);
+      else { finishText(); newer.push(entry); renderNewer(); }
+      lastBlock = entry;
+      return entry;
+    }
+    const node = typeof make === "function" ? make() : make;
     if (existing) {
       keepOpen(existing.node, node);
-      existing.node.replaceWith(node);
+      if (existing.node.isConnected) existing.node.replaceWith(node);   // a detached (older) block: swapped on restore
+      if (existing.node.dataset.t) node.dataset.t = existing.node.dataset.t;
+      entryOf.set(node, existing);
       existing.node = node;
       existing.ev = ev;
       return existing;
     }
+    finishText();
     if (Number(ev.t)) node.dataset.t = String(Number(ev.t));
-    const entry = { node, ev, key, type: ev.type, role: ev.role };
+    const entry = { node, ev, key, type: ev.type, role: ev.role, t: node.dataset.t || "", n: ++entrySeq };
+    entryOf.set(node, entry);
     if (key) blocks.set(key, entry);
     if (at !== null) {
       const later = Array.from(stream.children).find((child) => Number(child.dataset.t) > at);
-      if (later) { stream.insertBefore(node, later); return entry; }
+      if (later) {
+        // sorts between its neighbours (a later trim / restore keeps it there)
+        const next = entryOf.get(later)?.n ?? entry.n, prev = entryOf.get(later.previousElementSibling)?.n ?? next - 1;
+        entry.n = (prev + next) / 2;
+        stream.insertBefore(node, later);
+        return entry;
+      }
     }
     stream.append(node);
     lastBlock = entry;
+    if (stream.childElementCount > (stick ? DOM_KEEP + DOM_SLACK : DOM_HARD)) trimStream();
     return entry;
+  }
+  const needsUser = (ev) => (ev?.type === "approval" && ev.state === "pending") || (ev?.type === "ask" && ev.state === "open");
+  /** A new live block waits in `newer` (not built) while the user reads above and the document is full. */
+  function holdBack(ev) {
+    if (stick || needsUser(ev)) return false;   // an approval / question is always shown at once
+    if (newer.length) return true;               // keep the order: once one waits, the next ones wait too
+    if (stream.childElementCount < DOM_HARD) return false;
+    trimStream();
+    return stream.childElementCount >= DOM_HARD;
+  }
+  function renderNewer() {
+    jumpLabel.textContent = newer.length ? `有 ${newer.length} 条新内容` : "最新消息";
+    if (newer.length) jump.hidden = false;
+  }
+  /** The held-back blocks come in (the user is back at the bottom); more than DOM_KEEP: the rest go to `older`. */
+  function flushNewer() {
+    const list = newer.splice(0);
+    renderNewer();
+    if (!list.length) return;
+    if (list.length >= DOM_KEEP) {
+      older.push(...detach(Array.from(stream.children)), ...list.slice(0, list.length - DOM_KEEP));
+      dropOlder();
+      stream.append(...list.slice(list.length - DOM_KEEP).map(build));
+    } else {
+      // a block kept in place at the end (an approval shown at once) that belongs after some of these sorts in
+      const first = list[0].n ?? 0, kept = [];
+      for (let child = stream.lastElementChild; child; child = child.previousElementSibling) {
+        const n = entryOf.get(child)?.n;
+        if (n === undefined || n <= first) break;
+        kept.unshift(entryOf.get(child));
+      }
+      stream.append(...[...list, ...kept].sort((x, y) => (x.n ?? 0) - (y.n ?? 0)).map(build));
+    }
+    stick = true;
+    if (stream.childElementCount > DOM_KEEP + DOM_SLACK) trimStream();
+    renderEarlier();
+  }
+
+  /** Detaches `nodes` (a pending approval / open ask stays); returns their entries, oldest first. */
+  function detach(nodes) {
+    const moved = [];
+    for (const node of nodes) {
+      const entry = entryOf.get(node) || { node, n: 0 };
+      if (needsUser(entry.ev)) continue;
+      node.remove();
+      // a block that can be rebuilt from its event leaves only the event in memory (a detached node keeps its
+      // whole subtree -- 8 KB tool outputs -- alive); "显示更早的内容" builds it again
+      const make = entry.ev && remake(entry);
+      if (make) { entryOf.delete(node); entry.node = null; entry.build = make; entry.md = null; streaming.delete(entry); }
+      moved.push(entry);
+    }
+    return moved;
+  }
+  /** Adds detached entries to `older` in their order: a block kept in place earlier (an approval that was
+   *  pending) sorts back between the blocks around it instead of after newer ones. */
+  function pushOlder(moved) {
+    for (const entry of moved) {
+      const n = entry.n ?? 0;
+      if (!older.length || (older[older.length - 1].n ?? 0) <= n) { older.push(entry); continue; }
+      let lo = 0, hi = older.length;
+      while (lo < hi) { const mid = (lo + hi) >> 1; if ((older[mid].n ?? 0) <= n) lo = mid + 1; else hi = mid; }
+      older.splice(lo, 0, entry);
+    }
+  }
+  // Stuck to the bottom: keeps the newest DOM_KEEP blocks. Reading above: past DOM_HARD, detaches only the blocks
+  // more than a screen above the view, keeping what the user reads where it is.
+  function trimStream() {
+    const kids = Array.from(stream.children);
+    let cut = kids.length - DOM_KEEP;
+    if (cut <= 0) return;
+    let anchor = null, anchorTop = 0;
+    if (!stick) {
+      const view = scroller.getBoundingClientRect();
+      const line = view.top - view.height;
+      let n = 0;
+      while (n < cut && kids[n].getBoundingClientRect().bottom < line) n += 1;
+      cut = n;
+      if (!cut) return;
+      anchor = kids[cut];
+      anchorTop = anchor ? anchor.getBoundingClientRect().top : 0;
+    }
+    pushOlder(detach(kids.slice(0, cut)));
+    if (anchor && anchor.isConnected) scroller.scrollTop += anchor.getBoundingClientRect().top - anchorTop;
+    // removing content above the view moves scrollTop up (scroll anchoring): that is not the user scrolling away
+    autoTop = scroller.scrollTop;
+    dropOlder();
+    renderEarlier();
+  }
+  function remake(entry) {
+    const ev = entry.ev;
+    switch (ev.type) {
+      case "user": return () => userNode(ev.text, ev.attachments);
+      case "message": return ev.role === "user" ? () => userNode(ev.text) : () => assistantNode(ev.text);
+      case "thinking": return () => thinkingNode(ev.text, false);
+      case "tool": return () => toolNode(ev);
+      case "file_change": return () => fileNode(ev);
+      default: return null;
+    }
+  }
+  function dropOlder() {
+    if (older.length <= OLDER_KEEP) return;
+    const gone = older.splice(0, older.length - OLDER_KEEP);
+    droppedOlder += gone.length;
+    for (const e of gone) if (e.key && blocks.get(e.key) === e) blocks.delete(e.key);
+  }
+  function beginBulk() { bulk = []; }
+  function endBulk() {
+    const list = bulk || [];
+    bulk = null;
+    const cut = Math.max(0, list.length - DOM_KEEP);
+    pushOlder(list.slice(0, cut));
+    dropOlder();
+    stream.append(...list.slice(cut).map(build));
+    renderEarlier();
+  }
+  function renderEarlier() {
+    earlier.hidden = !older.length && !droppedOlder;
+    earlier.textContent = older.length ? `显示更早的内容（还有 ${older.length} 条）` : `更早的 ${droppedOlder} 条已不在这里显示，可以重新打开会话查看`;
+    earlier.disabled = !older.length;
+    if (!earlier.hidden && earlier.parentNode !== scroller) stream.before(earlier);
+  }
+  function showEarlier() {
+    if (!older.length) return;
+    const page = older.splice(Math.max(0, older.length - PAGE));
+    const before = scroller.scrollHeight - scroller.scrollTop;
+    // blocks kept in place at the top (an approval that was pending) that belong after some of this page sort in
+    const last = page[page.length - 1].n ?? 0;
+    const kept = [];
+    for (const child of stream.children) { const n = entryOf.get(child)?.n; if (n === undefined || n >= last) break; kept.push(entryOf.get(child)); }
+    const merged = [...page, ...kept].sort((a, b) => (a.n ?? 0) - (b.n ?? 0));
+    stream.prepend(...merged.map(build));
+    scroller.scrollTop = scroller.scrollHeight - before;   // keep the view where it was
+    stick = false;
+    // the document stays bounded: the newest blocks below the view go back behind the "有 N 条新内容" button
+    // (as entries; built again when the user returns to the bottom)
+    if (stream.childElementCount > DOM_HARD) {
+      const kids = Array.from(stream.children);
+      const view = scroller.getBoundingClientRect();
+      const tail = [];
+      for (let i = kids.length - 1; i >= 0 && kids.length - tail.length > DOM_HARD; i -= 1) {
+        if (kids[i].getBoundingClientRect().top < view.bottom + view.height) break;
+        tail.unshift(kids[i]);
+      }
+      const back = detach(tail);
+      newer.unshift(...back);
+      renderNewer();
+    }
+    renderEarlier();
   }
 
   function keepOpen(oldNode, newNode) {
@@ -1774,7 +2493,7 @@ export function mountChat(container, api, opts = {}) {
       case "user": {
         const index = pendingUser.indexOf(String(ev.text || "").trim());
         if (index >= 0) { pendingUser.splice(index, 1); return; }
-        put(null, userNode(ev.text), ev);
+        put(null, () => userNode(ev.text, ev.attachments), ev);
         break;
       }
       case "message": {
@@ -1789,7 +2508,7 @@ export function mountChat(container, api, opts = {}) {
           entry.ev = { ...entry.ev, text };
           scheduleText(entry);
         } else {
-          put(ev.id && !history ? `m:${ev.id}` : `m${seqKey++}`, assistantNode(ev.text), { ...ev });
+          put(ev.id && !history ? `m:${ev.id}` : `m${seqKey++}`, () => assistantNode(ev.text), { ...ev });
         }
         break;
       }
@@ -1799,36 +2518,40 @@ export function mountChat(container, api, opts = {}) {
         const entry = own || tail;
         if (entry) {
           entry.ev = { ...entry.ev, text: own && !ev.delta && !ev.partial ? ev.text : `${entry.ev.text || ""}${ev.text || ""}` };
-          const fresh = thinkingNode(entry.ev.text, !history);
-          keepOpen(entry.node, fresh);
-          entry.node.replaceWith(fresh);
-          entry.node = fresh;
-        } else put(ev.id && !history ? `k:${ev.id}` : `k${seqKey++}`, thinkingNode(ev.text, !history), ev);
+          scheduleThink(entry, !history);
+        } else put(ev.id && !history ? `k:${ev.id}` : `k${seqKey++}`, () => thinkingNode(ev.text, !history), ev);
         break;
       }
       case "tool": {
         const key = `tool:${ev.id || seqKey++}`;
         const prev = blocks.get(key)?.ev || {};
         const merged = { ...prev, ...ev };
-        put(key, toolNode(merged), merged);
+        put(key, () => toolNode(merged), merged);
         break;
       }
-      case "file_change": put(`fc${seqKey++}`, fileNode(ev), ev); break;
+      case "file_change": put(`fc${seqKey++}`, () => fileNode(ev), ev); break;
       case "approval": {
         const key = `ap:${ev.id}`;
         const merged = { ...(blocks.get(key)?.ev || {}), ...ev };
-        put(key, approvalNode(merged), merged);
+        put(key, () => approvalNode(merged), merged);
         if (merged.state === "pending" && !history) live.textContent = `需要你的批准：${merged.tool || ""} ${merged.summary || ""}`;
         break;
       }
       case "ask": {
         const ask = normalizeAsk(ev);
         const key = `ask:${ask.ask_id}`;
-        const merged = { ...(blocks.get(key)?.ev || {}), ...ask };
-        put(key, askNode(merged), merged, { at: blocks.has(key) ? null : t });
+        const prev = blocks.get(key)?.ev;
+        const merged = { ...(prev || {}), ...ask };
+        if (prev && sameEvent(prev, merged)) return;   // the mailbox poll repeats it every few seconds
+        put(key, askNode(merged), merged, { at: prev ? null : t });
         break;
       }
-      case "mail": put(`mail:${ev.message_id || seqKey++}`, mailNode(ev), ev, { at: blocks.has(`mail:${ev.message_id}`) ? null : t }); break;
+      case "mail": {
+        const prev = ev.message_id ? blocks.get(`mail:${ev.message_id}`)?.ev : null;
+        if (prev && sameEvent(prev, ev)) return;
+        put(`mail:${ev.message_id || seqKey++}`, mailNode(ev), ev, { at: prev ? null : t });
+        break;
+      }
       case "usage": {
         // the ring shows a real context report only (a turn's tokens alone are not the context's size, §16.3)
         if (ev.context && typeof ev.context === "object" && ev.context.used != null) { S.usage = { ...ev.context }; renderUsage(); }
@@ -1855,7 +2578,8 @@ export function mountChat(container, api, opts = {}) {
         if (["done", "failed", "stopped"].includes(ev.state)) {
           const usage = ev.usage || turnUsage;
           turnUsage = null;
-          if (usage || ev.state !== "done") put(null, turnEndNode({ ...ev, usage }), ev);
+          if (usage || ev.state !== "done") put(null, () => turnEndNode({ ...ev, usage }), ev);
+          finishText();
         }
         break;
       }
@@ -1874,9 +2598,32 @@ export function mountChat(container, api, opts = {}) {
       }
       default: break;
     }
-    if (ev.type === "approval" || ev.type === "ask") setWorking(["starting", "running"].includes(S.runState));
-    renderWelcome();
+    if (ev.type === "approval" || ev.type === "ask") { countWaiting(); setWorking(["starting", "running"].includes(S.runState)); }
+    if (!welcome.hidden || stream.hidden) renderWelcome();
     queueScroll();
+  }
+
+  function sameEvent(a, b) { try { return JSON.stringify(a) === JSON.stringify(b); } catch { return false; } }
+  function countWaiting() {
+    waitingCount = 0;
+    for (const b of blocks.values()) if ((b.ev.type === "approval" && b.ev.state === "pending") || (b.ev.type === "ask" && b.ev.state === "open")) waitingCount += 1;
+  }
+  const thinkQueue = new Map();
+  function scheduleThink(entry, live) {
+    thinkQueue.set(entry, live);
+    if (thinkQueue.size > 1) return;
+    requestAnimationFrame(() => {
+      for (const [item, isLive] of thinkQueue) {
+        if (!item.node) { item.build = () => thinkingNode(item.ev.text, isLive); continue; }   // not built yet
+        const fresh = thinkingNode(item.ev.text, isLive);
+        keepOpen(item.node, fresh);
+        if (item.node.isConnected) item.node.replaceWith(fresh);
+        entryOf.set(fresh, item);
+        item.node = fresh;
+      }
+      thinkQueue.clear();
+      queueScroll();
+    });
   }
 
   // assistant text re-renders at most once per frame while it streams
@@ -1885,27 +2632,94 @@ export function mountChat(container, api, opts = {}) {
     textQueue.add(entry);
     if (textQueue.size > 1) return;
     requestAnimationFrame(() => {
-      for (const item of textQueue) {
-        const fresh = assistantNode(item.ev.text);
-        item.node.replaceWith(fresh);
-        item.node = fresh;
-      }
+      for (const item of textQueue) streamText(item);
       textQueue.clear();
       queueScroll();
     });
   }
 
-  function userNode(text) {
-    return el("div", { class: "chat-user" }, el("div", { class: "chat-bubble" }, String(text || "")));
+  // Streaming markdown: the text up to its last stable cut (markdown.js stableCut: a blank line outside a code
+  // fence before a new top-level block) never changes how it renders, so it is rendered once and kept; only the
+  // open tail re-renders per frame. Its nodes carry data-tail: paths in them are not looked up until it is final.
+  const streaming = new Set();
+  function streamText(item) {
+    if (!item.node) { item.build = () => assistantNode(item.ev.text); item.md = null; return; }   // not built yet
+    const text = String(item.ev.text || "");
+    let md = item.md;
+    if (!md || !text.startsWith(md.prefix)) {
+      md = item.md = { prefix: "", root: el("div", { class: "chat-md" }), tail: [], ctx: mdCtx() };
+      const fresh = el("div", { class: "chat-assistant" }, md.root);
+      if (item.node.isConnected) item.node.replaceWith(fresh);
+      entryOf.set(fresh, item);
+      item.node = fresh;
+    }
+    for (const n of md.tail) n.remove();
+    const cut = stableCut(text, md.prefix.length);
+    if (cut > md.prefix.length) {
+      md.root.append(...renderTree(parseBlocks(text.slice(md.prefix.length, cut)), md.ctx));
+      md.prefix = text.slice(0, cut);
+    }
+    md.tail = renderTree(parseBlocks(text.slice(cut)), md.ctx);
+    for (const n of md.tail) if (n.nodeType === 1) n.dataset.tail = "1";
+    md.root.append(...md.tail);
+    streaming.add(item);
+  }
+  /** The streaming texts are final (another block came, or the turn ended): their paths may be looked up now. */
+  function finishText() {
+    if (!streaming.size) return;
+    for (const item of streaming) for (const n of item.md?.tail || []) if (n.nodeType === 1) delete n.dataset.tail;
+    streaming.clear();
+    wantScan();
+  }
+
+  function userNode(text, files = null) {
+    const list = Array.isArray(files) && files.length ? el("div", { class: "chat-msg-atts" }, files.map((f) => attChip(f, S.device))) : null;
+    return el("div", { class: "chat-user" }, el("div", { class: "chat-bubble" }, String(text || "").trim() ? renderMarkdown(text, mdCtx()) : null, list));
+  }
+  /** A sent attachment (§18): an image shows as a thumbnail (click: enlarge, with download), any other file opens
+   *  (text: preview) or downloads; all read from the run device through agent_file_read. */
+  function attChip(f, device) {
+    const name = String(f?.name || String(f?.path || "").split(/[\\/]/).pop() || "file");
+    const mime = String(f?.mime || "");
+    const image = /^image\/(png|jpeg|gif|webp|bmp)$/.test(mime) || /\.(png|jpe?g|gif|webp|bmp)$/i.test(name);
+    const text = !image && (/^text\//.test(mime) || TEXT_NAME.test(name));
+    const res = { exists: true, device, path: String(f?.path || ""), name, size: Number.isFinite(f?.size) ? f.size : null,
+      kind: image ? "image" : text ? "text" : "binary", mime: mime || (image ? "image/png" : "application/octet-stream") };
+    const size = res.size != null ? bytes(res.size) : "";
+    if (image) {
+      const box = el("button", { class: "chat-msg-att img", type: "button", title: `${name}${size ? ` · ${size}` : ""} · 点击查看`, onclick: () => showImage(res) },
+        icon("image", { size: 14 }), el("span", { class: "truncate" }, name));
+      if (res.size == null || res.size <= IMAGE_MAX) setTimeout(() => {
+        if (!box.isConnected) return;
+        imageUrl(res).then((url) => box.replaceChildren(el("img", { src: url, alt: name })), () => box.classList.add("missing"));
+      }, 0);
+      return box;
+    }
+    return el("span", { class: "chat-msg-att" },
+      el("button", { class: "chat-msg-att-open", type: "button", title: `${res.path}${size ? ` · ${size}` : ""} · 点击${text ? "预览" : "下载"}`, onclick: () => openFile(res, 1) },
+        xicon("file", { size: 14 }), el("span", { class: "truncate" }, name), size ? el("span", { class: "faint xs" }, size) : null),
+      // every attachment has a visible download control (a binary one's chip also downloads on click)
+      el("button", { class: "chat-msg-att-dl", type: "button", "aria-label": `下载 ${name}`, title: "下载", onclick: () => download(res) }, icon("download", { size: 13 })));
   }
   function assistantNode(text) {
-    return el("div", { class: "chat-assistant" }, renderMarkdown(text));
+    return el("div", { class: "chat-assistant" }, renderMarkdown(text, mdCtx()));
+  }
+  /** A <details> whose body is built the first time it opens (most never are; tool output dominates memory). */
+  function lazyDetails(details, makeBody) {
+    if (!makeBody) return details;
+    let built = false;
+    details.addEventListener("toggle", () => {
+      if (!details.open || built) return;
+      built = true;
+      details.append(makeBody());
+    });
+    return details;
   }
   function thinkingNode(text, live) {
     const first = String(text || "").trim().split("\n")[0] || "";
-    return el("details", { class: "chat-think" },
-      el("summary", {}, xicon("lightbulb", { size: 14 }), el("span", { class: "chat-think-label" }, "思考过程"), el("span", { class: "chat-think-peek truncate" }, first), icon("chevron-right", { size: 14, cls: "chat-caret" })),
-      el("div", { class: "chat-think-body" }, String(text || "")));
+    return lazyDetails(el("details", { class: "chat-think" },
+      el("summary", {}, xicon("lightbulb", { size: 14 }), el("span", { class: "chat-think-label" }, "思考过程"), el("span", { class: "chat-think-peek truncate" }, first), icon("chevron-right", { size: 14, cls: "chat-caret" }))),
+    () => el("div", { class: "chat-think-body" }, String(text || "")));
   }
   function statusIcon(status) {
     if (status === "running" || status === "pending" || status === "in_progress") return el("span", { class: "spinner chat-tool-spin", "aria-label": "运行中" });
@@ -1916,26 +2730,35 @@ export function mountChat(container, api, opts = {}) {
     const inputText = formatInput(ev.input);
     const output = String(ev.output ?? "");
     const hasBody = !!(inputText || output);
+    const title = ev.title || (typeof ev.input?.command === "string" ? ev.input.command : "");
+    // the file a tool read or wrote (Read/Edit/Write: input.file_path; others: input.path) can be opened
+    const file = [ev.input?.file_path, ev.input?.path].find((p) => typeof p === "string" && p.trim() && p.length <= 1024) || "";
+    const titleNode = file && (!title || title === file || title.endsWith(file))
+      ? fileSpan({ path: file.trim(), text: title || file, code: false, line: null }, null, fileTarget(), "chat-tool-title truncate")
+      : el("span", { class: "chat-tool-title truncate" }, title);
     const summary = el("summary", {}, statusIcon(ev.status),
       el("span", { class: "chat-tool-name" }, ev.name || "工具"),
-      el("span", { class: "chat-tool-title truncate" }, ev.title || (typeof ev.input?.command === "string" ? ev.input.command : "")),
+      titleNode,
       ev.status === "error" ? el("span", { class: "chat-tool-flag" }, "失败") : null,
       hasBody ? icon("chevron-right", { size: 14, cls: "chat-caret" }) : null);
-    return el("details", { class: `chat-tool ${hasBody ? "" : "no-body"}`, dataset: { status: ev.status || "ok" } }, summary,
-      hasBody ? el("div", { class: "chat-tool-body" },
+    return lazyDetails(el("details", { class: `chat-tool ${hasBody ? "" : "no-body"}`, dataset: { status: ev.status || "ok" } }, summary),
+      hasBody ? () => el("div", { class: "chat-tool-body" },
         inputText && inputText !== ev.title ? el("pre", { class: "chat-tool-input" }, inputText) : null,
         output ? el("pre", { class: "chat-tool-output" }, output) : el("div", { class: "faint xs" }, ev.status === "running" ? "等待输出…" : "没有输出")) : null);
   }
   function fileNode(ev) {
     const { add, del } = diffStats(ev.diff);
     const kind = { add: ["新增", "ok"], delete: ["删除", "bad"], edit: ["修改", "info"] }[ev.kind] || ["修改", "info"];
-    return el("details", { class: "chat-tool chat-file" },
+    const path = typeof ev.path === "string" ? ev.path : "";
+    return lazyDetails(el("details", { class: "chat-tool chat-file" },
       el("summary", {}, xicon("file-diff", { size: 15, cls: "faint" }),
         el("span", { class: `chat-file-kind tone-${kind[1]}` }, kind[0]),
-        el("span", { class: "chat-tool-title mono truncate", title: ev.path }, ev.path || ""),
+        path && ev.kind !== "delete" && path.length <= 1024
+          ? fileSpan({ path: path.trim(), text: path, code: true, line: null }, null, fileTarget(), "chat-tool-title truncate")
+          : el("span", { class: "chat-tool-title mono truncate", title: path }, path),
         ev.diff ? el("span", { class: "chat-file-stat" }, el("span", { class: "add" }, `+${add}`), el("span", { class: "del" }, `−${del}`)) : null,
-        ev.diff ? el("span", { class: "chat-file-toggle" }, "查看改动", icon("chevron-right", { size: 14, cls: "chat-caret" })) : null),
-      ev.diff ? el("div", { class: "chat-tool-body" }, diffView(ev.diff)) : null);
+        ev.diff ? el("span", { class: "chat-file-toggle" }, "查看改动", icon("chevron-right", { size: 14, cls: "chat-caret" })) : null)),
+    ev.diff ? () => el("div", { class: "chat-tool-body" }, diffView(ev.diff)) : null);
   }
   function approvalNode(ev) {
     const state = ev.state || "pending";
@@ -1984,7 +2807,7 @@ export function mountChat(container, api, opts = {}) {
       el("div", { class: "chat-ask-head" }, icon("circle-question-mark", { size: 16 }), el("span", { class: "chat-ask-kicker" }, "Agent 在问你"),
         ask.from ? el("span", { class: "chat-ask-from truncate", title: ask.from }, ask.from) : null),
       el("div", { class: "chat-ask-title" }, ask.title),
-      ask.context ? el("div", { class: "chat-ask-context" }, renderMarkdown(ask.context)) : null);
+      ask.context ? el("div", { class: "chat-ask-context" }, renderMarkdown(ask.context, { externalImages: !!api.externalImages })) : null);
     if (ask.state !== "open") {
       const ans = ask.answer;
       const text = typeof ans === "string" ? ans : ans?.text || ans?.choice || (ans?.choices || []).join("、") || "";
@@ -2028,7 +2851,7 @@ export function mountChat(container, api, opts = {}) {
   function mailNode(ev) {
     const body = String(ev.body || "");
     const long = body.length > 600;
-    const bodyNode = el("div", { class: `chat-mail-body ${long ? "clamped" : ""}` }, renderMarkdown(body));
+    const bodyNode = el("div", { class: `chat-mail-body ${long ? "clamped" : ""}` }, renderMarkdown(body, { externalImages: !!api.externalImages }));
     return el("div", { class: "chat-mail" },
       el("div", { class: "chat-mail-head" }, icon("mail", { size: 15 }),
         el("span", { class: "mono small" }, ev.from || ""), el("span", { class: "faint xs" }, "→ 你"),
@@ -2079,14 +2902,15 @@ export function mountChat(container, api, opts = {}) {
       refreshSessions();
       refreshRuns();
     } else if (prev !== state) renderSessions();  // the row's live dot follows the run
-    renderComposer();
+    if (prev !== state) renderComposer();
   }
   function setWorking(on) {
     working.hidden = !on;
-    const waiting = Array.from(blocks.values()).some((b) => (b.ev.type === "approval" && b.ev.state === "pending") || (b.ev.type === "ask" && b.ev.state === "open"));
+    const waiting = waitingCount > 0;
     working.classList.toggle("waiting", waiting);
-    working.lastChild.textContent = !on ? "" : waiting ? "等你回应后继续" : `${kindShort(S.kind, agentInfo())} ${S.runState === "starting" ? "正在启动…" : "正在工作…"}`;
-    if (on) stream.after(working);
+    const text = !on ? "" : waiting ? "等你回应后继续" : `${kindShort(S.kind, agentInfo())} ${S.runState === "starting" ? "正在启动…" : "正在工作…"}`;
+    if (working.lastChild.textContent !== text) working.lastChild.textContent = text;
+    if (on && stream.nextSibling !== working) stream.after(working);
   }
 
   async function refreshRuns() {
@@ -2099,7 +2923,8 @@ export function mountChat(container, api, opts = {}) {
   function newChat() {
     S.gen += 1;
     stopConversation();
-    Object.assign(S, { session: null, rid: null, cursor: 0, runState: "idle", sessionId: null, address: null, runModel: null });
+    if (S.rid || S.session) clearAtts();   // uploaded for that conversation; a fresh chat stages its own
+    Object.assign(S, { session: null, rid: null, cursor: 0, runState: "idle", sessionId: null, address: null, runModel: null, relocateTo: null });
     persist();
     clearStream();
     toggleSide(false);
@@ -2111,7 +2936,8 @@ export function mountChat(container, api, opts = {}) {
     S.gen += 1;
     const gen = S.gen;
     stopConversation();
-    Object.assign(S, { session: s, rid: null, cursor: 0, runState: "idle", sessionId: s.id, address: s.address || null, kind: s.kind || S.kind, lastModel: "", runModel: null });
+    if (S.rid || S.session?.id !== s.id) clearAtts();
+    Object.assign(S, { session: s, rid: null, cursor: 0, runState: "idle", sessionId: s.id, address: s.address || null, kind: s.kind || S.kind, lastModel: "", runModel: null, relocateTo: null });
     // the session's context comes back with it: a gateway session works on its device's folder again (its cwd is
     // only the run device's base then), a direct one on its folder -- a dead folder never becomes the next chat's
     adoptContext(s.context);
@@ -2147,11 +2973,16 @@ export function mountChat(container, api, opts = {}) {
     mount(stream);
     const run = runFor(s);
     const since = run && Number(run.started_at) ? toSeconds(run.started_at) : null;
-    for (const ev of events) if (!since || !ev.t || toSeconds(ev.t) < since) ingest(ev, { history: true });
+    beginBulk();
+    try {
+      for (const ev of events) if (!since || !ev.t || toSeconds(ev.t) < since) ingest(ev, { history: true });
+    } finally { endBulk(); }
     if (result.note) stream.append(el("div", { class: "chat-history-mark" }, el("span", {}, result.note)));
     if (events.length) stream.append(el("div", { class: "chat-history-mark" }, el("span", {}, "以上是历史记录")));
-    if (s.cwd_missing) stream.append(el("div", { class: "chat-error" }, icon("circle-alert", { size: 16 }),
-      el("div", {}, `这个会话的工作目录 ${shortPath(s.cwd)} 在 ${deviceName()} 上已经不存在，没法续接；可以看记录，或者在其他目录新开对话。`)));
+    if (s.cwd_missing) stream.append(el("div", { class: "chat-error", "data-cwd-gone": "" }, icon("circle-alert", { size: 16 }),
+      el("div", {}, canRelocate(s.kind)
+        ? `这个会话的工作目录 ${shortPath(s.cwd)} 在 ${deviceName()} 上已经不存在。可以选择新目录续接（还是同一个会话，原记录不动），或者在其他目录新开对话。`
+        : `这个会话的工作目录 ${shortPath(s.cwd)} 在 ${deviceName()} 上已经不存在。${kindShort(s.kind, agentInfo(s.kind))} 的会话和它的目录绑定，换目录没法续接；可以看记录，或者在其他目录新开对话。`)));
     else if (!canResume(s.kind)) stream.append(el("div", { class: "chat-history-mark" }, el("span", {}, `${kindLabel(s.kind)} 不支持续接已有会话：以上记录只能查看，发消息会开一个新对话`)));
     if (run) attachRun(run, { keep: true });
     else { renderComposer(); renderWelcome(); }
@@ -2164,6 +2995,7 @@ export function mountChat(container, api, opts = {}) {
       S.gen += 1;
       stopConversation();
       clearStream();
+      if (S.rid !== run.rid) clearAtts();
       Object.assign(S, { session: S.sessions.find((x) => x.id === run.session_id) || null });
     }
     Object.assign(S, { rid: run.rid, cursor: 0, runState: run.state || "running", kind: run.kind || S.kind, address: run.address || S.address,
@@ -2221,15 +3053,23 @@ export function mountChat(container, api, opts = {}) {
 
   async function send() {
     const text = input.value.trim();
-    if (!text) return;
+    const items = liveAtts();
+    if (!text && !items.length) return;
     if (["starting", "running"].includes(S.runState)) { toast("等这一轮结束再发，或者先点“停止”", { type: "info", timeout: 2200 }); return; }
     const blocked = blockedReason();
     if (blocked && !S.rid) { toast(blocked.text, { type: "warn" }); return; }
+    if (items.some((item) => item.state === "up")) { toast("附件还在上传，传完再发", { type: "info", timeout: 2200 }); return; }
+    if (items.some((item) => item.state === "err")) { toast("有附件没传上去：先移除它，或者重新添加", { type: "warn" }); return; }
+    const files = items.map((item) => ({ path: item.path, name: item.stored || item.name, size: item.size, mime: item.mime }));
+    const staged = items.some((item) => item.where?.stage) ? att.stage : null;
+    const relocate = !S.rid && S.session?.cwd_missing && S.relocateTo ? S.relocateTo : null;
     input.value = "";
     autoGrow();
     saveDraft();
+    att.items = [];   // sent with this message (kept on the device in the run's folder); back below if it fails
+    renderAtts();
     pendingUser.push(text);
-    put(null, userNode(text), { type: "user", text });
+    put(null, userNode(text, files), { type: "user", text, attachments: files });
     renderWelcome();
     scrollToEnd(true);
     setRunState("starting");
@@ -2237,6 +3077,7 @@ export function mountChat(container, api, opts = {}) {
       const model = modelChoosable(agentInfo(), S.kind) ? currentModel() : "";
       if (S.rid) {
         const sendParams = { rid: S.rid, prompt: text };
+        if (files.length) { sendParams.attachments = files.map((f) => f.path); if (staged) sendParams.stage = staged; }
         if (model !== (S.runModel || "") && modelChoosable(agentInfo(), S.kind)) sendParams.model = model;
         await call("agent_run_send", sendParams);
         if (sendParams.model !== undefined) S.runModel = model;
@@ -2244,13 +3085,15 @@ export function mountChat(container, api, opts = {}) {
         const params = {
           // gateway mode: the folder is the other device's; the CLI starts in the session's own folder when resuming
           // (Claude keys its sessions by folder), else in the run device's home (the hub's default)
-          kind: S.kind, workdir: gatewayCtx() ? S.session?.cwd || "" : S.workdir, prompt: text, permission: S.permission, preset: S.preset,
+          kind: S.kind, workdir: relocate || (gatewayCtx() ? S.session?.cwd || "" : S.workdir), prompt: text, permission: S.permission, preset: S.preset,
           resume_id: (S.session ? canResume(S.session.kind) : canResume(S.kind)) ? (S.session?.id || S.sessionId || undefined) : undefined,
           title: S.session ? sessionTitle(S.session) : text.replace(/\s+/g, " ").slice(0, 80),
           context: gatewayCtx() ? { mode: "gateway", device: S.context.device, workdir: S.context.workdir } : { mode: "direct" },
           model: model || undefined,
         };
+        if (files.length) { params.attachments = files.map((f) => f.path); if (staged) params.stage = staged; }
         const result = await call("agent_run_open", params);
+        if (staged) { att.stage = null; att.stageKey = null; }   // the stage folder is the run's now (or its files moved there)
         if (result.attached) {  // the session already runs (another tab / console): follow that run instead
           toast(result.note || "这个会话已经在另一个窗口运行，已切换到那个对话", { type: "info", timeout: 3200 });
           refreshRuns();
@@ -2260,6 +3103,15 @@ export function mountChat(container, api, opts = {}) {
         S.rid = result.rid;
         S.cursor = 0;
         S.runModel = result.model || model || "";
+        if (relocate && S.session) {
+          // the session lives in the new folder now (the device lists it there too): no longer "目录已不存在"
+          Object.assign(S.session, { cwd: relocate, cwd_missing: false });
+          S.relocateTo = null;
+          const gone = stream.querySelector("[data-cwd-gone]");
+          if (gone) gone.replaceWith(el("div", { class: "chat-history-mark" }, el("span", {}, `在 ${shortPath(relocate)} 续接（原目录已不存在，原记录保持不变）`)));
+          toast(`已在 ${shortPath(relocate)} 续接这个会话`, { type: "ok", timeout: 2600 });
+          refreshSessions();
+        }
         if (result.session_id) S.sessionId = result.session_id;
         if (result.address) { S.address = result.address; startConversation(); }
         persist();
@@ -2269,6 +3121,7 @@ export function mountChat(container, api, opts = {}) {
     } catch (error) {
       setRunState("idle");
       if (pendingUser.includes(text)) pendingUser.splice(pendingUser.indexOf(text), 1);
+      if (items.length && !liveAtts().length) { att.items = items; renderAtts(); renderComposer(); }
       if (error.data?.attached && error.data.rid && !S.rid) {
         attachRun({ rid: error.data.rid, kind: S.kind, workdir: S.workdir, state: "running", session_id: S.session?.id });
       }
@@ -2328,12 +3181,15 @@ export function mountChat(container, api, opts = {}) {
   let hiddenSince = isHidden() ? Date.now() : 0;
   const wakers = [];
   function onVisibility() {
+    // the working dots and the live dot pause while nobody sees them (a hidden desktop window still renders)
+    root.classList.toggle("chat-bg", isHidden());
     if (isHidden()) { if (!hiddenSince) hiddenSince = Date.now(); return; }
     hiddenSince = 0;
     for (const wake of wakers.splice(0)) wake();
   }
   document.addEventListener("visibilitychange", onVisibility);
   window.addEventListener("mcpmvisibilitychange", onVisibility);
+  root.classList.toggle("chat-bg", isHidden());
   /** A promise that resolves when the page is shown again, or null while polling may go on. */
   function asleep() {
     if (!hiddenSince || !isHidden() || Date.now() - hiddenSince < (opts.pauseAfter ?? PAUSE_HIDDEN_MS)) return null;

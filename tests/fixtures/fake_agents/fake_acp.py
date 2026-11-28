@@ -2,7 +2,8 @@
 """A stand-in ACP agent (``dsh --profile acp`` / ``gemini --experimental-acp``) for the runner tests.
 
 ``--profile headless --json [--session-id id] <prompt>`` prints JSON lines instead (the text fallback).
-FAKE_ACP: "error" (initialize fails), "silent" (never answers), "noload" (no loadSession).
+FAKE_ACP: "error" (initialize fails), "silent" (never answers), "noload" (no loadSession), "image" (takes image
+blocks: the answer counts them), "refuse_load" (session/load fails, like dsh in another folder).
 Prompt words: "perm" (asks session/request_permission), "slow" (until session/cancel), "fs" (calls an
 unsupported client method and reports the error code).
 """
@@ -89,10 +90,13 @@ while True:
         emit({"jsonrpc": "2.0", "id": rid, "result": {"protocolVersion": 1,
                                                       "agentCapabilities": {
                                                           "loadSession": mode != "noload",
-                                                          "promptCapabilities": {"embeddedContext": mode == "embedded"}}}})
+                                                          "promptCapabilities": {"embeddedContext": mode == "embedded",
+                                                                                 "image": mode == "image"}}}})
     elif method == "session/new":
         session = "acp-sess-1"
         emit({"jsonrpc": "2.0", "id": rid, "result": {"sessionId": session}})
+    elif method == "session/load" and mode == "refuse_load":
+        emit({"jsonrpc": "2.0", "id": rid, "error": {"code": -32602, "message": "session cwd does not match"}})
     elif method == "session/load":
         session = params["sessionId"]
         update("user_message_chunk", content={"type": "text", "text": "old question"})
@@ -103,6 +107,9 @@ while True:
         resources = [b["resource"].get("text", "") for b in params["prompt"][1:] if b.get("type") == "resource"]
         if resources:
             text += f" [res:{resources[0]}]"
+        images = [b for b in params["prompt"][1:] if b.get("type") == "image"]
+        if images:
+            text += " [images=%d %s]" % (len(images), images[0].get("uri", ""))
         update("agent_thought_chunk", content={"type": "text", "text": "thinking"})
         update("future_update_kind", whatever=1)
         if "perm" in text:

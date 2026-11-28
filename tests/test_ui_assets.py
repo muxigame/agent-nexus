@@ -82,7 +82,8 @@ def test_style_sheets_are_scoped():
                 assert f'[data-style="{name}"]' in selector, (name, selector)
 
 
-AGENT_CHAT = ("chat.js", "chat-page.js", "prompts.js", "agent-admin.js", "agent-wire.js", "api-admin.js", "kind-icons.js")
+AGENT_CHAT = ("chat.js", "chat-page.js", "prompts.js", "agent-admin.js", "agent-wire.js", "api-admin.js", "kind-icons.js",
+              "markdown.js")
 
 
 @pytest.mark.parametrize("which", ["gateway", "local"])
@@ -156,3 +157,23 @@ def test_chat_layout_v3_assets():
     assert "reachable: true" in fake and "async files(device, path)" in fake and 'mode: "gateway"' in fake
     assert "?ctx=1" in mockup and "?gw=off" in mockup
     assert "contextTargets(" in chat and "function dirMenu(" in chat and "其他设备 · 经网关" in chat
+
+
+def test_chat_animations_stay_cheap():
+    """§16.8: a long chat must not repaint the whole document every frame. The live dot pulses with a composited
+    ring (transform / opacity), never an animated box-shadow; both chat animations pause while the page is hidden."""
+    import re
+    css = (UI_DIR / "ui.css").read_text(encoding="utf-8")
+    live = re.search(r"^\.chat-live \{[^}]*\}", css, re.M).group(0)
+    assert "animation" not in live and "box-shadow" not in live
+    ring = re.search(r"^\.chat-live::after \{[^}]*\}", css, re.M).group(0)
+    assert "chat-live-ring" in ring
+    frames = re.search(r"@keyframes chat-live-ring \{.*?\} \}", css).group(0)
+    assert "box-shadow" not in frames and "transform" in frames
+    assert ".chat.chat-bg .chat-live::after, .chat.chat-bg .chat-dots i { animation-play-state: paused; }" in css
+    chat = (UI_DIR / "chat.js").read_text(encoding="utf-8")
+    assert 'root.classList.toggle("chat-bg", isHidden())' in chat
+    # the stream is windowed and a history opens lazily (only the newest blocks are built)
+    assert "DOM_KEEP = 240" in chat and "OLDER_KEEP = 4000" in chat
+    assert "beginBulk();" in chat and "endBulk();" in chat
+

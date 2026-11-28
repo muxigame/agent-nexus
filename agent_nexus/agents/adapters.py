@@ -16,12 +16,14 @@ from __future__ import annotations
 
 import difflib
 import json
+import os
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
-from . import registry, sessions
+from . import attachments, registry, sessions
 from .registry import AgentDef
 
 TOOL_OUTPUT_MAX = 8000
@@ -55,6 +57,11 @@ class AdapterOptions:
     context_lookup: Callable[[str], dict | None] | None = None
     #: The model the console asked for ("" = the CLI's own default; checked with registry.MODEL_RE), §16.7
     model: str = ""
+    #: The run's managed temp folder (attachments live in its ``attachments/``, §18): claude gets ``--add-dir``
+    tmpdir: str = ""
+    #: ACP: a resume in another folder was asked for (§19): a refused session/load fails the run instead of
+    #: quietly starting a new session there
+    strict_resume: bool = False
 
 
 def trunc(text: Any, limit: int) -> str:
@@ -163,6 +170,11 @@ class Adapter:
     persistent = False
     #: approvals arrive in-band (ACP) or through the approval MCP server (claude ``ask``)
     in_band_stop = False
+    #: the adapter delivers a turn's attachments (``turn_files``, §18) itself; otherwise the runner names their
+    #: paths in the message text
+    takes_files = False
+    #: images up to this size are read for the adapter (``data``, base64) before the turn; 0: none
+    inline_image_max = 0
 
     def __init__(self, d: AgentDef, opts: AdapterOptions):
         self.d, self.opts = d, opts
@@ -174,6 +186,8 @@ class Adapter:
         self.saw_output = False
         self.turns = 0
         self.notices: list[str] = []
+        #: the attachments of the turn being begun (``[{path, name, size, mime, data?}]``), set by the runner
+        self.turn_files: list[dict] = []
         self._prefix_pending = bool(opts.system_prompt) and not self._system_prompt_in_argv()
 
     # -- system prompt
@@ -322,6 +336,8 @@ class ClaudeStream(Adapter):
     name = "claude-stream"
     persistent = True
     in_band_stop = True
+    takes_files = True
+    inline_image_max = attachments.CLAUDE_IMAGE_MAX
 
     def __init__(self, d: AgentDef, opts: AdapterOptions):
         super().__init__(d, opts)
@@ -350,14 +366,23 @@ class ClaudeStream(Adapter):
             argv += ["--allowedTools", ",".join(allowed)]
         if self.opts.partial and "--include-partial-messages" not in argv:
             argv.append("--include-partial-messages")
+        if self.opts.tmpdir:
+            # its temp folder and the attachments in it (§18): -p mode refuses reads outside the work folder
+            # otherwise. The "=" form: --add-dir takes several values.
+            argv.append(f"--add-dir={self.opts.tmpdir}")
         return argv
 
     def begin_turn(self, prompt: str) -> list[dict]:
         self.turn_active, self.stopping = True, False
         self.turns += 1
         self._streamed.clear()
-        message = {"type": "user", "message": {"role": "user", "content": [{"type": "text",
-                                                                            "text": self._with_prefix(prompt)}]}}
+        files = self.turn_files or []
+        images = [f for f in files if f.get("data") and attachments.is_inline_image(f.get("name") or "")]
+        text = attachments.name_files(self._with_prefix(prompt), [f for f in files if f not in images])
+        content: list[dict] = [{"type": "text", "text": text}]
+        content += [{"type": "image", "source": {"type": "base64", "media_type": f.get("mime") or "image/png",
+                                                 "data": f["data"]}} for f in images]
+        message = {"type": "user", "message": {"role": "user", "content": content}}
         if self.session_id:
             message["session_id"] = self.session_id
         data = _dumps(message)
@@ -669,6 +694,7 @@ class CodexExec(Adapter):
     The older ``{"msg": {...}}`` format is read too."""
     name = "codex-exec"
     STDIN_PROMPT_OVER = 24000  # longer prompts go through stdin ("-")
+    takes_files = True
 
     def __init__(self, d: AgentDef, opts: AdapterOptions):
         super().__init__(d, opts)
@@ -686,13 +712,17 @@ class CodexExec(Adapter):
     def argv(self, prompt: str | None = None) -> list[str]:
         self.turn_active, self.stopping, self._turn_done = True, False, False
         self.turns += 1
-        text = self._with_prefix(prompt or "")
+        files = self.turn_files or []
+        images = [f for f in files if attachments.is_inline_image(f.get("name") or "")]
+        text = attachments.name_files(self._with_prefix(prompt or ""), [f for f in files if f not in images])
         self._stdin = None
         if self.opts.batch or len(text) > self.STDIN_PROMPT_OVER or text.startswith("-"):
             self._stdin, text = text.encode("utf-8"), "-"
         template = "resume_command" if self.session_id and self.d.resume_command else "command"
         argv = registry.command_argv(self.d, self.opts.binary, permission=self.opts.permission,
                                      values=self._values(text), template=template)
+        if images:
+            argv = _codex_images(argv, [f["path"] for f in images], text, resume=template == "resume_command")
         argv = _codex_mcp_attach(_codex_approval_flag(argv), self.opts.extra.get("mcp_attach"))
         return _codex_mcp_approve(argv, self.opts.extra.get("mcp_approve") or [],
                                   self.opts.extra.get("mcp_enabled_tools"))
@@ -933,6 +963,19 @@ def _codex_status(status: Any, exit_code: Any, done: bool) -> str:
     return "running"
 
 
+def _codex_images(argv: list[str], paths: list[str], prompt: str, *, resume: bool) -> list[str]:
+    """One ``--image=<absolute path>`` per image (§18): ``-i a.png hello`` would take the prompt for a second image
+    and ``--image=a,b`` splits on commas. ``exec resume``: right after ``resume``; ``exec``: before the prompt."""
+    flags = [f"--image={os.path.abspath(p)}" for p in paths]
+    argv = list(argv)
+    if resume and "resume" in argv:
+        at = argv.index("resume") + 1
+    else:
+        at = len(argv) - 1 - argv[::-1].index(prompt) if prompt in argv else len(argv)
+    argv[at:at] = flags
+    return argv
+
+
 def _codex_mcp_approve(argv: list[str], names: list[str], enabled: list[str] | None = None) -> list[str]:
     """Gateway mode: ``codex exec`` never asks, so calls to an MCP server whose tools need approval are refused
     (seen on a real device: "the tool needs approval but the approval policy is never"). For the Agent Nexus
@@ -989,6 +1032,8 @@ class Acp(Adapter):
     name = "acp"
     persistent = True
     in_band_stop = True
+    takes_files = True
+    inline_image_max = attachments.ACP_IMAGE_MAX
 
     def __init__(self, d: AgentDef, opts: AdapterOptions):
         super().__init__(d, opts)
@@ -996,8 +1041,9 @@ class Acp(Adapter):
         self.failed: str | None = None  # why the handshake failed (the runner falls back)
         self._next_id = 0
         self._calls: dict[int, str] = {}
-        self._queued: list[str] = []
+        self._queued: list[tuple[str, list[dict]]] = []  # (text, attachments) waiting for the session
         self.embedded_context = False
+        self.prompt_image = False  # promptCapabilities.image: images as ACP image blocks (§18)
         self._loading = False
         self._permissions: dict[str, dict] = {}
         self._approval_n = 0
@@ -1056,13 +1102,14 @@ class Acp(Adapter):
     def begin_turn(self, prompt: str) -> list[dict]:
         self.turn_active, self.stopping = True, False
         self.turns += 1
+        files = list(self.turn_files or [])
         if not self.ready:
-            self._queued.append(prompt)
+            self._queued.append((prompt, files))
             return []
-        self._prompt(prompt)
+        self._prompt(prompt, files)
         return []
 
-    def _prompt(self, text: str) -> None:
+    def _prompt(self, text: str, files: list[dict] | None = None) -> None:
         """One ``session/prompt``. ACP has no system-prompt field: on the first turn the console's system prompt
         goes as an embedded ``resource`` block when the agent accepts them (so the agent's own title and history
         show the user's words, seen with dsh), else in front of the text."""
@@ -1071,7 +1118,14 @@ class Acp(Adapter):
             self._prefix_pending = False
             blocks.append({"type": "resource", "resource": {"uri": "anx://system-prompt", "mimeType": "text/markdown",
                                                             "text": self.opts.system_prompt}})
-        blocks.insert(0, {"type": "text", "text": self._with_prefix(text)})
+        files = files or []
+        images = [f for f in files if self.prompt_image and f.get("data")
+                  and attachments.is_inline_image(f.get("name") or "")]
+        blocks.insert(0, {"type": "text", "text": attachments.name_files(self._with_prefix(text),
+                                                                         [f for f in files if f not in images])})
+        for f in images:  # after the text (and the system prompt resource): agents read the first block as the ask
+            blocks.append({"type": "image", "mimeType": f.get("mime") or "image/png", "data": f["data"],
+                           "uri": Path(f["path"]).as_uri()})
         self._call("session/prompt", {"sessionId": self.session_id, "prompt": blocks})
 
     def stop(self) -> list[dict]:
@@ -1120,6 +1174,7 @@ class Acp(Adapter):
                                    and session_caps.get("resume") is not False)
             prompt_caps = caps.get("promptCapabilities") if isinstance(caps, dict) else None
             self.embedded_context = bool(isinstance(prompt_caps, dict) and prompt_caps.get("embeddedContext"))
+            self.prompt_image = bool(isinstance(prompt_caps, dict) and prompt_caps.get("image"))
             mcp_caps = caps.get("mcpCapabilities") if isinstance(caps, dict) else None
             self.mcp_http = bool(isinstance(mcp_caps, dict) and mcp_caps.get("http"))
             cwd = self.opts.workdir
@@ -1159,6 +1214,11 @@ class Acp(Adapter):
         if method in ("session/new", "session/load", "session/resume"):
             self._loading = False
             if error is not None:
+                if method in ("session/load", "session/resume") and self.opts.strict_resume:
+                    # asked to continue it in another folder: a fresh session there is not what was asked for
+                    self.failed = (f"{self.d.label} 不能在这个目录续接会话 {self.session_id}："
+                                   f"{error.get('message') or '代理拒绝了'}")
+                    return []
                 if method in ("session/load", "session/resume"):  # the old session is gone: start afresh
                     self.notices.append(f"无法续接会话 {self.session_id}：{error.get('message') or '代理拒绝了'}；"
                                         "已开始一个新会话")
@@ -1212,8 +1272,8 @@ class Acp(Adapter):
     def _session_ready(self) -> list[dict]:
         self.ready = True
         events = [{"type": "status", "state": "running" if self._queued else "idle", "session_id": self.session_id}]
-        for text in self._queued:
-            self._prompt(text)
+        for text, files in self._queued:
+            self._prompt(text, files)
         self._queued.clear()
         return events
 

@@ -278,6 +278,21 @@ class TmpDirs:
         except Exception as error:  # noqa: BLE001
             return {"error": f"清理失败：{error}", "code": "failed"}
 
+    def clean_session(self, session: str, kind: str | None = None) -> list[str]:
+        """Remove the inactive directories of runs (and attachment stages) of ``session``: deleting a session takes
+        its attachments and temp files with it (§18). Returns the removed ids; never raises."""
+        if not isinstance(session, str) or not session:
+            return []
+        try:
+            with self.lock:
+                runs = self._load()
+            active = self._active()
+            victims = [rid for rid, meta in runs.items() if meta.get("session") == session and rid not in active
+                       and (not kind or not meta.get("kind") or meta.get("kind") == kind)]
+            return self._remove(victims)
+        except Exception:  # noqa: BLE001
+            return []
+
     def sweep(self, *, now: float | None = None) -> dict:
         """The automatic pass (§8). ``{removed, freed, rids, logs}``; never raises."""
         now = time.time() if now is None else now

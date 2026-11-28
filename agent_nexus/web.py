@@ -1553,7 +1553,9 @@ def build_app(sup: Supervisor, request_exit: Callable[..., None] | None = None, 
         # so ``agents.remote`` follows ``terminal.enabled`` unless set (registry.load_manager_config).
         if getattr(sup.cfg, "agents_remote", True):
             hub.handlers.update(agents_hub_mod.remote_handlers(
-                agents_state["handlers"], allow_full=getattr(sup.cfg, "agents_allow_full_remote", True)))
+                agents_state["handlers"], allow_full=getattr(sup.cfg, "agents_allow_full_remote", True),
+                # files.enabled off: remote file views only reach the chat's attachments (managed tmp area)
+                files=None if getattr(sup.cfg, "files", True) else agents.files))
             hub.extra_features = (*hub.extra_features, agents_hub_mod.FEATURE)
 
     async def agents_body(request: Request) -> dict | None:

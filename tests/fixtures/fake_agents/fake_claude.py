@@ -7,7 +7,8 @@ Reads stream-json user messages on stdin, answers in stream-json. What a turn do
   "slow"     -- works until an ``interrupt`` control request arrives
   "die"      -- writes to stderr and exits 3
   "sysprompt"-- answers with the --append-system-prompt value
-  otherwise  -- "echo: <text>" (token deltas with --include-partial-messages)
+  otherwise  -- "echo: <text>" (token deltas with --include-partial-messages; " [images=N <types>]" appended
+                when the message carries image blocks)
 Replies carry usage and the result modelUsage (§16.3).
 Environment: FAKE_ARGV_LOG (append argv as JSON), FAKE_OLD_CLAUDE=1 (reject --include-partial-messages).
 """
@@ -172,5 +173,8 @@ while True:
         say(f"system: {system_prompt}", msg_id)
         result("ok")
         continue
+    images = [b for b in message["message"]["content"] if b.get("type") == "image"]
+    if images:  # image blocks (chat attachments): say how many and what they are
+        text += " [images=%d %s]" % (len(images), ",".join(b["source"]["media_type"] for b in images))
     say(f"echo: {text}", msg_id)
     result(f"echo: {text}")

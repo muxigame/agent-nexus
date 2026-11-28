@@ -15,6 +15,7 @@ import asyncio
 import logging
 import os
 import re
+import secrets
 import socket
 import time
 import uuid
@@ -33,6 +34,9 @@ from .mcp_probe import codex_models, codex_models_cache
 from .prompts import Prompts
 from .runner import RunError, Runs
 from .tmpdirs import TmpDirs
+from .fileview import FileView
+from . import attachments as attach_mod
+from .attachments import AttachError, Attachments
 from . import anx_shim
 from .workdirs import Recent
 
@@ -47,6 +51,8 @@ OPS: tuple[str, ...] = (
     "agent_run_list",
     "agent_dirs", "agent_prompts", "agent_prompt_save", "agent_prompt_preview",
     "agent_tmp_list", "agent_tmp_clean", "agent_models",
+    "agent_file_stat", "agent_file_read",
+    "agent_attach_begin", "agent_attach_put", "agent_attach_drop",
     *api_service.OPS,
 )
 READ_WAIT_S = 20.0
@@ -292,6 +298,12 @@ class AgentHub:
         self.runs.on_session = self._on_session
         self.runs.on_close = self._on_close
         self.tmp = TmpDirs(self.root, active=lambda: set(self.runs.runs))
+        # paths named in chat messages: stat / preview / image / download (§17)
+        self.files = FileView(lambda: self._home(self._account()), self._state_dirs, lambda: [str(self.tmp.base)])
+        # files the console uploads for a message (§18), in the run's (or a new chat's stage) temp folder
+        self.attachments = Attachments(self.tmp.base, owner=self._attach_owner)
+        #: stage id -> (kind, created at): temp folders handed out for the attachments of a chat with no run yet
+        self._stages: dict[str, tuple[str, float]] = {}
         #: API providers as agents (§16.4): kinds ``api:<provider>/<model>``, in-process runs
         self.api = api_service.ApiAgents(self.root, config=self._config, gateway=self._gateway_call,
                                          env=lambda: self._env(self._account()))
@@ -337,6 +349,13 @@ class AgentHub:
         env = env if env is not None else self._env(None)
         home = env.get("USERPROFILE") if os.name == "nt" else None
         return Path(home or env.get("HOME") or Path.home())
+
+    def _attach_owner(self) -> tuple[int, int] | None:
+        account = self._account()
+        if account is None or getattr(account, "session", None) is not None:
+            return None
+        uid, gid = getattr(account, "uid", None), getattr(account, "gid", None)
+        return (int(uid), int(gid)) if isinstance(uid, int) and isinstance(gid, int) else None
 
     def _workspaces(self) -> list[dict]:
         try:
@@ -388,7 +407,8 @@ class AgentHub:
             try:
                 if resume_id:
                     found = await asyncio.to_thread(sessions.find, defs, home, kind, resume_id, env=env)
-                    if found and found.get("cwd") and workdirs.allowed(workdir, (), [found["cwd"]]):
+                    ran = [c for c in [(found or {}).get("cwd"), *((found or {}).get("cwds") or [])] if c]
+                    if ran and workdirs.allowed(workdir, (), ran):
                         return None
                 listed = await asyncio.to_thread(sessions.discover, defs, home, kind=kind, limit=200, env=env)
                 if workdirs.allowed(workdir, (), [s.get("cwd") for s in listed if s.get("cwd")]):
@@ -595,6 +615,10 @@ class AgentHub:
         agents += api_agents
         return {"agents": agents, "device": {"id": device.get("id"), "name": device.get("name"),
                                              "os": prompts_mod.os_name()},
+                # what this AgentHub can do beyond the first agents/1 ops: an older console simply ignores it
+                "caps": {"attachments": {"chunk": attach_mod.CHUNK_MAX, "file_max": attach_mod.FILE_MAX,
+                                         "files": attach_mod.MESSAGE_FILES, "message_max": attach_mod.MESSAGE_MAX},
+                         "relocate": 1},
                 "account": getattr(account, "name", None), "home": str(self._home(account, env))}
 
     async def agent_install(self, params: dict) -> dict:
@@ -708,11 +732,19 @@ class AgentHub:
             if not deleted:
                 return _error("找不到这个会话的文件，可能已经被删除", "not_found")
             self.meta.forget(str(params["kind"]), session_id)
+            await asyncio.to_thread(self.tmp.clean_session, session_id, str(params["kind"]))
             return {"ok": True, "deleted": 1}
         account = self._account()
         env = self._env(account)
-        return await asyncio.to_thread(sessions.meta_op, self.definitions(), self._home(account, env), self.meta,
-                                       params, env=env, busy=self._busy)
+        result = await asyncio.to_thread(sessions.meta_op, self.definitions(), self._home(account, env), self.meta,
+                                         params, env=env, busy=self._busy)
+        if params.get("delete_file") and isinstance(result, dict) and result.get("ok"):
+            # its runs' temp folders go with it: attachments, the agent's own temp files (§18)
+            cleaned = await asyncio.to_thread(self.tmp.clean_session, str(params.get("id") or ""),
+                                              str(params.get("kind") or "") or None)
+            if cleaned:
+                result["tmp_removed"] = len(cleaned)
+        return result
 
     # -- runs ------------------------------------------------------------------------------------------------
     async def _bind(self, kind: str, workdir: str, mode: str, context: dict, name: str | None) -> dict | None:
@@ -759,6 +791,13 @@ class AgentHub:
         live = self._live_run(kind, resume_id) if resume_id else None
         if live is not None:
             return await self._attach(live, params)
+        stage = params.get("stage") if isinstance(params.get("stage"), str) else ""
+        if stage and (stage not in self._stages or stage in self.runs.runs):
+            stage = ""  # unknown here (another device, a restart) or already a run's: its files fail the check below
+        try:
+            files = await asyncio.to_thread(self.attachments.check, params.get("attachments"), [stage])
+        except AttachError as exc:
+            return _error(str(exc), exc.code)
 
         # The checks runs.open makes anyway, before the gateway hands out a handle and an address for nothing.
         if resume_id and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", resume_id):
@@ -771,6 +810,9 @@ class AgentHub:
         refused = await self._workdir_ok(workdir, kind, resume_id)
         if refused is not None:
             return refused
+        moved_from, strict = await self._relocation(d, kind, resume_id, workdir, account)
+        if isinstance(moved_from, dict):
+            return moved_from
         run_env = self.runs._env(account, None)
         api_spec: dict | None = None
         if d.adapter == "api":  # an API model (§16.4): no binary; its provider, model and key instead
@@ -787,11 +829,18 @@ class AgentHub:
             binary = await asyncio.to_thread(registry.locate, d, run_env)
         if not binary:
             return _error(f"这台设备上没有找到 {d.label}，可以先在 Agent 菜单里安装", "not_installed")
-        rid = uuid.uuid4().hex[:12]
+        # a new chat's attachments were uploaded to a stage folder (agent_attach_begin): it becomes the run's own
+        rid = stage or uuid.uuid4().hex[:12]
         try:
             tmpdir = await asyncio.to_thread(self.tmp.create, rid, account, kind=kind, session=resume_id or None)
         except (OSError, ValueError) as exc:
             return _error(f"无法创建临时目录：{exc}", "tmpdir_failed")
+
+        async def discard() -> None:
+            if stage:  # the uploads stay for the next try; the folder is swept like any closed one
+                await asyncio.to_thread(self.tmp.close, rid)
+            else:
+                await asyncio.to_thread(self.tmp.clean, rid)
 
         # The mailbox address: a resumed session keeps the one it had (§10).
         previous = self.meta.get(kind, resume_id).get("address") if resume_id else None
@@ -805,7 +854,7 @@ class AgentHub:
             handle = bound.get("workspace_id") or ""
             address = bound.get("address_display") or bound.get("address") or ""
         elif mode == "gateway":
-            await asyncio.to_thread(self.tmp.clean, rid)
+            await discard()
             reason = (bound or {}).get("error") or "网关不可达"
             return _error(f"经网关操作其他设备需要网关签发工作区：{reason}", "no_gateway")
         else:
@@ -915,12 +964,14 @@ class AgentHub:
         try:
             result = await self.runs.open(console, binary=binary, system_prompt=system_prompt, tmpdir=str(tmpdir),
                                           address=address, rid=rid, events=events, extra=extra, workdir_ok=True,
-                                          env=cli_env or None, path_first=cli_path or None)
+                                          env=cli_env or None, path_first=cli_path or None, files=files,
+                                          strict_resume=strict)
         except RunError as exc:
-            await asyncio.to_thread(self.tmp.clean, rid)
+            await discard()
             if handle:
                 await self._release(handle)
             return _error(str(exc), exc.code)
+        self._stages.pop(stage, None)
         run = self.runs.runs.get(rid)
         if run is None and handle:  # closed already (it failed at once): its on_close had no handle to release
             self._release_soon(handle)
@@ -944,6 +995,12 @@ class AgentHub:
                 self.meta.set(kind, resume_id, managed=True, rid=rid, address=address)
             except (OSError, ValueError):
                 pass
+        if resume_id and moved_from and run is not None:
+            try:  # listed in its new folder at once (no longer "目录已不存在"), before the CLI writes there
+                self.meta.set(kind, resume_id, cwd=workdir)
+            except (OSError, ValueError):
+                pass
+            result["moved_from"] = moved_from
         if resume_id and run is not None:  # the model this open asked for; None: the CLI's default (§16.7)
             try:
                 self.meta.set(kind, resume_id, model=result.get("model") or None)
@@ -963,20 +1020,58 @@ class AgentHub:
             result["note"] = NO_GATEWAY_NOTE
         return result
 
+    async def _relocation(self, d: registry.AgentDef, kind: str, resume_id: str, workdir: str,
+                          account: Any) -> tuple[Any, bool]:
+        """A resume in another folder than the session's recorded one (§19): ``(old folder, True)`` when that is
+        fine (Claude Code's transcript is copied into the new folder's project directory first), ``(None, False)``
+        when it is not a move, or ``(error, False)``."""
+        if not resume_id or d.adapter == "api":
+            return None, False
+        env = self._env(account)
+        home = self._home(account, env)
+        try:
+            found = await asyncio.to_thread(sessions.find, {kind: d}, home, kind, resume_id, env=env)
+        except Exception:  # noqa: BLE001 - an unreadable transcript: resumed as before
+            log.debug("agents: finding session %s failed", resume_id, exc_info=True)
+            return None, False
+        if found:
+            found = dict(found)
+            self.meta.apply([found])  # a folder an earlier console run already moved it to
+        old = (found or {}).get("cwd")
+        if not old or sessions.same_dir(old, workdir):
+            return None, False
+        if not d.relocate:
+            return _error(f"{d.label} 的会话和它原来的目录（{old}）绑定，不能换到别的目录续接；"
+                          "可以在其他目录新开对话", "relocate_unsupported"), False
+        if d.adapter == "claude-stream":
+            try:
+                await asyncio.to_thread(sessions.relocate_claude, home, found, workdir, env=env)
+            except OSError as exc:
+                return _error(f"没能把会话记录复制到新目录（{exc}），原记录没有改动", "relocate_failed"), False
+        return old, True
+
     async def _attach(self, run, params: dict) -> dict:
         """``agent_run_open`` for a session that already has a run: that run, and the message sent to it."""
         prompt = params.get("prompt") if isinstance(params.get("prompt"), str) else ""
+        stage = params.get("stage") if isinstance(params.get("stage"), str) and params.get("stage") in self._stages \
+            else ""
+        try:
+            files = await asyncio.to_thread(self.attachments.check, params.get("attachments"), [run.rid, stage])
+            if stage and files:  # staged for a new chat: into the run's own folder, where its CLI may read
+                files = await asyncio.to_thread(self.attachments.move, files, run.rid)
+        except (AttachError, OSError) as exc:
+            return _error(str(exc), getattr(exc, "code", "bad_attachment"), rid=run.rid)
         view = {"rid": run.rid, "attached": True, "session_id": run.session_id, "state": run.state,
                 "address": run.address, "adapter": run.adapter.name, "tmpdir": run.tmpdir,
                 "permission": run.permission, "mode": (run.context or {}).get("mode", "direct"),
                 "handle": (run.context or {}).get("handle") or None,
                 "note": "这个会话已经在另一个窗口运行，已切换到那个对话"}
-        if prompt.strip():
+        if prompt.strip() or files:
             try:
                 sent = {"rid": run.rid, "prompt": prompt}
                 if params.get("model") is not None:
                     sent["model"] = params["model"]
-                await self.runs.send(sent)
+                await self.runs.send(sent, files=files)
             except RunError as exc:
                 if exc.code == "busy":
                     return _error("这个会话已经在另一个窗口运行，上一轮还没结束；已切换到那个对话，等它结束再发",
@@ -1010,7 +1105,81 @@ class AgentHub:
                                            "workdir": run.context.get("context_workdir_raw") or ""}
             return result
 
-        return {**base, "agent_run_read": read, "agent_run_list": listing}
+        async def send(params: dict) -> dict:
+            params = dict(params) if isinstance(params, dict) else {}
+            given = params.pop("attachments", None)
+            files: list[dict] = []
+            if given:
+                run = self.runs.runs.get(str(params.get("rid") or ""))
+                if run is None:
+                    return _error("这个对话已经结束或不存在", "not_found")
+                stage = params.get("stage") if params.get("stage") in self._stages else ""
+                try:
+                    files = await asyncio.to_thread(self.attachments.check, given, [run.rid, stage])
+                    if stage and files:
+                        files = await asyncio.to_thread(self.attachments.move, files, run.rid)
+                except (AttachError, OSError) as exc:
+                    return _error(str(exc), getattr(exc, "code", "bad_attachment"))
+            try:
+                return await self.runs.send(params, files=files)
+            except RunError as exc:
+                return _error(str(exc), exc.code)
+
+        return {**base, "agent_run_read": read, "agent_run_list": listing, "agent_run_send": send}
+
+    # -- attachments (§18) -----------------------------------------------------------------------------------
+    async def agent_attach_begin(self, params: dict) -> dict:
+        """A stage folder for the attachments of a chat that has no run yet: ``{stage, dir, limits}``."""
+        now = time.time()
+        for old, (_, at) in list(self._stages.items()):
+            if now - at > attach_mod.STAGE_TTL_S:
+                self._stages.pop(old, None)
+        kind = params.get("kind") if isinstance(params.get("kind"), str) and params.get("kind") else None
+        resume_id = params.get("resume_id") if isinstance(params.get("resume_id"), str) else None
+        if resume_id and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", resume_id):
+            resume_id = None
+        stage = "s" + secrets.token_hex(8)
+        account = self._account()
+        try:
+            await asyncio.to_thread(self.tmp.create, stage, account, kind=kind, session=resume_id)
+            await asyncio.to_thread(self.tmp.close, stage)  # swept like a closed run's unless a run takes it
+        except (OSError, ValueError) as exc:
+            return _error(f"无法创建临时目录：{exc}", "tmpdir_failed")
+        self._stages[stage] = (kind or "", now)
+        return {"stage": stage, "dir": str(self.tmp.base / stage / attach_mod.FOLDER),
+                "limits": {"chunk": attach_mod.CHUNK_MAX, "file_max": attach_mod.FILE_MAX,
+                           "files": attach_mod.MESSAGE_FILES, "message_max": attach_mod.MESSAGE_MAX}}
+
+    def _attach_target(self, params: dict) -> str:
+        rid, stage = params.get("rid"), params.get("stage")
+        if isinstance(rid, str) and rid:
+            run = self.runs.runs.get(rid)
+            if run is None or run.closed:
+                raise AttachError("这个对话已经结束，请重新添加附件", "not_found")
+            if os.path.normcase(os.path.abspath(run.tmpdir)) != os.path.normcase(os.path.abspath(self.tmp.base / rid)):
+                raise AttachError("这个对话没有托管的临时目录，不能添加附件", "bad_request")
+            return rid
+        if isinstance(stage, str) and stage in self._stages:
+            return stage
+        raise AttachError("附件的上传位置已经失效，请重新添加附件", "not_found")
+
+    def agent_attach_put(self, params: dict) -> dict:
+        """One chunk of an attachment (``{rid | stage, name, size, offset, data(base64), id?}``)."""
+        try:
+            return self.attachments.put(self._attach_target(params), params)
+        except AttachError as exc:
+            return _error(str(exc), exc.code)
+        except OSError as exc:
+            return _error(f"附件没能写入：{exc.strerror or exc}", "io_error")
+
+    def agent_attach_drop(self, params: dict) -> dict:
+        """Remove an attachment before it is sent (``{rid | stage, path | id}``)."""
+        try:
+            return self.attachments.drop(self._attach_target(params), params)
+        except AttachError as exc:
+            return _error(str(exc), exc.code)
+        except OSError as exc:
+            return _error(f"附件没能删除：{exc.strerror or exc}", "io_error")
 
     # -- models (§16.7) --------------------------------------------------------------------------------------
     async def agent_models(self, params: dict) -> dict:
@@ -1132,6 +1301,11 @@ class AgentHub:
             "agent_prompt_preview": threaded(prompt_ops["agent_prompt_preview"]),
             "agent_tmp_list": threaded(self.tmp.op_list), "agent_tmp_clean": threaded(self.tmp.op_clean),
             "agent_models": self.agent_models,
+            "agent_file_stat": threaded(self.files.handlers()["agent_file_stat"]),
+            "agent_file_read": threaded(self.files.handlers()["agent_file_read"]),
+            "agent_attach_begin": self.agent_attach_begin,
+            "agent_attach_put": threaded(self.agent_attach_put),
+            "agent_attach_drop": threaded(self.agent_attach_drop),
             **self.api.handlers(),
         }
         assert set(table) == set(OPS), set(table) ^ set(OPS)
@@ -1141,12 +1315,30 @@ class AgentHub:
 FULL_REFUSED = "这台设备不允许远程以“完全信任”运行 Agent（agent-nexus.json 里 agents.allow_full_remote），请改用其他权限模式"
 
 
-def remote_handlers(handlers: dict, *, allow_full: bool) -> dict:
+def _threaded(fn: Callable[[dict], dict]) -> Callable[[Any], Awaitable[dict]]:
+    async def call(params: Any = None) -> dict:
+        try:
+            return await asyncio.to_thread(fn, params if isinstance(params, dict) else {})
+        except Exception as exc:  # noqa: BLE001 - a handler never raises to the wire
+            return _error(f"出错了：{exc}", "internal")
+    return call
+
+
+def remote_handlers(handlers: dict, *, allow_full: bool, files: FileView | None = None) -> dict:
     """The handlers other devices and the cloud console reach (feature ``agents/1``): the same table, except
     that ``permission: full`` is refused unless the device allows it (``agents.allow_full_remote``), and
-    ``agent_info`` says so (``policy.full``) so the console can grey the mode out instead of failing later."""
+    ``agent_info`` says so (``policy.full``) so the console can grey the mode out instead of failing later.
+
+    ``files`` is the hub's file view when the device's file share (``files.enabled``) is OFF: then
+    ``agent_file_stat`` / ``agent_file_read`` only reach the managed tmp area (the chat's attachments), so
+    the agents table is no way around the owner's "other devices may not fetch files here" switch."""
+    out = dict(handlers)
+    if files is not None:
+        confined = files.confined_view().handlers()
+        out["agent_file_stat"] = _threaded(confined["agent_file_stat"])
+        out["agent_file_read"] = _threaded(confined["agent_file_read"])
     if allow_full:
-        return dict(handlers)
+        return out
     base_open, base_info = handlers["agent_run_open"], handlers["agent_info"]
 
     async def run_open(params: Any = None) -> dict:
@@ -1162,7 +1354,7 @@ def remote_handlers(handlers: dict, *, allow_full: bool) -> dict:
                                            "full_reason": "这台设备不允许远程使用完全信任"}}
         return result
 
-    return {**handlers, "agent_run_open": run_open, "agent_info": info}
+    return {**out, "agent_run_open": run_open, "agent_info": info}
 
 
 __all__ = [

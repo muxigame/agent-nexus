@@ -45,7 +45,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import adapters, registry, sessions, workdirs
+from . import adapters, attachments, registry, sessions, workdirs
 from .adapters import AdapterOptions
 from .registry import AgentDef
 
@@ -382,6 +382,7 @@ class Run:
     remembered: set = field(default_factory=set)
     stderr: collections.deque = field(default_factory=lambda: collections.deque(maxlen=STDERR_LINES))
     last_prompt: str = ""
+    last_files: list = field(default_factory=list)  # the last turn's attachments (§18), re-sent by the fallback
     closed: bool = False
     timers: list = field(default_factory=list)
     known_session: str = ""  # the session id last reported to Runs.on_session
@@ -629,6 +630,12 @@ class Runs:
         """An ACP agent that did not start: run its ``fallback_command`` as text, a process per turn."""
         old = run.adapter
         self._kill(run)
+        if run.opts.strict_resume and old.session_id:
+            # a resume in another folder that the agent refused: neither a fresh session nor the text fallback
+            old.turn_active = False
+            self._push_all(run, [{"type": "error", "text": reason},
+                                 {"type": "status", "state": "failed", "session_id": old.session_id}])
+            return
         new = adapters.fallback(run.d, run.opts, old.session_id)
         if new is None:
             old.turn_active = False
@@ -643,10 +650,14 @@ class Runs:
             self._push(run, {"type": "error", "level": "notice",
                              "text": f"{run.d.label} 的这种运行方式不能选择模型，沿用默认模型（{run.opts.model} 没有生效）"})
         if old.turn_active and run.last_prompt:
-            self._start_turn(run, run.last_prompt)
+            self._start_turn(run, run.last_prompt, run.last_files)
 
-    def _start_turn(self, run: Run, prompt: str) -> None:
+    def _start_turn(self, run: Run, prompt: str, files: list[dict] | None = None) -> None:
         adapter = run.adapter
+        files = list(files or [])
+        if files and not adapter.takes_files:  # this adapter cannot attach them: their paths in the text (§18)
+            prompt, files = attachments.name_files(prompt, files), []
+        adapter.turn_files = files
         if getattr(adapter, "in_process", False):  # an API model's loop: a task on this event loop
             self._push_all(run, adapter.begin_turn(prompt))
             return
@@ -835,14 +846,17 @@ class Runs:
     async def open(self, params: dict, *, binary: str | None = None, env: dict | None = None,
                    run_as: dict | None | bool = False, system_prompt: str | None = None, tmpdir: str | None = None,
                    address: str = "", rid: str | None = None, events: list[dict] | None = None,
-                   extra: dict | None = None, workdir_ok: bool = False, path_first: list[str] | None = None) -> dict:
+                   extra: dict | None = None, workdir_ok: bool = False, path_first: list[str] | None = None,
+                   files: list[dict] | None = None, strict_resume: bool = False) -> dict:
         """Start a run. ``params`` (from the console): ``kind, workdir, prompt, resume_id?, permission?,
         title?``. The keyword arguments come from the hub, never from the console: an explicit ``binary``,
         extra ``env``, ``run_as`` (``Account.popen_args()``; False = the account's), the rendered
         ``system_prompt``, the run's ``tmpdir`` and mailbox ``address``, and ``events`` to show right after
         the starting status (the hub's notes, e.g. that there is no gateway). ``workdir_ok``: the hub already allowed
         the work folder (it also accepts folders this device ran a CLI in), so the roots are not checked again.
-        ``path_first``: folders put first on the run's PATH (the hub's private ``anx``, agents/anx_shim.py)."""
+        ``path_first``: folders put first on the run's PATH (the hub's private ``anx``, agents/anx_shim.py).
+        ``files``: the first message's attachments, already checked by the hub (§18; ``params`` never carries them).
+        ``strict_resume``: the session is continued in another folder; an agent that refuses fails the run."""
         self._reap()
         self._ensure_reaper()
         if len(self.runs) >= self.max_runs:
@@ -891,7 +905,8 @@ class Runs:
         if system_prompt is None:
             system_prompt = params.get("system_prompt") if isinstance(params.get("system_prompt"), str) else ""
         opts = AdapterOptions(binary=binary, workdir=workdir, permission=permission, system_prompt=system_prompt or "",
-                              resume_id=resume_id, batch=batch, extra=dict(extra or {}), model=model)
+                              resume_id=resume_id, batch=batch, extra=dict(extra or {}), model=model,
+                              strict_resume=bool(strict_resume and resume_id))
         if d.adapter == "codex-exec":  # the context window lives in the thread's rollout (§16.3)
             opts.context_lookup = _codex_lookup(account, run_env)
         rid = rid or uuid.uuid4().hex[:12]
@@ -906,6 +921,7 @@ class Runs:
                     os.chown(tmpdir, int(popen["user"]), int(popen.get("group", -1)))
                 except OSError:
                     pass
+        opts.tmpdir = str(tmpdir)
         run = Run(rid=rid, d=d, adapter=adapters.make(d, opts), opts=opts, workdir=workdir, env=run_env,
                   run_as=popen, prefix=prefix, batch=batch, permission=permission, address=address,
                   title=str(params.get("title") or "")[:200], tmpdir=str(tmpdir), own_tmpdir=own)
@@ -933,10 +949,14 @@ class Runs:
         for text in notices:
             self._push(run, {"type": "error", "level": "warn", "text": text})
         try:
-            if prompt.strip():
-                self._push(run, {"type": "user", "text": prompt})
-                run.last_prompt = prompt
-                self._start_turn(run, prompt)
+            files = list(files or [])
+            if prompt.strip() or files:
+                files = await self._load_files(run, files)
+                self._push(run, self._user_event(prompt, files))
+                # kept without the image bytes: only the text fallback re-sends it, and it names the paths
+                run.last_prompt, run.last_files = (prompt if prompt.strip() else attachments.EMPTY_PROMPT,
+                                                   attachments.public(files))
+                self._start_turn(run, run.last_prompt, files)
             elif run.adapter.persistent:  # warm start: the process waits for the first message
                 self._spawn(run, run.adapter.argv())
                 self._push_all(run, run.adapter.start())
@@ -951,10 +971,26 @@ class Runs:
                 "adapter": run.adapter.name, "tmpdir": run.tmpdir, "permission": permission,
                 "model": model or None}
 
-    async def send(self, params: dict) -> dict:
+    @staticmethod
+    def _user_event(prompt: str, files: list[dict]) -> dict:
+        event: dict = {"type": "user", "text": prompt}
+        if files:
+            event["attachments"] = attachments.public(files)
+        return event
+
+    async def _load_files(self, run: Run, files: list[dict]) -> list[dict]:
+        """The inline images' bytes for adapters that send them (Claude, ACP), read in a thread."""
+        limit = run.adapter.inline_image_max if run.adapter.takes_files else 0
+        if not files or not limit:
+            return files
+        return await asyncio.to_thread(attachments.load_images, files, limit)
+
+    async def send(self, params: dict, *, files: list[dict] | None = None) -> dict:
+        """The next message. ``files``: its attachments, already checked by the hub (§18)."""
         run = self._run(params)
         prompt = params.get("prompt") if isinstance(params.get("prompt"), str) else ""
-        if not prompt.strip():
+        files = list(files or [])
+        if not prompt.strip() and not files:
             raise RunError("消息是空的", "empty")
         if len(prompt) > MAX_PROMPT:
             raise RunError("消息太长了", "too_long")
@@ -963,9 +999,13 @@ class Runs:
             raise RunError("上一轮还没有结束：等它结束，或者先停止", "busy")
         if model is not None and model != (run.opts.model or "") and run.d.adapter != "api":
             self.set_model(run, model)
-        self._push(run, {"type": "user", "text": prompt})
-        run.last_prompt = prompt
-        self._start_turn(run, prompt)
+        files = await self._load_files(run, files)
+        if run.adapter.turn_active or run.closed:  # a turn began while the images were read
+            raise RunError("上一轮还没有结束：等它结束，或者先停止", "busy")
+        self._push(run, self._user_event(prompt, files))
+        run.last_prompt, run.last_files = (prompt if prompt.strip() else attachments.EMPTY_PROMPT,
+                                           attachments.public(files))
+        self._start_turn(run, run.last_prompt, files)
         return {"ok": True, "session_id": run.session_id, "state": run.state, "model": run.opts.model or None}
 
     def set_model(self, run: Run, model: str) -> None:

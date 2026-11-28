@@ -63,6 +63,25 @@ const listFiles = (base) => async (device, path) => {
   return fetchJSON(`${base}/${enc(device)}/files?path=${enc(path || "")}`, { quiet: true });
 };
 
+/** Reads `length` bytes at `offset` of a GET response body (a whole-file download), then stops reading. */
+async function sliceBody(response, offset, length) {
+  const reader = response.body.getReader();
+  const parts = [];
+  let seen = 0, kept = 0, eof = false;
+  while (kept < length) {
+    const { done, value } = await reader.read();
+    if (done) { eof = true; break; }
+    const from = Math.max(0, offset - seen), to = Math.min(value.length, offset + length - seen);
+    if (to > from) { parts.push(value.subarray(from, to)); kept += to - from; }
+    seen += value.length;
+  }
+  if (!eof) reader.cancel().catch(() => {});
+  const bytes = new Uint8Array(kept);
+  let at = 0;
+  for (const part of parts) { bytes.set(part, at); at += part.length; }
+  return { bytes, eof, size: eof ? seen : null };
+}
+
 export function cloudAgentApi() {
   return {
     call: (op, params, device) => (device
@@ -76,6 +95,17 @@ export function cloudAgentApi() {
       });
     },
     files: listFiles("/api/devices"),
+    // §17: the page's CSP allows only 'self' and data: images -- an external image opens in a new tab instead
+    externalImages: false,
+    fileDownloadUrl: () => null,
+    /** files/1 read of a device without agent_file_read (an older AgentHub): {bytes, size, eof}. */
+    async fileBytes(device, path, { offset = 0, length = 1 << 20 } = {}) {
+      const response = await fetch(`/api/devices/${enc(device)}/files/read?path=${enc(path)}&offset=${offset}&length=${length}`,
+        { credentials: "same-origin", cache: "no-store" });
+      if (!response.ok) throw new Error(`读取失败（HTTP ${response.status}）`);
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      return { bytes, size: Number(response.headers.get("X-ANX-Size")) || null, eof: response.headers.get("X-ANX-EOF") === "1" };
+    },
     ...inboxCalls(),
   };
 }
@@ -113,6 +143,15 @@ export function localAgentApi() {
     },
     devicesNote: () => note,
     files: listFiles("/api/remote/devices"),
+    externalImages: true,
+    /** Another device's file as a same-origin attachment URL (files/1, streamed P2P or relayed); 本机: none. */
+    fileDownloadUrl: (device, path) => (device ? `/api/remote/devices/${enc(device)}/files/download?path=${enc(path)}` : null),
+    async fileBytes(device, path, { offset = 0, length = 1 << 20 } = {}) {
+      if (!device) throw new Error("本机不需要这条路");
+      const response = await fetch(`/api/remote/devices/${enc(device)}/files/download?path=${enc(path)}`, { credentials: "same-origin", cache: "no-store" });
+      if (!response.ok) throw new Error(`读取失败（HTTP ${response.status}）`);
+      return sliceBody(response, offset, length);
+    },
     ...inboxCalls(),
   };
 }

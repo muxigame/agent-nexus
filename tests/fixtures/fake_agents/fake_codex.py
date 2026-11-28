@@ -22,7 +22,9 @@ if os.environ.get("FAKE_ARGV_LOG"):
     with open(os.environ["FAKE_ARGV_LOG"], "a", encoding="utf-8") as handle:
         handle.write(json.dumps({"argv": args, "prompt": prompt, "path": os.environ.get("PATH"),
                                  "console": os.environ.get("ANX_CONSOLE_URL")}) + "\n")
-thread = args[args.index("resume") + 1] if "resume" in args else str(uuid.uuid4())
+# `exec resume [--image=<file>...] <id> <prompt>`: the first argument after "resume" that is not an option
+thread = next(a for a in args[args.index("resume") + 1:] if not a.startswith("-")) if "resume" in args \
+    else str(uuid.uuid4())
 
 
 def emit(obj):

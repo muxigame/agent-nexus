@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>对话压测 · Agent Nexus</title>
+<!-- A synthetic long session for ui/chat.js (docs/agent-chat.md §16.10): the real mountChat on agent-fake-api.js, with
+     agent_run_read / agent_session_read replaced by a generated Codex-like run of ~75 events per turn (thinking
+     deltas, 8 tools with 2–8 KB output each, an 80-line diff, a streamed answer with markdown and paths, usage, done).
+     Query flags:
+       ?live=N     N live events (agent_run_read, BATCH per read, GAP ms apart)   ?hist=N   N history events
+       ?batch=K    events per read (4)        ?gap=ms   pause between reads (5)
+       ?bigmsg=N   one answer streamed in N deltas (~90 KB at 1500)
+       ?mails=M    M mails in the conversation poll   ?asks=1   plus one open ask
+       ?ui=<dir>   load chat.js / ui.css from another folder (a baseline copy of agent_nexus/static/ui to compare with)
+     window.__bench: {delivered, done, openMs, ready}. A driver (playwright + CDP Performance.getMetrics) samples per
+     1000 events: main-thread task / layout / style time per event, DOM nodes, heap, long tasks; then 5 s idle. -->
+<script>{const ui=new URLSearchParams(location.search).get("ui")||"../../agent_nexus/static/ui";document.write(`<link rel="stylesheet" href="${ui}/tokens.css"><link rel="stylesheet" href="${ui}/ui.css">`)}</script>
+<style>html,body{margin:0;height:100%} #host{height:100vh}</style>
+</head>
+<body>
+<div id="host"></div>
+<script type="module">
+const q = new URLSearchParams(location.search);
+if (q.get('cv')) document.head.append(Object.assign(document.createElement('style'), { textContent: '.chat-stream > * { content-visibility: auto; contain-intrinsic-size: auto 44px; }' }));
+if (q.get('nolive')) document.head.append(Object.assign(document.createElement('style'), { textContent: '.chat-live { animation: none !important; }' }));
+if (q.get('nodots')) document.head.append(Object.assign(document.createElement('style'), { textContent: '.chat-dots i { animation: none !important; }' }));
+if (q.get('nopulse')) document.head.append(Object.assign(document.createElement('style'), { textContent: '.chat-live, .chat-dots i { animation: none !important; }' }));
+const UI = q.get("ui") || "../../agent_nexus/static/ui";
+const { mountChat } = await import(`${UI}/chat.js`);
+const { createFakeApi } = await import("./agent-fake-api.js");
+
+const HIST = Number(q.get("hist") || 0), LIVE = Number(q.get("live") || 0);
+const BATCH = Number(q.get("batch") || 4), GAP = Number(q.get("gap") || 5), MAILS = Number(q.get("mails") || 0);
+const NOW = Date.now() / 1000;
+const big = (n, seed) => { let s = ""; let i = 0; while (s.length < n) s += `line ${seed}.${i++}: ${"x".repeat(40 + (i * 7) % 60)} src/module_${i % 37}.py:${i}\n`; return s; };
+
+// one Codex-like turn ~ 75 events (thinking deltas, 8 tools each started + finished with long output, a diff,
+// the answer streamed in 40 deltas, usage, done)
+function turn(n, t0) {
+  const out = []; let t = t0;
+  const add = (ev) => out.push({ t: (t += 0.01), ...ev });
+  add({ type: "user", text: `第 ${n} 轮：继续处理任务 ${n}，并运行测试` });
+  add({ type: "status", state: "running" });
+  for (let i = 0; i < 15; i++) add({ type: "thinking", text: `思考 ${n}.${i} ${"推理".repeat(20)}\n`, delta: true });
+  for (let k = 0; k < 8; k++) {
+    const id = `t${n}_${k}`;
+    add({ type: "tool", id, name: k % 3 ? "Bash" : "Task", title: `pytest -q tests/test_${k}.py`, status: "running", input: { command: `pytest -q tests/test_${k}.py` } });
+    add({ type: "tool", id, status: "ok", output: big(2000 + (k * 811) % 6000, `${n}.${k}`) });
+  }
+  add({ type: "file_change", path: `src/mod_${n}.py`, kind: "edit", diff: Array.from({ length: 80 }, (_, i) => (i % 3 ? `+ added line ${i}` : `- removed ${i}`)).join("\n") });
+  for (let i = 0; i < 40; i++) add({ type: "message", role: "assistant", delta: true,
+    text: i === 0 ? `| 文件 | 改动 |\n|---|---:|\n| \`src/mod_${n}.py:${n}\` | +${n} |\n\n` : `${i % 10 === 0 ? "\n\n- " : ""}这是第 ${n} 轮回答的第 ${i} 段 **加粗** *斜体* \`code\` 见 src/module_${i}.py:${i}，` });
+  add({ type: "usage", context: { used: 20000 + n * 300, limit: 200000 }, turn: { input: 3000, output: 400 } });
+  add({ type: "status", state: "done" });
+  return out;
+}
+function events(count, t0) { const out = []; let n = 0; while (out.length < count) out.push(...turn(n++, t0 + n)); return out.slice(0, count); }
+
+const history = HIST ? events(HIST, NOW - 86400).filter((e) => !e.delta) : [];
+const BIG = Number(q.get("bigmsg") || 0);
+const liveEvents = BIG ? [{ type: "status", state: "running", t: NOW + 10 }, ...Array.from({ length: BIG }, (_, i) => ({ type: "message", role: "assistant", delta: true, t: NOW + 11 + i / 1000,
+  text: (i % 8 === 0 ? "\n\n" : "") + (i % 40 === 5 ? "\n```js\nconst x = 1;\n```\n\n" : "") + `- 第 ${i} 项 **重点** \`code\` 说明文字，继续写 https://example.com/x${i}\n` }))]
+  : LIVE ? events(LIVE, NOW + 10) : [];
+let cursor = 0;
+const B = window.__bench = { delivered: 0, syncMs: 0, reads: 0, lastReturn: 0, samples: [], done: !LIVE, convTicks: 0, convMs: 0 };
+
+const base = createFakeApi({ activeRun: false });
+const run = { rid: "bench", kind: "codex", session_id: "bench", workdir: "/Users/lin/projects/agent-nexus", state: "running", started_at: NOW, address: "codex-bench@本机" };
+const session = { kind: "codex", id: "bench", title: "长会话压测", cwd: "/Users/lin/projects/agent-nexus", updated_at: NOW, messages: 999, address: run.address };
+const mails = Array.from({ length: MAILS }, (_, i) => ({ id: `m${i}`, from: "codex-sub@本机", to: "me", subject: `子任务 ${i} 完成`, body: big(800, `mail${i}`), t: NOW - 1000 + i }));
+const asks = q.get("asks") ? [{ ask_id: "q1", question: "继续吗？", options: ["是", "否"], state: "open", t: NOW + 5 }] : [];
+
+const api = {
+  ...base,
+  async conversation() { const t = performance.now(); B.convTicks++; queueMicrotask(() => { B.convMs += 0; }); return { messages: mails, asks }; },
+  async call(op, p = {}, device) {
+    if (op === "agent_run_read") {
+      const now = performance.now();
+      if (B.lastReturn) { B.syncMs += now - B.lastReturn; }
+      if (cursor >= liveEvents.length) { B.done = true; await new Promise((r) => setTimeout(r, 1000)); B.lastReturn = 0; return { events: [], cursor, state: "running" }; }
+      await new Promise((r) => setTimeout(r, GAP));
+      const chunk = liveEvents.slice(cursor, cursor + BATCH);
+      cursor += chunk.length;
+      B.delivered = cursor; B.reads++;
+      const result = { events: chunk.map((e, i) => ({ seq: cursor - chunk.length + i + 1, ...e })), cursor, state: "running" };
+      B.lastReturn = performance.now();
+      return result;
+    }
+    if (op === "agent_sessions") return { sessions: [session, ...(await base.call(op, p, device)).sessions] };
+    if (op === "agent_session_read" && p.id === "bench") { const t = performance.now(); const r = { events: history, address: run.address }; return r; }
+    if (op === "agent_run_list") return { runs: LIVE ? [run] : [] };
+    return base.call(op, p, device);
+  },
+};
+const t0 = performance.now();
+const chat = mountChat(document.getElementById("host"), api, { storageKey: "bench", persistent: true, want: { device: "dev-mbp", session: { kind: "codex", id: "bench" } } });
+window.__chat = chat;
+await chat.ready;
+B.openMs = performance.now() - t0;
+B.ready = true;
+</script>
+</body>
+</html>

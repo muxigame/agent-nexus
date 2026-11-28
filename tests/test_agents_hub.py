@@ -112,6 +112,10 @@ async def test_handlers_are_exactly_the_spec_ops_and_never_raise(hub):
         "agent_session_meta", "agent_run_open", "agent_run_send", "agent_run_read", "agent_run_answer",
         "agent_run_stop", "agent_run_close", "agent_run_list", "agent_dirs", "agent_prompts", "agent_prompt_save",
         "agent_prompt_preview", "agent_tmp_list", "agent_tmp_clean", "agent_models",
+        # §17: paths named in messages
+        "agent_file_stat", "agent_file_read",
+        # §18: attachments
+        "agent_attach_begin", "agent_attach_put", "agent_attach_drop",
         # §16.4: API providers
         "agent_api_providers", "agent_api_provider_save", "agent_api_provider_delete", "agent_api_key_set",
         "agent_api_test", "agent_api_models"}
@@ -447,6 +451,22 @@ async def test_remote_callers_cannot_use_full_unless_allowed(hub, box):
     info = await remote["agent_info"]({})
     assert info["policy"]["full"] is False
     assert hub_mod.remote_handlers(hub.handlers(), allow_full=True).keys() == set(OPS)
+
+
+async def test_remote_file_views_follow_the_file_share_switch(hub, box):
+    secret = box["home"] / "secret.txt"
+    secret.write_text("private")
+    open_remote = hub_mod.remote_handlers(hub.handlers(), allow_full=True)
+    assert (await open_remote["agent_file_read"]({"path": str(secret), "mode": "text"}))["text"] == "private"
+    closed = hub_mod.remote_handlers(hub.handlers(), allow_full=False, files=hub.files)
+    assert closed.keys() == set(OPS)
+    assert (await closed["agent_file_read"]({"path": str(secret), "mode": "bytes"}))["code"] == "files_disabled"
+    stat = (await closed["agent_file_stat"]({"paths": [str(secret)]}))["files"][0]
+    assert stat["exists"] is False and stat["code"] == "files_disabled"
+    inside = Path(hub.tmp.base) / "r-test" / "a.txt"
+    inside.parent.mkdir(parents=True, exist_ok=True)
+    inside.write_text("attachment")
+    assert (await closed["agent_file_read"]({"path": str(inside), "mode": "text"}))["text"] == "attachment"
 
 
 # ---------------------------------------------------------------------------------------------- 本机 MCP
@@ -901,3 +921,133 @@ def test_devices_cli_hint_names_run_in_background_only_for_claude():
         text = hub_mod.devices_cli_hint(kind=kind, adapter=adapter, permission="full", runnable=True,
                                         local_state="ready")
         assert "run_in_background" not in text and "--detach" in text and "anx wait" in text
+
+
+# ---------------------------------------------------------------------------------------------- attachments (§18)
+
+PNG = bytes.fromhex("89504e470d0a1a0a0000000d4948445200000001000000010806000000"
+                    "1f15c4890000000d49444154789c63f8cfc0f01f0005050200" "5fc8f1d20000000049454e44ae426082")
+
+
+async def put_file(handlers, where: dict, name: str, data: bytes) -> dict:
+    import base64
+    result = await handlers["agent_attach_put"]({**where, "name": name, "size": len(data), "offset": 0,
+                                                 "data": base64.b64encode(data).decode()})
+    assert "error" not in result and result["done"], result
+    return result
+
+
+async def test_attachments_go_to_the_stage_then_the_run_and_leave_with_the_session(hub, box):
+    handlers = hub.handlers()
+    log = box["tmp"] / "argv.jsonl"
+    os.environ["FAKE_ARGV_LOG"] = str(log)
+    session_id = "019a6f2e-3c4d-7e8f-9a0b-1c2d3e4f5a6b"
+    try:
+        info = await handlers["agent_info"]({})
+        assert info["caps"]["attachments"]["chunk"] == 512 * 1024 and info["caps"]["relocate"]
+        stage = await handlers["agent_attach_begin"]({"kind": "codex", "resume_id": session_id})
+        assert stage["stage"].startswith("s") and stage["dir"].endswith(os.path.join(stage["stage"], "attachments"))
+        shot = await put_file(handlers, {"stage": stage["stage"]}, "截图 1.png", PNG)
+        notes = await put_file(handlers, {"stage": stage["stage"]}, "notes.md", b"# hi")
+        gone = await put_file(handlers, {"stage": stage["stage"]}, "gone.txt", b"x")
+        assert (await handlers["agent_attach_drop"]({"stage": stage["stage"], "path": gone["path"]}))["ok"]
+        refused = await handlers["agent_attach_put"]({"stage": "s-unknown", "name": "a", "size": 1, "offset": 0, "data": "eA=="})
+        assert refused["code"] == "not_found"
+        outside = await handlers["agent_run_open"]({"kind": "codex", "workdir": str(box["home"] / "proj"), "prompt": "x",
+                                                    "stage": stage["stage"], "attachments": ["/etc/passwd"]})
+        assert outside["code"] == "bad_attachment" and not hub.runs.runs
+        opened = await handlers["agent_run_open"]({"kind": "codex", "workdir": str(box["home"] / "proj"), "prompt": "",
+                                                   "resume_id": session_id, "stage": stage["stage"],
+                                                   "attachments": [shot["path"], notes["path"]]})
+        assert "error" not in opened, opened
+        rid = opened["rid"]
+        assert rid == stage["stage"] and opened["tmpdir"] == str(Path(stage["dir"]).parent), "the stage is the run's"
+        events = await read_until(handlers, rid, turns_ended(1))
+        user = next(e for e in events if e["type"] == "user")
+        assert [a["name"] for a in user["attachments"]] == ["截图_1.png", "notes.md"] and user["text"] == ""
+        argv = json.loads(log.read_text().splitlines()[-1])
+        assert f"--image={shot['path']}" in argv["argv"] and notes["path"] in argv["prompt"]
+        # the next message's attachments go straight to the run
+        more = await put_file(handlers, {"rid": rid}, "more.png", PNG)
+        sent = await handlers["agent_run_send"]({"rid": rid, "prompt": "and this", "attachments": [more["path"]]})
+        assert sent.get("ok"), sent
+        await read_until(handlers, rid, turns_ended(2))
+        assert f"--image={more['path']}" in json.loads(log.read_text().splitlines()[-1])["argv"]
+        bad = await handlers["agent_run_send"]({"rid": rid, "prompt": "x", "attachments": [str(box["home"] / "a")]})
+        assert bad["code"] == "bad_attachment"
+        await handlers["agent_run_close"]({"rid": rid})
+        assert Path(more["path"]).exists()
+        deleted = await handlers["agent_session_meta"]({"kind": "codex", "id": session_id, "delete_file": True})
+        assert deleted["ok"] and deleted.get("tmp_removed") == 1 and not Path(more["path"]).exists()
+    finally:
+        os.environ.pop("FAKE_ARGV_LOG", None)
+
+
+async def test_staged_attachments_follow_a_session_already_running_elsewhere(hub, box):
+    handlers = hub.handlers()
+    work = str(box["home"] / "proj")
+    first = await handlers["agent_run_open"]({"kind": "codex", "workdir": work, "prompt": "hi"})
+    events = await read_until(handlers, first["rid"], turns_ended(1))
+    session_id = next(e["session_id"] for e in events if e.get("session_id"))
+    stage = await handlers["agent_attach_begin"]({"kind": "codex"})
+    shot = await put_file(handlers, {"stage": stage["stage"]}, "a.png", PNG)
+    again = await handlers["agent_run_open"]({"kind": "codex", "workdir": work, "resume_id": session_id, "prompt": "",
+                                              "stage": stage["stage"], "attachments": [shot["path"]]})
+    assert again["attached"] and again.get("sent"), again
+    events = await read_until(handlers, first["rid"], turns_ended(2))
+    user = [e for e in events if e["type"] == "user"][-1]
+    assert user["attachments"][0]["path"] == os.path.join(first["tmpdir"], "attachments", "a.png")
+    await handlers["agent_run_close"]({"rid": first["rid"]})
+
+
+# ---------------------------------------------------------------------------------------------- resume elsewhere (§19)
+
+CLAUDE_ID = "7f3c1e2a-5b4d-4c6e-8f90-1a2b3c4d5e6f"
+
+
+async def test_claude_continues_in_a_new_folder_from_a_copy_and_the_original_stays(hub, box):
+    handlers = hub.handlers()
+    original = box["home"] / ".claude" / "projects" / "-home-u-proj" / f"{CLAUDE_ID}.jsonl"
+    (original.parent / CLAUDE_ID / "subagents").mkdir(parents=True)
+    (original.parent / CLAUDE_ID / "subagents" / "agent-1.jsonl").write_text("{}\n")
+    before = original.read_bytes()
+    listed = {s["id"]: s for s in (await handlers["agent_sessions"]({"kind": "claude"}))["sessions"]}
+    assert listed[CLAUDE_ID]["cwd_missing"]
+    work = box["home"] / "proj"
+    opened = await handlers["agent_run_open"]({"kind": "claude", "workdir": str(work), "prompt": "继续",
+                                               "resume_id": CLAUDE_ID})
+    assert "error" not in opened, opened
+    assert opened["moved_from"] == "/home/u/proj"
+    events = await read_until(handlers, opened["rid"], turns_ended(1))
+    assert "echo: 继续" in "".join(e.get("text", "") for e in events if e["type"] == "message")
+    copy = box["home"] / ".claude" / "projects" / sessions.claude_project_name(str(work)) / f"{CLAUDE_ID}.jsonl"
+    assert copy.read_bytes() == before and original.read_bytes() == before
+    assert (copy.parent / CLAUDE_ID / "subagents" / "agent-1.jsonl").exists()
+    listed = {s["id"]: s for s in (await handlers["agent_sessions"]({"kind": "claude"}))["sessions"]}
+    assert listed[CLAUDE_ID]["cwd"] == str(work) and not listed[CLAUDE_ID].get("cwd_missing")
+    await handlers["agent_run_close"]({"rid": opened["rid"]})
+    # once more in the same folder: no second copy, no error
+    again = await handlers["agent_run_open"]({"kind": "claude", "workdir": str(work), "prompt": "再来",
+                                              "resume_id": CLAUDE_ID})
+    assert "error" not in again and "moved_from" not in again, again
+    await read_until(handlers, again["rid"], turns_ended(1))
+    await handlers["agent_run_close"]({"rid": again["rid"]})
+    assert original.read_bytes() == before
+
+
+async def test_codex_moves_without_a_copy_and_dsh_refuses_instead_of_starting_afresh(hub, box):
+    handlers = hub.handlers()
+    work = str(box["home"] / "proj")
+    session_id = "019a6f2e-3c4d-7e8f-9a0b-1c2d3e4f5a6b"
+    rollouts = sorted(str(p) for p in (box["home"] / ".codex").rglob("*.jsonl"))
+    opened = await handlers["agent_run_open"]({"kind": "codex", "workdir": work, "prompt": "hi", "resume_id": session_id})
+    assert opened["moved_from"] == "/home/u/proj"
+    await read_until(handlers, opened["rid"], turns_ended(1))
+    await handlers["agent_run_close"]({"rid": opened["rid"]})
+    assert sorted(str(p) for p in (box["home"] / ".codex").rglob("*.jsonl")) == rollouts
+    listed = {s["id"]: s for s in (await handlers["agent_sessions"]({"kind": "codex"}))["sessions"]}
+    assert listed[session_id]["cwd"] == work and not listed[session_id].get("cwd_missing")
+    dsh = await handlers["agent_run_open"]({"kind": "dsh", "workdir": work, "prompt": "hi",
+                                            "resume_id": "sess_01JD7ZK9Q8V2W3X4Y5Z6A7B8C9"})
+    assert dsh["code"] == "relocate_unsupported" and "/home/u/proj" in dsh["error"]
+    assert not hub.runs.runs

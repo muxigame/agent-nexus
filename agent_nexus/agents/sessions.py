@@ -495,7 +495,9 @@ def _claude_summary(path: Path, stat: os.stat_result) -> list[dict]:
     messages, seen_assistant = 0, set()
     for record in records:
         kind = record.get("type")
-        if not out["cwd"] and isinstance(record.get("cwd"), str):
+        if isinstance(record.get("cwd"), str) and record["cwd"]:
+            # the last folder it ran in (a resume from another folder stamps its records with that one, §19)
+            out["first_cwd"] = out.get("first_cwd") or record["cwd"]
             out["cwd"] = record["cwd"]
         if isinstance(record.get("sessionId"), str) and record.get("sessionId") and out["id"] == path.stem \
                 and not _UUID.fullmatch(path.stem):
@@ -698,7 +700,9 @@ def _codex_summary(path: Path, stat: os.stat_result) -> list[dict]:
         past = ordinal is None or items >= ordinal  # tail records are past the fork point iff the head reached it
         if ordinal is not None and not in_head and past:
             own_seen = True
-        if not out["cwd"] and kind == "turn_context" and isinstance(payload.get("cwd"), str):
+        if kind == "turn_context" and isinstance(payload.get("cwd"), str) and payload["cwd"]:
+            # the folder of the latest turn: `exec resume -C <other>` moves the thread (§19)
+            out["first_cwd"] = out.get("first_cwd") or out["cwd"] or payload["cwd"]
             out["cwd"] = payload["cwd"]
         if kind == "event_msg" and payload.get("type") == "user_message":
             text = str(payload.get("message") or "").strip()
@@ -1043,6 +1047,11 @@ def _merge(kind: str, parts: list[dict], label: str) -> dict:
             if part.get(key) is not None and part.get(key) != "":
                 return part[key]
         return None
+    # the folder of the most recently written part: a Claude session continued in another folder has its copy
+    # there (relocate_claude), a Codex thread its newest rollout (§19)
+    with_cwd = [p for p in parts if p.get("cwd")]
+    cwd = max(with_cwd, key=lambda p: (p.get("mtime") or 0, p.get("updated_at") or 0))["cwd"] if with_cwd else None
+    cwds = list(dict.fromkeys(c for p in parts for c in (p.get("cwd"), p.get("first_cwd")) if c))
     updated = max((p["updated_at"] or 0) for p in parts) or None
     mtime = max(p["mtime"] for p in parts)
     title = best["title"] or ""
@@ -1052,7 +1061,8 @@ def _merge(kind: str, parts: list[dict], label: str) -> dict:
     counts = [p["messages"] for p in parts if isinstance(p.get("messages"), int)]
     created = [p["created_at"] for p in parts if p.get("created_at")]
     return {
-        "kind": kind, "id": session_id, "title": title, "cwd": first("cwd"),
+        "kind": kind, "id": session_id, "title": title, "cwd": cwd,
+        **({"cwds": cwds} if len(cwds) > 1 else {}),
         "updated_at": round(max(updated or 0, mtime), 3), "created_at": round(min(created), 3) if created else None,
         "messages": max(counts) if counts else None, "size": sum(p["fsize"] for p in parts if not p.get("shared")),
         "source": "disk", "managed": False, "pinned": False, "archived": any(p.get("cli_archived") for p in parts),
@@ -2080,6 +2090,259 @@ def delete_files(defs: Any, home: Path, kind: str, session_id: str, *,
     return deleted
 
 
+# ============================================================================================ moving a session (§19)
+
+#: Claude Code cuts a project folder name to this many characters and adds a hash of the path.
+CLAUDE_DIR_MAX = 200
+_O_DIR = getattr(os, "O_DIRECTORY", 0)
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+
+
+def _java_hash(text: str) -> int:
+    """JavaScript's ``h = (h << 5) - h + charCodeAt(i) | 0`` over UTF-16 code units (Claude Code's folder hash)."""
+    h = 0
+    data = text.encode("utf-16-le")
+    for i in range(0, len(data), 2):
+        h = (h * 31 + (data[i] | data[i + 1] << 8)) & 0xFFFFFFFF
+    return h - (1 << 32) if h >= 1 << 31 else h
+
+
+def _base36(n: int) -> str:
+    digits = "0123456789abcdefghijklmnopqrstuvwxyz"
+    out = ""
+    while True:
+        n, r = divmod(n, 36)
+        out = digits[r] + out
+        if not n:
+            return out
+
+
+def claude_project_name(cwd: str) -> str:
+    """The folder under ``~/.claude/projects`` Claude Code keeps a working folder's sessions in: every character
+    but ``[A-Za-z0-9]`` becomes ``-``; past 200 characters the name is cut and ``-<base36 |hash|>`` added."""
+    import unicodedata
+    cwd = unicodedata.normalize("NFC", cwd)
+    # JavaScript replaces UTF-16 code units: a character outside the BMP becomes two dashes
+    name = "".join(c if c.isascii() and c.isalnum() else "--" if ord(c) > 0xFFFF else "-" for c in cwd)
+    if len(name) <= CLAUDE_DIR_MAX:
+        return name
+    return f"{name[:CLAUDE_DIR_MAX]}-{_base36(abs(_java_hash(cwd)))}"
+
+
+def claude_config_dir(home: Path, env: Mapping[str, str] | None = None) -> Path:
+    value = _env(env).get("CLAUDE_CONFIG_DIR")
+    return Path(os.path.expanduser(value)) if value else Path(home) / ".claude"
+
+
+def claude_project_dir(home: Path, cwd: str, env: Mapping[str, str] | None = None) -> Path:
+    return claude_config_dir(home, env) / "projects" / claude_project_name(cwd)
+
+
+class _Walk:
+    """Root copying into a run-as account's folders (POSIX): every folder opened from ``/`` without following
+    links, so a link the account planted never points the copy elsewhere; everything created is handed over."""
+
+    def __init__(self, owner: int | None, group: int | None) -> None:
+        self.owner, self.group = owner, group
+
+    def open_dir(self, path: Path, *, create: bool = False) -> int:
+        real = os.path.realpath(path) if not create else None
+        parts = Path(real or os.path.abspath(path)).parts
+        fd = os.open("/", os.O_RDONLY | _O_DIR)
+        try:
+            for depth, part in enumerate(parts[1:], 1):
+                try:
+                    child = os.open(part, os.O_RDONLY | _O_DIR | _O_NOFOLLOW, dir_fd=fd)
+                except FileNotFoundError:
+                    if not create:
+                        raise
+                    os.mkdir(part, 0o700, dir_fd=fd)
+                    child = os.open(part, os.O_RDONLY | _O_DIR | _O_NOFOLLOW, dir_fd=fd)
+                    self.give(child)
+                os.close(fd)
+                fd = child
+            return fd
+        except BaseException:
+            os.close(fd)
+            raise
+
+    def give(self, fd: int) -> None:
+        if self.owner is not None:
+            try:
+                os.fchown(fd, self.owner, self.group if self.group is not None else -1)
+            except OSError:
+                pass
+
+    def copy_file(self, src_dir: int, name: str, dst_dir: int, target: str) -> None:
+        src = os.open(name, os.O_RDONLY | _O_NOFOLLOW, dir_fd=src_dir)
+        try:
+            info = os.fstat(src)
+            if not stat_mod.S_ISREG(info.st_mode) or (self.owner is not None and info.st_uid != self.owner):
+                raise PermissionError(f"不是这个账户自己的文件：{name}")
+            temporary = f".{target}.anx-{os.getpid()}.tmp"
+            dst = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW, 0o600, dir_fd=dst_dir)
+            try:
+                self.give(dst)
+                while True:
+                    chunk = os.read(src, 1 << 20)
+                    if not chunk:
+                        break
+                    view = memoryview(chunk)
+                    while view:
+                        view = view[os.write(dst, view):]
+                os.utime(dst, ns=(info.st_atime_ns, info.st_mtime_ns))
+            finally:
+                os.close(dst)
+            os.replace(temporary, target, src_dir_fd=dst_dir, dst_dir_fd=dst_dir)
+        finally:
+            os.close(src)
+
+    def copy_tree(self, src_dir: int, dst_dir: int, depth: int = 0) -> None:
+        if depth > 8:
+            return
+        with os.scandir(src_dir) as entries:
+            items = list(entries)
+        for entry in items:
+            if entry.is_symlink():
+                continue
+            if entry.is_dir(follow_symlinks=False):
+                try:
+                    os.mkdir(entry.name, 0o700, dir_fd=dst_dir)
+                except FileExistsError:
+                    pass
+                child_src = os.open(entry.name, os.O_RDONLY | _O_DIR | _O_NOFOLLOW, dir_fd=src_dir)
+                try:
+                    child_dst = os.open(entry.name, os.O_RDONLY | _O_DIR | _O_NOFOLLOW, dir_fd=dst_dir)
+                    try:
+                        self.give(child_dst)
+                        self.copy_tree(child_src, child_dst, depth + 1)
+                    finally:
+                        os.close(child_dst)
+                finally:
+                    os.close(child_src)
+            elif entry.is_file(follow_symlinks=False):
+                try:
+                    os.stat(entry.name, dir_fd=dst_dir, follow_symlinks=False)
+                    continue  # already there (a second move into the same folder)
+                except FileNotFoundError:
+                    pass
+                self.copy_file(src_dir, entry.name, dst_dir, entry.name)
+
+
+def relocate_claude(home: Path, session: Mapping[str, Any], new_cwd: str, *,
+                    env: Mapping[str, str] | None = None) -> Path | None:
+    """Continue a Claude Code session in ``new_cwd`` (§19): copy its transcript ``<id>.jsonl`` and its ``<id>/``
+    folder (sub-agents, tool results) into the project folder Claude Code uses for ``new_cwd``, so a plain
+    ``--resume <id>`` there finds it and appends to the copy -- the original stays byte for byte as it was (a link
+    would not: the CLI appends). Nothing is done when the copy already exists. Returns the transcript Claude will
+    use, or None when the session has no transcript file. Raises OSError / PermissionError when it cannot copy."""
+    source = session.get("file")
+    session_id = str(session.get("id") or "")
+    if not source or not session_id or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", session_id):
+        return None
+    source = Path(source)
+    if source.suffix != ".jsonl":
+        return None
+    if not WINDOWS:
+        # Claude Code (Node) names the project folder after process.cwd(), the physical path: a folder reached
+        # through a link (macOS /tmp -> /private/tmp, a linked home or projects folder) must be resolved here too,
+        # or the copy lands in a project folder ``--resume`` never reads. (On Windows Node keeps a junction's path.)
+        new_cwd = os.path.realpath(new_cwd)
+    target_dir = claude_project_dir(home, new_cwd, env)
+    target = target_dir / f"{session_id}.jsonl"
+    if os.path.lexists(target):
+        return target
+    if os.path.realpath(source.parent) == os.path.realpath(target_dir):
+        return source
+    owner = required_owner(home)
+    if owner is None or WINDOWS or not hasattr(os, "fchown"):
+        # this process is the account (or Windows): its own files, a plain copy
+        target_dir.mkdir(parents=True, exist_ok=True)
+        temporary = target_dir / f".{target.name}.anx-{os.getpid()}.tmp"
+        shutil.copy2(source, temporary)
+        os.replace(temporary, target)
+        extra = source.parent / session_id
+        if extra.is_dir() and not extra.is_symlink():
+            shutil.copytree(extra, target_dir / session_id, symlinks=True, dirs_exist_ok=True)
+        return target
+    # root serving the run-as account: only the account's own files, never through a link it planted
+    try:
+        group = os.stat(home).st_gid
+    except OSError:
+        group = None
+    walk = _Walk(owner, group)
+    config = claude_config_dir(home, env)
+    config_fd = walk.open_dir(config)
+    try:
+        if os.fstat(config_fd).st_uid != owner:
+            raise PermissionError(f"{config} 不属于执行账户")
+        try:
+            os.mkdir("projects", 0o700, dir_fd=config_fd)
+            created = True
+        except FileExistsError:
+            created = False
+        projects = os.open("projects", os.O_RDONLY | _O_DIR | _O_NOFOLLOW, dir_fd=config_fd)
+    finally:
+        os.close(config_fd)
+    try:
+        if created:
+            walk.give(projects)
+        try:
+            os.mkdir(target_dir.name, 0o700, dir_fd=projects)
+            fresh = True
+        except FileExistsError:
+            fresh = False
+        dst = os.open(target_dir.name, os.O_RDONLY | _O_DIR | _O_NOFOLLOW, dir_fd=projects)
+    finally:
+        os.close(projects)
+    try:
+        if fresh:
+            walk.give(dst)
+        src = walk.open_dir(source.parent)
+        try:
+            walk.copy_file(src, source.name, dst, target.name)
+            try:
+                extra = os.open(session_id, os.O_RDONLY | _O_DIR | _O_NOFOLLOW, dir_fd=src)
+            except OSError:
+                extra = None
+            if extra is not None:
+                try:
+                    try:
+                        os.mkdir(session_id, 0o700, dir_fd=dst)
+                    except FileExistsError:
+                        pass
+                    extra_dst = os.open(session_id, os.O_RDONLY | _O_DIR | _O_NOFOLLOW, dir_fd=dst)
+                    try:
+                        walk.give(extra_dst)
+                        walk.copy_tree(extra, extra_dst)
+                    finally:
+                        os.close(extra_dst)
+                finally:
+                    os.close(extra)
+        finally:
+            os.close(src)
+    finally:
+        os.close(dst)
+    clear_cache()
+    return target
+
+
+def same_dir(a: str | None, b: str | None) -> bool:
+    """Two folder paths name the same folder (as the CLIs compare them: normalized, case-insensitive on Windows
+    and macOS, links resolved when they exist)."""
+    if not a or not b:
+        return False
+
+    def key(path: str) -> str:
+        try:
+            path = os.path.realpath(path) if os.path.exists(path) else os.path.abspath(path)
+        except (OSError, ValueError):
+            path = os.path.abspath(path)
+        path = os.path.normpath(path)
+        return path.casefold() if WINDOWS or sys.platform == "darwin" else path
+    return key(a) == key(b)
+
+
 # ============================================================================================ SessionMeta
 
 class SessionMeta:
@@ -2208,6 +2471,13 @@ class SessionMeta:
                         entry["context"] = {"device": device.strip()[:200], "workdir": workdir.strip()[:1000]}
                     else:
                         entry.pop("context", None)
+                elif name == "cwd" and (value is None or isinstance(value, str)):
+                    # the folder a console run continued the session in (§19): listed until the CLI's own records say
+                    if value:
+                        entry["cwd"], entry["cwd_at"] = value[:2000], round(time.time(), 3)
+                    else:
+                        entry.pop("cwd", None)
+                        entry.pop("cwd_at", None)
                 elif name in ("rid", "address", "model") and (value is None or isinstance(value, str)):
                     # rid: the console run using it; address: its mailbox address (§10), shown again on reopen;
                     # model: the model the console last asked for (§16.7)
@@ -2249,6 +2519,12 @@ class SessionMeta:
                 session["address"] = entry["address"]
             if isinstance(entry.get("context"), dict):
                 session["context"] = {"mode": "gateway", **entry["context"]}
+            moved = entry.get("cwd")
+            if isinstance(moved, str) and moved and moved != session.get("cwd") \
+                    and float(entry.get("cwd_at") or 0) >= float(session.get("updated_at") or 0) - 1:
+                session["cwds"] = list(dict.fromkeys([*(session.get("cwds") or []), session.get("cwd"), moved]))
+                session["cwds"] = [c for c in session["cwds"] if c]
+                session["cwd"] = moved
         return sessions
 
 

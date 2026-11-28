@@ -36,13 +36,13 @@ const FILES = {
 function agentsFor(device) {
   return [
     // §16.7: models {flag, protocol, hints}: a model chip when the CLI takes one by flag or over ACP
-    { kind: "claude", label: "Claude Code", installed: true, path: `${HOME}/.local/bin/claude`, version: "2.1.3 (Claude Code)", login: "ok", gateway_mcp: true, supports: { resume: true, approvals: true, stream: true },
+    { kind: "claude", label: "Claude Code", installed: true, path: `${HOME}/.local/bin/claude`, version: "2.1.3 (Claude Code)", login: "ok", gateway_mcp: true, supports: { resume: true, relocate: true, approvals: true, stream: true },
       models: { flag: true, protocol: false, hints: [{ id: "sonnet", label: "Sonnet", desc: "日常编码" }, { id: "opus", label: "Opus", desc: "更强，更慢" }, { id: "haiku", label: "Haiku", desc: "最快" }, { id: "opusplan", label: "Opus Plan", desc: "规划用 Opus，执行用 Sonnet" }] } },
-    { kind: "codex", label: "Codex", installed: true, path: device === "dev-win" ? "C:\\Users\\you\\AppData\\Roaming\\npm\\codex.cmd" : "/opt/homebrew/bin/codex", version: "codex-cli 0.172.0", login: "ok", gateway_mcp: false, supports: { resume: true, approvals: false, stream: true },
+    { kind: "codex", label: "Codex", installed: true, path: device === "dev-win" ? "C:\\Users\\you\\AppData\\Roaming\\npm\\codex.cmd" : "/opt/homebrew/bin/codex", version: "codex-cli 0.172.0", login: "ok", gateway_mcp: false, supports: { resume: true, relocate: true, approvals: false, stream: true },
       models: { flag: true, protocol: false, hints: [] } },
     { kind: "dsh", label: "DeepSeek Harness", installed: false, path: null, version: null, login: "unknown", install: null, supports: { resume: true, approvals: true, stream: true },
       models: { flag: false, protocol: true, hints: [] } },
-    { kind: "gemini", label: "Gemini CLI", installed: true, path: "/opt/homebrew/bin/gemini", version: "0.9.1", login: "missing", supports: { resume: true, approvals: true, stream: true },
+    { kind: "gemini", label: "Gemini CLI", installed: true, path: "/opt/homebrew/bin/gemini", version: "0.9.1", login: params.get("gemini") === "ok" ? "ok" : "missing", supports: { resume: true, approvals: true, stream: true },
       models: { flag: true, protocol: true, hints: [{ id: "auto", label: "自动" }, { id: "pro", label: "Pro" }, { id: "flash", label: "Flash" }] } },
     // §16.4: every enabled model of a provider is an Agent (adapter "api"); the picker lists them as 「API 模型」
     { kind: "api:deepseek/deepseek-chat", label: "DeepSeek V3", adapter: "api", provider_label: "DeepSeek", installed: true, login: "ok", supports: { resume: true, approvals: true, stream: true } },
@@ -62,6 +62,10 @@ const SESSIONS = params.get("state") === "first" ? [] : [
   { kind: "gemini", id: "g-5521", title: "总结这周的会议记录", cwd: `${HOME}/notes`, updated_at: NOW - 86400 * 4, messages: 6 },
   { kind: "claude", id: "c-77aa", title: "重构 mailbox 的存储层", cwd: `${P}/agent-nexus`, updated_at: NOW - 86400 * 12, messages: 88, archived: true },
   { kind: "codex", id: "x-3b3b", title: "试验：用 uv 管理依赖", cwd: `${P}/sandbox`, updated_at: NOW - 86400 * 20, messages: 4, archived: true },
+  // §14: the folder of these two is gone: Claude can continue in a new folder, Gemini cannot (bound to its folder)
+  { kind: "claude", id: "c-old1", title: "旧仓库里的部署脚本整理（目录已被删除）", cwd: `${P}/old-deploy`, cwd_missing: true, updated_at: NOW - 86400 * 6, messages: 14 },
+  { kind: "gemini", id: "g-old2", title: "旧笔记目录里的周报（目录已被删除）", cwd: `${HOME}/old-notes`, cwd_missing: true, updated_at: NOW - 86400 * 8, messages: 5 },
+  { kind: "claude", id: "c-md17", title: "整理 OAuth 修复的改动清单（Markdown、图片、文件链接演示）", cwd: `${P}/agent-nexus`, updated_at: NOW - 3600 * 3, messages: 4 },
   { kind: "api:deepseek/deepseek-chat", id: "a-0c11", title: "解释一下 SSE 和 WebSocket 的取舍", cwd: `${P}/agent-nexus`, updated_at: NOW - 86400 * 1.6, messages: 4 },
 ];
 
@@ -79,6 +83,42 @@ const DIFF = `@@ -41,9 +41,12 @@ async def oauth_callback(request):
 +    request.session["user"] = token.user
      return RedirectResponse(request.session.get("next", "/"))`;
 
+// §17: full markdown, images and file links (agent_file_stat / agent_file_read of the fake FS below)
+const MD_DEMO = [
+  "## 改动清单",
+  "",
+  "| 文件 | 改动 | 说明 |",
+  "|:---|---:|:---|",
+  "| `agent_nexus/auth.py:41` | +12 −3 | 回调校验 state，失败时**记录日志** |",
+  "| `tests/test_oauth_state.py` | +48 | 新增：cookie 丢失、state 不匹配 |",
+  "| `docs/auth.md` | +6 | 说明 `SameSite=Lax` 的取舍（\\| 是转义的竖线） |",
+  "",
+  "### 下一步",
+  "",
+  "1. 修复回调",
+  "   - [x] 用 `secrets.compare_digest` 比较 state",
+  "   - [x] 失败时跳到 `/login?error=state`",
+  "   - [ ] ~~改成 SameSite=None~~ *不需要*：Lax 已经够用",
+  "2. 补测试，详见 tests/test_oauth_state.py:12",
+  "3. 发版前看一下 ~/notes/release-todo.md 和 docs/设计/登录流程.md",
+  "",
+  "---",
+  "",
+  "> **注意**：日志在 /Users/lin/projects/agent-nexus/logs/auth.log，不在 `/api/agents`（那是路由，不是文件）。",
+  "> 截图在下面。",
+  "",
+  "![回调失败时的登录页](docs/shots/login-error.png)",
+  "",
+  "外部图片默认不加载：![架构图](https://example.com/arch.png)",
+  "",
+  "导出的报告：`out/report.pdf`；不存在的文件不会变成链接：`agent_nexus/missing.py`。版本 v0.8.35、e.g. node.js 也不是。",
+  "",
+  "```python",
+  "if not expected or not secrets.compare_digest(state or \"\", expected):",
+  "    return RedirectResponse(\"/login?error=state\")",
+  "```",
+].join("\n");
+
 const HISTORY = {
   "c-7f3a": [
     { type: "user", text: "登录后偶尔跳回登录页，帮我查一下原因并修复", t: NOW - 1400 },
@@ -89,6 +129,13 @@ const HISTORY = {
     { type: "file_change", path: "agent_nexus/auth.py", kind: "edit", diff: DIFF, t: NOW - 1370 },
     { type: "usage", context: { used: 612400, limit: 1000000, model: "claude-opus-4-5" }, turn: { input: 18240, output: 2130, cached: 410000, cost_usd: 0.083 }, t: NOW - 1361 },
     { type: "status", state: "done", usage: { input: 18240, output: 2130, cost_usd: 0.083 }, t: NOW - 1360 },
+  ],
+  "c-md17": [
+    { type: "user", text: "把这次 OAuth 修复的改动整理成清单：\n\n- 用**表格**列出文件\n- 附上截图 `docs/shots/login-error.png`\n\n改动在 agent_nexus/auth.py 里。", t: NOW - 10900 },
+    { type: "tool", id: "m1", name: "Read", title: "agent_nexus/auth.py", status: "ok", input: { file_path: "agent_nexus/auth.py" }, output: "（读取了 212 行）", t: NOW - 10890 },
+    { type: "file_change", path: "tests/test_oauth_state.py", kind: "add", diff: "@@ -0,0 +1,3 @@\n+def test_state_mismatch():\n+    ...\n+", t: NOW - 10880 },
+    { type: "message", role: "assistant", text: MD_DEMO, t: NOW - 10870 },
+    { type: "status", state: "done", t: NOW - 10860 },
   ],
   // Codex: its own config hints arrive as level "notice" (grey, once per session); a warn stays yellow (§16.6)
   "x-9e01": [
@@ -227,25 +274,134 @@ export function createFakeApi({ activeRun = true } = {}) {
     return { text: texts.join("\n\n"), segments, unknown_vars: [...unknown], variables: values };
   }
 
+  // §17: a tiny file system on 本机 for agent_file_stat / agent_file_read (relative paths join the folder)
+  const AUTH_PY = Array.from({ length: 212 }, (_, i) => i === 40 ? '    expected = request.session.pop("oauth_state", None)' : i === 41 ? "    if not expected or not secrets.compare_digest(state or \"\", expected):" : `# auth.py line ${i + 1}`).join("\n");
+  const FS = {
+    [`${P}/agent-nexus/agent_nexus/auth.py`]: { kind: "text", text: AUTH_PY },
+    [`${P}/agent-nexus/tests/test_oauth_state.py`]: { kind: "text", text: Array.from({ length: 48 }, (_, i) => i === 11 ? "def test_state_mismatch(client):" : `# test line ${i + 1}`).join("\n") },
+    [`${P}/agent-nexus/docs/auth.md`]: { kind: "text", text: "# 登录\n\nSameSite=Lax：跨站导航会带上 cookie。\n" },
+    [`${P}/agent-nexus/docs/设计/登录流程.md`]: { kind: "text", text: "# 登录流程\n\n1. 跳到 GitHub\n2. 回调\n" },
+    [`${HOME}/notes/release-todo.md`]: { kind: "text", text: "- [ ] 更新 CHANGELOG\n- [ ] 打 tag\n" },
+    [`${P}/agent-nexus/logs/auth.log`]: { kind: "text", text: Array.from({ length: 30 }, (_, i) => `2026-11-28 10:${String(i).padStart(2, "0")} WARNING oauth state mismatch (cookie lost?)`).join("\n") },
+    [`${P}/agent-nexus/docs/shots/login-error.png`]: { kind: "image", mime: "image/png", png: true },
+    [`${P}/agent-nexus/out/report.pdf`]: { kind: "binary", mime: "application/pdf", text: "%PDF-1.4 demo report\n" },
+  };
+  let pngB64 = null;
+  function demoPng() {   // drawn once: a mock screenshot of the login page with its error banner
+    if (pngB64) return pngB64;
+    const c = document.createElement("canvas"); c.width = 480; c.height = 280;
+    const g = c.getContext("2d");
+    g.fillStyle = "#f4f6fa"; g.fillRect(0, 0, 480, 280);
+    g.fillStyle = "#fff"; g.fillRect(120, 40, 240, 200); g.strokeStyle = "#d6dbe3"; g.strokeRect(120.5, 40.5, 240, 200);
+    g.fillStyle = "#fdecea"; g.fillRect(136, 60, 208, 34); g.fillStyle = "#b42318"; g.font = "13px sans-serif"; g.fillText("登录已过期（state 不匹配），请重试", 146, 82);
+    g.fillStyle = "#e7eaf0"; g.fillRect(136, 112, 208, 28); g.fillRect(136, 150, 208, 28);
+    g.fillStyle = "#0a6879"; g.fillRect(136, 194, 208, 30); g.fillStyle = "#fff"; g.fillText("用 GitHub 登录", 196, 214);
+    pngB64 = c.toDataURL("image/png").split(",")[1];
+    return pngB64;
+  }
+  const b64utf8 = (text) => btoa(String.fromCharCode(...new TextEncoder().encode(text)));
+  function fsResolve(raw, base) {
+    let path = String(raw || "").trim();
+    if (path.startsWith("~/")) path = `${HOME}/${path.slice(2)}`;
+    else if (!path.startsWith("/")) { if (!base) return null; path = `${base}/${path.replace(/^\.\//, "")}`; }
+    const out = [];
+    for (const part of path.split("/")) { if (part === "..") out.pop(); else if (part && part !== ".") out.push(part); }
+    return `/${out.join("/")}`;
+  }
+  function fsBytes(f) { return f.b64 !== undefined ? f.b64 : f.png ? demoPng() : b64utf8(f.text || ""); }
+  const fsSize = (f) => Math.floor(fsBytes(f).length * 3 / 4);
+
+  // §18: attachments land in a run's (or a stage's) tmp folder on the device; the fake keeps their bytes in FS
+  const TMP_BASE = `${HOME}/.anx/agents/tmp`;
+  const uploads = new Map();
+  const attKind = (name) => /\.(png|jpe?g|gif|webp|bmp)$/i.test(name) ? "image" : /\.(md|txt|log|json|csv|py|js|ts)$/i.test(name) ? "text" : "binary";
+  const attMime = (name) => ({ png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", pdf: "application/pdf", md: "text/markdown", txt: "text/plain" })[(name.split(".").pop() || "").toLowerCase()] || "application/octet-stream";
+  function userEvent(prompt, attachments) {
+    const files = (attachments || []).map((path) => { const f = FS[path]; return f ? { path, name: path.split("/").pop(), size: fsSize(f), mime: f.mime } : null; }).filter(Boolean);
+    return files.length ? { type: "user", text: prompt || "", attachments: files } : { type: "user", text: prompt || "" };
+  }
+  function attachOk(paths) {
+    for (const path of paths || []) if (!FS[path] || !path.startsWith(`${TMP_BASE}/`)) return { error: `附件 ${String(path).split("/").pop()} 已经不在了，请重新添加`, code: "not_found" };
+    return null;
+  }
+
   const ops = {
-    agent_info: (p, device) => ({ agents: agents.get(device || "dev-mbp").map((a) => ({ ...a, install: installJobs.get(`${device}:${a.kind}`)?.public() || null })) }),
+    agent_attach_begin: () => { const stage = `s${Math.random().toString(16).slice(2, 10)}`; return { stage, dir: `${TMP_BASE}/${stage}/attachments` }; },
+    agent_attach_put: async ({ rid, stage, name, size, offset, data, id }) => {
+      await wait(params.get("slowup") ? 400 : 30);
+      const folder = `${TMP_BASE}/${rid || stage}/attachments`;
+      let up = id ? uploads.get(id) : null;
+      if (!up) {
+        if (offset) return { error: "上传要从头开始", code: "bad_request" };
+        const safe = String(name || "file").replace(/[\\/:*?"<>|,%!^&]/g, "_");
+        up = { id: `u${Math.random().toString(16).slice(2, 8)}`, folder, name: safe, size, parts: [] };
+        uploads.set(up.id, up);
+      }
+      up.parts.push(atob(data || ""));
+      const have = up.parts.reduce((n, x) => n + x.length, 0);
+      if (have < size) return { id: up.id, have, size, done: false };
+      let final = up.name, n = 1;
+      while (FS[`${folder}/${final}`]) { n += 1; final = up.name.replace(/(\.[^.]*)?$/, (ext) => ` (${n})${ext || ""}`); }
+      const path = `${folder}/${final}`;
+      FS[path] = { kind: attKind(final), mime: attMime(final), b64: btoa(up.parts.join("")), text: attKind(final) === "text" ? new TextDecoder().decode(Uint8Array.from(up.parts.join(""), (c) => c.charCodeAt(0))) : undefined };
+      uploads.delete(up.id);
+      return { id: up.id, have, size, done: true, path, name: final, display: name, mime: attMime(final) };
+    },
+    agent_attach_drop: ({ path, id }) => { if (id) uploads.delete(id); if (path) delete FS[path]; return { ok: true }; },
+    agent_file_stat: ({ base, paths = [] }, device) => ({ files: paths.map((raw) => {
+      const path = fsResolve(raw, base);
+      const f = device && device !== "dev-mbp" ? null : FS[path];
+      if (!f) return { raw, path, exists: false };
+      return { raw, path, exists: true, dir: false, size: fsSize(f), mtime_ns: 1, kind: f.kind, mime: f.mime || "text/plain", name: path.split("/").pop() };
+    }) }),
+    agent_file_read: ({ path, mode = "bytes", line = 1, offset = 0, length = 1 << 20 }) => {
+      const f = FS[path];
+      if (!f) return { error: `文件不存在：${path}`, code: "missing" };
+      const name = path.split("/").pop();
+      if (mode === "text") {
+        const lines = String(f.text || "").split("\n");
+        const first = Math.max(1, Math.min(line, lines.length) - 250);
+        return { path, name, size: fsSize(f), text: lines.slice(first - 1, first - 1 + 1000).join("\n"), first_line: first, total_lines: lines.length, truncated: first > 1, scanned_all: true, encoding: "utf-8" };
+      }
+      const all = atob(fsBytes(f));
+      const part = all.slice(offset, offset + length);
+      return { path, name, size: all.length, offset, data: btoa(part), mime: f.mime || "application/octet-stream", eof: offset + part.length >= all.length };
+    },
+    agent_info: (p, device) => ({ agents: agents.get(device || "dev-mbp").map((a) => ({ ...a, install: installJobs.get(`${device}:${a.kind}`)?.public() || null })),
+      // ?caps=old: a device whose AgentHub predates attachments and moving sessions (no paperclip, no relocation)
+      ...(params.get("caps") === "old" ? {} : { caps: { attachments: { chunk: 512 * 1024, file_max: 50 * 1024 * 1024, files: 10, message_max: 100 * 1024 * 1024 }, relocate: 1 } }) }),
     agent_sessions: () => ({ sessions: SESSIONS.map((s) => ({ ...s, ...(meta.get(s.id) || {}) })) }),
     agent_session_read: ({ id }) => { if (!HISTORY[id]) return { events: [{ type: "user", text: SESSIONS.find((s) => s.id === id)?.title || "" }, { type: "message", role: "assistant", text: "（演示数据：这个会话只有标题。）" }, { type: "status", state: "done" }] }; return { events: HISTORY[id], address: "claude-agent-nexus@林的 MacBook Pro" }; },
     agent_session_meta: (p) => { const { kind, id, delete_file, ...rest } = p; if (delete_file) { const i = SESSIONS.findIndex((s) => s.id === id); if (i >= 0) SESSIONS.splice(i, 1); } else meta.set(id, { ...(meta.get(id) || {}), ...rest }); return { ok: true }; },
     agent_run_list: () => ({ runs: [...runs.values()].filter((r) => r.state !== "closed").map(({ rid, kind, session_id, workdir, state, started_at, address }) => ({ rid, kind, session_id, workdir, state, started_at, address })) }),
-    agent_run_open: ({ kind, workdir, resume_id, prompt, model }) => {
+    agent_run_open: ({ kind, workdir, resume_id, prompt, model, attachments, stage }) => {
+      const bad = attachOk(attachments);
+      if (bad) return bad;
+      const session = resume_id ? SESSIONS.find((x) => x.id === resume_id) : null;
+      let moved = null;
+      if (session?.cwd_missing && workdir && workdir !== session.cwd) {
+        // §14: Codex / Claude continue in the new folder (Claude from a copy of the transcript); others refuse
+        if (!["claude", "codex"].includes(session.kind)) return { error: "这个 CLI 的会话和它原来的目录绑定，不能换到别的目录续接；可以在其他目录新开对话", code: "relocate_unsupported" };
+        moved = session.cwd;
+        Object.assign(session, { cwd: workdir, cwd_missing: false });
+      }
       const run = newRun(kind, resume_id || `n-${Date.now()}`, workdir, [], "starting");
+      if (stage) { runs.delete(run.rid); run.rid = stage; runs.set(stage, run); }   // the stage folder is the run's
       run.model = model || "";
       push(run, { type: "status", state: "starting" });
       if (model) push(run, { type: "model", model });
-      script(run, demoReply(prompt, run.model));
-      return { rid: run.rid, session_id: run.session_id, address: run.address, model: model || null };
+      push(run, userEvent(prompt, attachments));
+      script(run, demoReply(prompt, run.model, attachments));
+      return { rid: run.rid, session_id: run.session_id, address: run.address, model: model || null, ...(moved ? { moved_from: moved } : {}) };
     },
-    agent_run_send: ({ rid, prompt, model }) => {
+    agent_run_send: ({ rid, prompt, model, attachments }) => {
       const run = runs.get(rid);
       if (!run) return { error: "对话已结束", code: "not_found" };
+      const bad = attachOk(attachments);
+      if (bad) return bad;
       if (model !== undefined && model !== run.model) { run.model = model; push(run, { type: "model", model: model || null }); }
-      script(run, demoReply(prompt, run.model));
+      push(run, userEvent(prompt, attachments));
+      script(run, demoReply(prompt, run.model, attachments));
       return { ok: true, model: run.model || null };
     },
     // §16.7: what the model menu offers (Codex asks its app-server: model/list)
@@ -313,12 +469,14 @@ export function createFakeApi({ activeRun = true } = {}) {
   };
 
   let demoUsed = 21000;
-  function demoReply(prompt, model = "") {
-    const short = String(prompt || "").slice(0, 40);
+  function demoReply(prompt, model = "", attachments = []) {
+    const short = String(prompt || "").slice(0, 40) || "看看附件";
     demoUsed += 3420;
+    const seen = (attachments || []).length ? [{ type: "message", role: "assistant", text: `（演示）收到 ${attachments.length} 个附件：\n\n${attachments.map((p) => `- ${p}`).join("\n")}\n\n`, delta: false }] : [];
     return [
       { type: "status", state: "running" },
       { type: "thinking", text: `理解任务：${short}` },
+      ...seen,
       { type: "tool", id: `t${Math.random()}`, name: "Bash", title: "git status --short", status: "ok", input: { command: "git status --short" }, output: " M agent_nexus/auth.py\n?? tests/test_oauth_state.py" },
       { type: "message", role: "assistant", text: "（演示）我看了一下工作区：", delta: false },
       { type: "message", role: "assistant", text: "有 1 个修改、1 个新文件，", delta: true },
@@ -337,6 +495,8 @@ export function createFakeApi({ activeRun = true } = {}) {
       try { return await fn(p, device); } catch (error) { return { error: String(error.message || error), code: "internal" }; }
     },
     // ?gw=off: 本机 not joined (the local console then lists only 本机 and says why)
+    // §17: the local console loads an external image on a click (?extimg=off: like the cloud console, a new tab)
+    externalImages: params.get("extimg") !== "off",
     async devices() { await wait(40); return params.get("gw") === "off" ? [{ ...DEVICES[0], gid: undefined }] : DEVICES; },
     devicesNote: () => (params.get("gw") === "off" ? "加入网关后，也能在其他设备上运行 Agent" : ""),
     // files/1 listings of another device (the local console's /api/remote/devices/{id}/files)

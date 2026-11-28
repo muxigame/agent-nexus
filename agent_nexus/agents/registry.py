@@ -68,6 +68,9 @@ class AgentDef:
     adapter: str = "text"
     command: list[str] = field(default_factory=list)
     resume: bool = False
+    #: a session can be continued in another folder than the one it was recorded in (§19): Codex (``-C``), Claude
+    #: Code (its transcript copied into the new folder's project directory first); not dsh / Gemini (bound to it)
+    relocate: bool = False
     approvals: bool = False
     permission_flags: dict[str, list[str]] = field(default_factory=dict)
     session_globs: list[str] = field(default_factory=list)
@@ -98,7 +101,8 @@ class AgentDef:
     model_hints: list[dict] = field(default_factory=list)
 
     def supports(self) -> dict[str, bool]:
-        return {"resume": self.resume, "approvals": self.approvals, "stream": self.stream}
+        return {"resume": self.resume, "relocate": self.relocate and self.resume, "approvals": self.approvals,
+                "stream": self.stream}
 
     def models(self) -> dict[str, Any]:
         """``{flag, protocol, hints}``: whether a model can be chosen by flag or over the CLI's protocol (ACP)."""
@@ -141,7 +145,7 @@ def builtin_definitions() -> dict[str, AgentDef]:
         # out until `claude auth login` -- found when no standalone claude is installed
         extra_paths={"darwin": ["{HOME}/Library/Application Support/Claude/claude-code/*/*/claude.app/Contents/MacOS/claude"],
                      "windows": ["{APPDATA}/Claude/claude-code/*/claude.exe"]},  # seen: 2.1.280 on Windows
-        resume=True, approvals=True,
+        resume=True, relocate=True, approvals=True,
         # "ask": the runner adds --mcp-config with anx's approval server and fills {approval_tool} (§5).
         permission_flags={"ask": ["--permission-prompt-tool", "{approval_tool}"],
                           "edits": ["--permission-mode", "acceptEdits"],
@@ -171,7 +175,7 @@ def builtin_definitions() -> dict[str, AgentDef]:
         resume_command=["{bin}", "exec", "--json", "--skip-git-repo-check", "-C", "{workdir}", "{options...}",
                         "resume", "{resume_id}", "{prompt}"],
         system_prompt_args=["-c", "developer_instructions={system_prompt}"],
-        resume=True, approvals=False,  # exec mode cannot ask: the sandbox refuses what is out of bounds
+        resume=True, relocate=True, approvals=False,  # exec mode cannot ask: the sandbox refuses what is out of bounds
         # `codex exec` has no --ask-for-approval: the same setting as a config override.
         permission_flags={"ask": ["--sandbox", "workspace-write", "-c", 'approval_policy="never"'],
                           "edits": ["--sandbox", "workspace-write"],
@@ -299,7 +303,7 @@ def _apply(base: AgentDef, spec: dict) -> AgentDef:
             allowed = ADAPTERS if base.builtin else CUSTOM_ADAPTERS
             if value in allowed:
                 changes[key] = value
-        elif key in ("resume", "approvals", "stream"):
+        elif key in ("resume", "relocate", "approvals", "stream"):
             if isinstance(value, bool):
                 changes[key] = value
         elif key == "node_min":

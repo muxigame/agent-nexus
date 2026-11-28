@@ -68,7 +68,8 @@ def test_builtin_definitions_cover_the_four_clis():
     assert defs["codex"].permission_flags["readonly"] == ["--sandbox", "read-only"]
     assert defs["claude"].permission_flags["full"] == ["--dangerously-skip-permissions"]
     assert defs["claude"].install_alt and defs["codex"].install_alt and not defs["dsh"].install_alt
-    assert defs["claude"].supports() == {"resume": True, "approvals": True, "stream": True}
+    assert defs["claude"].supports() == {"resume": True, "relocate": True, "approvals": True, "stream": True}
+    assert defs["dsh"].supports()["relocate"] is False and defs["gemini"].supports()["relocate"] is False
 
 
 def test_custom_overrides_add_and_hide_clis():
@@ -255,7 +256,7 @@ def test_probe_all_and_info_shape(box):
     view = registry.info(defs["codex"], results["codex"], None)
     for key in ("kind", "label", "installed", "path", "version", "login", "install", "supports"):
         assert key in view
-    assert view["supports"] == {"resume": True, "approvals": False, "stream": True}
+    assert view["supports"] == {"resume": True, "relocate": True, "approvals": False, "stream": True}
 
 
 # -- installs ------------------------------------------------------------------------------------------------

@@ -916,3 +916,101 @@ def test_codex_fork_that_points_into_its_parent_is_titled_without_a_scan(home, m
     monkeypatch.setattr(S, "_codex_scan_title", lambda *a, **k: calls.append(a) or real(*a, **k))
     fork = by_id(S.discover(None, home, kind="codex", env={}))[("codex", FORK)]
     assert fork["title"] == "分叉自己的问题" and not calls
+
+
+# ------------------------------------------------------------------------------------------ moving a session (§19)
+
+def test_claude_project_folder_names_match_the_cli():
+    # the rule read from Claude Code 2.1.332: [^A-Za-z0-9] -> "-", cut at 200 plus "-" + base36(|java hash|)
+    assert S.claude_project_name("/home/user/agent-nexus") == "-home-user-agent-nexus"
+    assert S.claude_project_name("D:\\work\\proj") == "D--work-proj"
+    assert S.claude_project_name("/x/é_b") == "-x---b"
+    assert S.claude_project_name("/x/😀b") == "-x---b", "UTF-16: a character outside the BMP is two dashes"
+    # node -e 'h=0;for(c of ...)...' on the same strings: feo44x and nzr6rt
+    long = S.claude_project_name("/" + "a" * 250)
+    assert len(long) == 200 + 7 and long.endswith("-feo44x")
+    assert S.claude_project_name("/x/😀" + "c" * 240).endswith("-nzr6rt")
+    assert S.claude_project_dir(Path("/h"), "/w", {}) == Path("/h/.claude/projects/-w")
+    assert S.claude_project_dir(Path("/h"), "/w", {"CLAUDE_CONFIG_DIR": "/cfg"}) == Path("/cfg/projects/-w")
+
+
+def test_listing_takes_the_folder_of_the_latest_records(home):
+    claude = home / ".claude" / "projects" / "-home-u-proj" / f"{CLAUDE_1}.jsonl"
+    with claude.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"type": "user", "cwd": "/home/u/moved", "sessionId": CLAUDE_1,
+                                 "timestamp": "2026-11-21T10:00:00.000Z",
+                                 "message": {"role": "user", "content": "go on"}}) + "\n")
+    rollout = next((home / ".codex" / "sessions").rglob(f"*{CODEX_1}.jsonl"))
+    with rollout.open("a", encoding="utf-8") as handle:
+        handle.write(_codex_line("turn_context", {"cwd": "/home/u/elsewhere", "model": "gpt-5"}) + "\n")
+    found = by_id(S.discover(None, home, env={}))
+    assert found[("claude", CLAUDE_1)]["cwd"] == "/home/u/moved"
+    assert set(found[("claude", CLAUDE_1)]["cwds"]) == {"/home/u/moved", "/home/u/proj"}
+    assert found[("codex", CODEX_1)]["cwd"] == "/home/u/elsewhere"
+    assert "/home/u/proj" in found[("codex", CODEX_1)]["cwds"]
+
+
+def test_relocate_claude_copies_and_the_merge_lists_the_newest_folder(home, tmp_path):
+    original = home / ".claude" / "projects" / "-home-u-proj" / f"{CLAUDE_1}.jsonl"
+    (original.parent / CLAUDE_1 / "tool-results").mkdir(parents=True)
+    (original.parent / CLAUDE_1 / "tool-results" / "r1.txt").write_text("out")
+    before = original.read_bytes()
+    session = S.find(None, home, "claude", CLAUDE_1, env={})
+    new = tmp_path / "new place"
+    new.mkdir()
+    copy = S.relocate_claude(home, session, str(new), env={})
+    assert copy == home / ".claude" / "projects" / S.claude_project_name(os.path.realpath(new)) / f"{CLAUDE_1}.jsonl"
+    assert copy.read_bytes() == before and original.read_bytes() == before
+    assert (copy.parent / CLAUDE_1 / "tool-results" / "r1.txt").read_text() == "out"
+    assert not [p for p in copy.parent.iterdir() if p.name.endswith(".tmp")]
+    # the CLI appends to the copy: the listing follows it, the original stays as it was
+    with copy.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"type": "user", "cwd": str(new), "sessionId": CLAUDE_1,
+                                 "timestamp": "2026-11-29T10:00:00.000Z",
+                                 "message": {"role": "user", "content": "继续"}}) + "\n")
+    touch(copy, time.time() + 5)
+    S.clear_cache()
+    listed = S.find(None, home, "claude", CLAUDE_1, env={})
+    assert listed["cwd"] == str(new) and listed["file"] == str(copy) and len(listed["files"]) == 2
+    assert S.relocate_claude(home, listed, str(new), env={}) == copy, "a second move into the folder copies nothing"
+    assert original.read_bytes() == before
+    assert S.same_dir(str(new) + "/", str(new)) and not S.same_dir(str(new), str(tmp_path))
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX links; Node keeps a junction's path on Windows")
+def test_relocate_claude_through_a_linked_folder_uses_the_physical_path(home, tmp_path):
+    """Claude Code names the project folder after process.cwd(), which resolves links."""
+    session = S.find(None, home, "claude", CLAUDE_1, env={})
+    real = tmp_path / "real" / "work"
+    real.mkdir(parents=True)
+    (tmp_path / "link").symlink_to(tmp_path / "real")
+    logical = str(tmp_path / "link" / "work")
+    copy = S.relocate_claude(home, session, logical, env={})
+    projects = home / ".claude" / "projects"
+    assert copy == projects / S.claude_project_name(os.path.realpath(real)) / f"{CLAUDE_1}.jsonl"
+    assert copy.is_file() and not (projects / S.claude_project_name(logical)).exists()
+
+
+def test_relocate_claude_as_root_never_follows_the_accounts_links(home, tmp_path):
+    if not hasattr(os, "geteuid") or os.geteuid() != 0:
+        pytest.skip("needs root (the system service case)")
+    uid = 54321
+    for folder, _dirs, files in os.walk(home):
+        os.chown(folder, uid, uid)
+        for name in files:
+            os.chown(os.path.join(folder, name), uid, uid)
+    session = S.find(None, home, "claude", CLAUDE_1, env={})
+    work = home / "proj"
+    work.mkdir()
+    os.chown(work, uid, uid)
+    copy = S.relocate_claude(home, session, str(work), env={})
+    assert copy.stat().st_uid == uid and copy.parent.stat().st_uid == uid
+    # the account points the target project folder at a root-only place: refused, nothing written there
+    secret = tmp_path / "rootonly"
+    secret.mkdir()
+    other = home / "other"
+    other.mkdir()
+    (home / ".claude" / "projects" / S.claude_project_name(str(other))).symlink_to(secret)
+    with pytest.raises(OSError):
+        S.relocate_claude(home, session, str(other), env={})
+    assert not list(secret.iterdir())

@@ -147,7 +147,7 @@ test("the settings are one chip row inside the composer; a light head line repla
   assert.ok(!chat.includes('"chat-bar"') && !chat.includes("chat-bar-picks") && !chat.includes("function pick("), "the old toolbar is gone");
   assert.match(chat, /const chips = el\("div", \{ class: "chat-chips", role: "toolbar", "aria-label": "对话设置" \}\)/);
   // the chips sit in the composer's foot, left of usage / stop / send
-  assert.match(chat, /el\("div", \{ class: "chat-composer-foot" \}, chips, el\("div", \{ class: "chat-composer-actions" \}, usageNode, stopBtn, sendBtn\)\)/);
+  assert.match(chat, /el\("div", \{ class: "chat-composer-foot" \}, chips, el\("div", \{ class: "chat-composer-actions" \}, attachBtn, usageNode, stopBtn, sendBtn\)\)/);
   // each chip: a button with the full text as its name, reusing the existing menus
   assert.match(chat, /class: `chat-chip \$\{cls\}`, type: "button", "aria-haspopup": "true", "aria-expanded": "false", title: name, "aria-label": name/);
   for (const [cls, opener] of [["chat-chip-device", "deviceMenu("], ["chat-chip-agent", "agentMenu("], ["chat-chip-dir", "dirMenu("], ["chat-chip-perm", "permissionMenu("]]) {
@@ -284,7 +284,7 @@ test("picking a folder on another device is gateway mode; the run, the session a
   assert.ok(chat.includes("function useDirect(path) {") && chat.slice(chat.indexOf("function useDirect(path) {"), chat.indexOf("function useTarget(")).includes("S.context = directContext()"));
   // send: the context goes to agent_run_open; the runner's cwd is the session's when resuming, else the hub's default
   assert.ok(chat.includes('context: gatewayCtx() ? { mode: "gateway", device: S.context.device, workdir: S.context.workdir } : { mode: "direct" }'));
-  assert.ok(chat.includes('workdir: gatewayCtx() ? S.session?.cwd || "" : S.workdir'));
+  assert.ok(chat.includes('workdir: relocate || (gatewayCtx() ? S.session?.cwd || "" : S.workdir)'));
   // a session / run brings its context back; per-device prefs (§16.2) keep it
   const open = chat.slice(chat.indexOf("async function openSession("), chat.indexOf("function attachRun("));
   assert.ok(open.includes("adoptContext(s.context)"));
@@ -332,4 +332,86 @@ test("both consoles give the chat what the gateway folders need", () => {
   const css = read("ui/ui.css");
   for (const rule of [".chat-chip-dir.via {", ".chat-dir-dev-head {", ".chat-dir-warn {", ".chat-ctx.warn {"]) assert.ok(css.includes(rule), rule);
   assert.ok(!css.includes(".chat-ctx-choices") && !css.includes(".chat-ctx-browse"), "the old dialog's rules are gone");
+});
+
+// §18: attachments
+test("attachments: pasted screenshots get a dated name, chunks encode like Buffer", async () => {
+  const { pastedName, toB64 } = await load("ui/chat.js");
+  const at = new Date(2026, 10, 28, 9, 5, 7);
+  assert.equal(pastedName({ name: "image.png", type: "image/png" }, at), "截图-20261128-090507.png");
+  assert.equal(pastedName({ name: "", type: "image/jpeg" }, at), "截图-20261128-090507.jpg");
+  assert.equal(pastedName({ name: "设计稿.png", type: "image/png" }, at), "设计稿.png");
+  assert.equal(pastedName({ name: "", type: "application/pdf" }, at), "file");
+  const bytes = new Uint8Array(300000).map((_, i) => (i * 7) & 255);
+  assert.equal(toB64(bytes), Buffer.from(bytes).toString("base64"));
+  assert.equal(toB64(new Uint8Array(0)), "");
+});
+
+test("attachments are uploaded through agent_attach_* and sent with the message", () => {
+  const chat = read("ui/chat.js");
+  for (const op of ["agent_attach_begin", "agent_attach_put", "agent_attach_drop"]) assert.ok(chat.includes(`"${op}"`), op);
+  assert.ok(/sendParams\.attachments = files\.map/.test(chat) && /params\.attachments = files\.map/.test(chat), "both send paths pass the paths");
+  assert.ok(chat.includes("S.caps?.attachments"), "the paperclip only where the device's AgentHub takes attachments");
+  assert.ok(chat.includes('addEventListener("paste"') && chat.includes('addEventListener("drop"'), "paste and drag & drop");
+  assert.ok(/case "user": return \(\) => userNode\(ev\.text, ev\.attachments\)/.test(chat), "a rebuilt user block keeps its attachments");
+  // thumbnails are data: URLs (the cloud console's CSP has no blob: images); never a blob opened as a page
+  assert.ok(!/createObjectURL\(item\.file\)/.test(chat));
+});
+
+test("a session whose folder is gone: 选择新目录续接 only where the CLI can move (§19)", () => {
+  const chat = read("ui/chat.js");
+  assert.ok(chat.includes('supports?.relocate === true'));
+  assert.ok(chat.includes("选择新目录续接") && chat.includes("在其他目录新开对话"));
+  assert.ok(/workdir: relocate \|\|/.test(chat), "the picked folder is the run's workdir, the resume id unchanged");
+  assert.ok(chat.includes("relocateTo: null"), "a new chat / another session forgets the picked folder");
+});
+
+test("the 目录 chip of a session whose folder is gone picks the folder to continue in (review: chip did nothing)", () => {
+  const chat = read("ui/chat.js");
+  const use = chat.slice(chat.indexOf("function useDirect("), chat.indexOf("function useTarget("));
+  assert.ok(/if \(S\.session\?\.cwd_missing && !S\.rid\) \{\s*if \(canRelocate\(S\.session\.kind\)\) S\.relocateTo = path;\s*else newChat\(\);/.test(use), use);
+  assert.ok(chat.includes("（已不存在）") && chat.includes("const goneDir"), "the chip names the missing folder, not a leftover one");
+});
+
+test("the document stays bounded while the user reads above or after 显示更早 (review: DOM grew without limit)", () => {
+  const chat = read("ui/chat.js");
+  assert.ok(chat.includes("DOM_HARD = DOM_KEEP + PAGE * 2"));
+  const trim = chat.slice(chat.indexOf("function trimStream()"), chat.indexOf("function remake("));
+  assert.ok(!/if \(!stick\) return;/.test(trim), "trimStream also runs when not stuck to the bottom");
+  assert.ok(trim.includes("getBoundingClientRect().bottom < line") && trim.includes("scroller.scrollTop +="), "only blocks above the view, the view kept in place");
+  assert.ok(/function holdBack\(ev\)[\s\S]*needsUser\(ev\)[\s\S]*DOM_HARD/.test(chat), "new blocks wait in `newer` past the cap; approvals never do");
+  assert.ok(chat.includes("有 ${newer.length} 条新内容") && /function flushNewer\(\)/.test(chat));
+  const earlier = chat.slice(chat.indexOf("function showEarlier()"), chat.indexOf("function keepOpen("));
+  assert.ok(earlier.includes("stream.childElementCount > DOM_HARD") && earlier.includes("newer.unshift"), "显示更早 keeps the total capped");
+  assert.ok(/function pushOlder\(moved\)[\s\S]*older\.splice\(lo, 0, entry\)/.test(chat), "a block kept in place sorts back by entry.n");
+});
+
+test("every sent attachment has a download button; source files preview as text", () => {
+  const chat = read("ui/chat.js");
+  const chip = chat.slice(chat.indexOf("function attChip("), chat.indexOf("function assistantNode("));
+  assert.ok(!/text \? el\("button", \{ class: "chat-msg-att-dl"/.test(chip) && chip.includes('class: "chat-msg-att-dl"'));
+  const line = chat.split("\n").find((l) => l.startsWith("const TEXT_NAME = "));
+  for (const ext of ["tsx", "vue", "html?", "css", "rb", "kt", "cs"]) assert.ok(line.includes(`|${ext}|`), ext);
+});
+
+test("external images: a failed load says so with retry / open, and the cursor is not zoom-in", () => {
+  const chat = read("ui/chat.js");
+  const css = read("ui/ui.css");
+  assert.ok(chat.includes("外部图片加载失败") && chat.includes('addEventListener("error"'));
+  assert.ok(/\.chat-img\.ext \{ cursor: alias; \}/.test(css));
+});
+
+test("network paths are never stat'ed or loaded on their own (UNC / //host: NTLM leak on Windows)", () => {
+  const chat = read("ui/chat.js");
+  assert.ok(chat.includes("import { isNetworkPath, parseBlocks, stableCut }"));
+  for (const fn of ["function fileSpan(", "function imageSpan(", "function legacyStat("]) {
+    const body = chat.slice(chat.indexOf(fn), chat.indexOf(fn) + 400);
+    assert.ok(body.includes("isNetworkPath("), fn);
+  }
+  assert.ok(/if \(!ref \|\| isNetworkPath\(ref\.raw\)\) \{ node\.dataset\.s = "0"; continue; \}/.test(chat), "scanPaths skips them");
+});
+
+test("phones: the folder chip comes right after an icon-only device chip", () => {
+  const css = read("ui/ui.css");
+  assert.ok(/@container chat \(max-width: 440px\) \{[\s\S]*\.chat-chip-dir \{ order: -1; \}[\s\S]*\.chat-chip-device \.chat-chip-value \{ display: none; \}/.test(css));
 });
